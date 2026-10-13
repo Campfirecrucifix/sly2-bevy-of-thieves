@@ -1,0 +1,24 @@
+# Sly 2 recomp settings (example). Copy to settings.toml next to the game executable;
+# the game writes a default settings.toml on first run if none exists.
+# empty = "Sly 2 - Band of Thieves (USA).iso" next to the executable
+iso = ""
+
+[video]
+width = 1920
+height = 1080
+fullscreen = false
+vsync = true
+# Hor+ for any aspect ratio (incl. 32:9); false = exact PS2 framing
+hor_plus = true
+# "off" (raster) | "raytraced" (Bevy Solari; needs a build with feature `rt` and a ray-tracing GPU)
+global_illumination = "off"
+ink_outlines = true
+
+[audio]
+master = 1
+music = 1
+sfx = 1
+
+[mods]
+# load order (first = lowest priority); empty = mods/load_order.txt
+order = []

@@ -1,0 +1,9 @@
+/recomp/target/
+*.iso
+*.ISO
+/recomp/settings.toml
+/recomp/controls.toml
+/recomp/mods/*/
+/recomp/mods/load_order.txt
+/recomp/shots/
+BASCUS-97316*/

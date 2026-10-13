@@ -1,0 +1,17 @@
+//! Engine work packages (ENGINE_PORT.md). Coordinator registers each WP module here after copy-back.
+pub mod disc;
+pub mod splice;
+pub mod world;
+pub mod audio;
+pub mod input;
+pub mod camera;
+pub mod gfx;
+pub mod physics;
+pub mod player;
+pub mod jobs;
+pub mod anim;
+pub mod game;
+pub mod classes;
+pub mod playerdraw;
+pub mod npcdraw;
+pub mod ui;

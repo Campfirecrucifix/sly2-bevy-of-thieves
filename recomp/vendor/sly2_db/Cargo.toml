@@ -1,0 +1,12 @@
+[package]
+name = "sly2_db"
+version = "0.1.0"
+edition = "2024"
+description = "Vendored subset of the Sly 2 analysis crate: only `final_build` (graphics settings, Hor+, mod load order)."
+publish = false
+
+[dependencies]
+bevy = { version = "0.20.0", default-features = false, optional = true }
+
+[features]
+bevy = ["dep:bevy"]
