@@ -1,4 +1,6 @@
-# Sly 2: Band of Thieves — PC port (Rust / Bevy) — EARLY ACCESS
+# Sly 2: Clockwerk Recompiled
+
+*A PC port of Sly 2: Band of Thieves in Rust / Bevy — rebuilt piece by piece, like the gang stealing back Clockwerk's parts. EARLY ACCESS.*
 
 > **⚠ Early Access / work in progress.** This is an unfinished recompilation. **Episode 1 is not fully
 > playable yet**: levels load and you can move Sly around, but many objects, missions, cutscenes and
