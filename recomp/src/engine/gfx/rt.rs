@@ -251,8 +251,16 @@ mod bevy_rt {
     /// Apply `shader_patches` (unit constants + the WP-R2 baked-light fill) to Solari shader sources
     /// as they finish loading (embedded assets go through the asset server, so they appear a few
     /// frames after startup — after game.rs `setup` inserted GlobalAmbientLight — before any pipeline).
-    pub fn patch_solari_shaders(mut ev: MessageReader<AssetEvent<Shader>>, mut shaders: ResMut<Assets<Shader>>, tuning: Res<RtTuning>, ambient: Option<Res<GlobalAmbientLight>>) {
-        let amb = ambient.map(|a| a.color.to_linear().to_vec3() * a.brightness).unwrap_or(Vec3::ZERO);
+    pub fn patch_solari_shaders(
+        mut ev: MessageReader<AssetEvent<Shader>>,
+        mut shaders: ResMut<Assets<Shader>>,
+        tuning: Res<RtTuning>,
+        ambient: Option<Res<GlobalAmbientLight>>,
+        mut orig: Local<Vec<(AssetId<Shader>, String)>>,
+        mut cams: Query<&mut EnvironmentMapLight, With<CmCamera>>,
+        mut images: ResMut<Assets<Image>>,
+    ) {
+        let amb = ambient.as_ref().map(|a| a.color.to_linear().to_vec3() * a.brightness).unwrap_or(Vec3::ZERO);
         let patches = shader_patches((amb * tuning.fill).to_array());
         let ids: Vec<_> = ev
             .read()
@@ -265,9 +273,26 @@ mod bevy_rt {
         for id in ids {
             let Some(mut sh) = shaders.get_mut(id) else { continue };
             if let Source::Wesl(src) = &sh.source {
+                orig.push((id, src.to_string()));
                 sh.source = Source::Wesl(apply_patches(src, &patches).into());
                 info!("rt: patched Solari shader {} (world units {} per metre, baked-light fill {:?} nits)", sh.path, UNITS_PER_METER, amb * tuning.fill);
             }
+        }
+        // WP-C9: the level sets GlobalAmbientLight from its LIGHT objects (gfx::light::level_ambient):
+        // re-patch the fill from the unpatched sources (the pipelines re-specialise on the shader
+        // change) and follow the sky light (rt_switch inserted it from the ambient of that moment).
+        if ambient.as_ref().is_some_and(|a| a.is_changed() && !a.is_added()) {
+            for (id, src) in orig.iter() {
+                if let Some(mut sh) = shaders.get_mut(*id) {
+                    sh.source = Source::Wesl(apply_patches(src, &patches).into());
+                }
+            }
+            if let Some(a) = ambient.as_ref().filter(|_| tuning.sky > 0.0) {
+                for mut env in cams.iter_mut() {
+                    *env = EnvironmentMapLight::solid_color(&mut images, a.color).with_intensity(a.brightness * tuning.sky);
+                }
+            }
+            info!("rt: ambient changed, baked-light fill {:?} nits", amb * tuning.fill);
         }
     }
 

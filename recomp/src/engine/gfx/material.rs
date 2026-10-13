@@ -84,6 +84,15 @@ pub struct MaterialDesc {
     pub depth_test: bool,
 }
 
+/// WP-C9: the GS modulates the source alpha by the vertex alpha (TFX MODULATE, TCC RGBA:
+/// As = At * Av / 0x80), so a prim whose vertex alphas drop below 0x80 is translucent under a
+/// blending ALPHA_1 even when its texture is opaque. Paris (table 2) moonlight shafts: object 4570
+/// records 81/87, shader 14 (kind 1, flags 2, ALPHA 0x44), opaque white texture, vertex alpha
+/// 0..0xff -> were drawn as solid white boxes. `colors` in `mesh::ps2_color` scale.
+pub fn vertex_alpha(colors: &[[f32; 4]]) -> bool {
+    colors.iter().any(|c| c[3] < 127.5 / 128.0)
+}
+
 /// Decode GS state into a material. ALPHA_1 = (A,B,C,D) 2-bit selectors at bits 0,2,4,6:
 /// 0x44 (Cs-Cd)*As+Cd = blend; 0x48 Cs*As+Cd = additive; 0 = Cs (opaque).
 pub fn material_from(sh: &Shader, texture_has_alpha: bool) -> MaterialDesc {

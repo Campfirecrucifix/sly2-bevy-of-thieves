@@ -63,6 +63,9 @@ pub struct ClassLink {
     /// WP-J15: job manager method rows (callee, object index, int args): 0x162660 (method 1258, class 132)
     /// / 0x165118 (method 1284, class 133); applied to `jobs::JobMgr` by `vm_state::apply_job_calls`.
     pub job_calls: Vec<(u32, u32, Vec<i32>)>,
+    /// WP-EP1d: FUN_002283d0 targets of the job code (job +0xcc in FUN_00162fd0, task +0xc4 in the
+    /// FUN_00163d18 enter): oids from `JobMgr::calls`, run on the class-26 warp instances by `drain_seq_starts`
+    pub warp_oids: Vec<i32>,
 }
 
 /// WP-J11: guard (class 57 family) +0xeb8 oids (count +0xed8, cap 8) and +0xedc objects (count +0xefc)
@@ -99,7 +102,7 @@ pub const RECORDED_INLINE: &[u32] = &[0x0010_0a00, 0x0010_daf0, 0x0010_db78, 0x0
 /// FUN_001dffe0 / FUN_001e0760 (class 114, `C2d8c48`).
 /// WP-EP1b adds FUN_0013b5c8 (method 389, classes 79 / 80 / 82 fuse, `k15_79::Proj::ee_sub_13b5c8`).
 pub const CLASS_CALLEES: &[u32] =
-    &[0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8];
+    &[0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8, 0x0013_3380];
 
 /// WP-J11: guard oid-list callees run on `ClassLink::guard_oids` (no class instance needed):
 /// FUN_0020aa78 (method 0x00102988), FUN_0020ab58.
@@ -221,6 +224,19 @@ impl ClassLink {
     /// ported class-114 instance is recorded. Returns the sequences started.
     pub fn drain_seq_starts(&mut self) -> usize {
         let mut n = 0;
+        // WP-EP1d: the job code's `*(obj + 0x40) |= 0x100; FUN_002283d0(obj)` (FUN_00162fd0 / FUN_00163d18):
+        // deferred like the sequence starts (REPLACED: the original calls it synchronously in the job code)
+        if let Some(set) = self.set.as_mut() {
+            for oid in std::mem::take(&mut self.warp_oids) {
+                let Some(i) = (self.host.ee_sub_15e938(0, oid, 0) as usize).checked_sub(1) else { continue };
+                if let Some((_, Inst::C2dc6f0(c))) = set.more.iter_mut().find(|x| x.0 == i) {
+                    c.f_40 |= 0x100;
+                }
+                if !Self::run(set, &mut self.host, &mut self.nodes, 0x0022_83d0, i as u32, &[], &[]) {
+                    self.recorded.push(Recorded { thunk: 0, callee: 0x0022_83d0, obj: i as u32, args: Vec::new() });
+                }
+            }
+        }
         for _ in 0..16 {
             let starts = std::mem::take(&mut self.host.seq_starts);
             if starts.is_empty() {
@@ -269,6 +285,10 @@ impl ClassLink {
         }
         if RECORDED.contains(&callee) || RECORDED_J11.contains(&callee) || (callee == 0 && RECORDED_INLINE.contains(&thunk)) {
             self.recorded.push(Recorded { thunk, callee, obj, args });
+            return true;
+        }
+        // WP-Q2: the class-114 record adder thunks 0x106a80..0x10a1b8 (fields 625..716 -> FUN_001e0290..)
+        if self.k22_add_record(thunk, obj, &args) {
             return true;
         }
         if !CLASS_CALLEES.contains(&callee) {
@@ -326,6 +346,29 @@ impl ClassLink {
     /// WP-J11: FUN_0020aa78(guard, oid) = FUN_0020aa40 (append oid != -1 to +0xeb8 while +0xed8 < 8) then
     /// FUN_0020aaa8 (+0xefc = 0; each +0xeb8 oid -> FUN_0015e938(world, 4, oid, guard), found ones appended
     /// to +0xedc); FUN_0020ab58(guard): +0xefc = +0xed8 = 0. 1:1 on `guard_oids`.
+    /// WP-Q2: thunk of a class-114 record field (`k22_seq::add_record_args`) on a `C2d8c48` object.
+    /// Arguments as words: ints / payload words one word, floats their bits, vectors 3 floats.
+    fn k22_add_record(&mut self, thunk: u32, obj: u32, args: &[MArg]) -> bool {
+        let Some(field) = super::by_thunk(thunk).map(|m| m.field as i16).filter(|f| matches!(f, 625..=716)) else { return false };
+        let words = |a: &MArg| match a {
+            MArg::I32(n) => vec![*n as u32],
+            MArg::Word(w) => vec![*w],
+            MArg::F32(f) => vec![f.to_bits()],
+            MArg::Ref(Ref::Vector(v)) | MArg::Value(Ref::Vector(v)) => v.iter().map(|x| x.to_bits()).collect(),
+            MArg::Ref(r) | MArg::Value(r) => vec![r.payload()],
+            MArg::None => vec![],
+        };
+        let w: Vec<Vec<u32>> = args.iter().map(words).collect();
+        let Some(set) = self.set.as_mut() else { return false };
+        match find(set, obj as usize) {
+            Some(Inst::C2d8c48(c)) => {
+                crate::engine::classes::k22_seq::add_record_args(c, field, &w);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn guard_oid_call(&mut self, callee: u32, obj: u32, args: &[MArg]) {
         let g = self.guard_oids.entry(obj).or_default();
         // WP-J12: the class lists (push with cap; remove = memmove down while the index still advances,
@@ -386,6 +429,8 @@ impl ClassLink {
             0x0016_2dd0 => h.ee_sub_1619a0(0x1d, obj + 1),
             // WP-J10: FUN_00133340(obj): (vtable +0x1c)(obj + adj, 5, 0, 0, 0, 0)
             0x0013_3340 => h.vcall_1c(i, 5, 0),
+            // WP-Q3: FUN_00133380(obj): (vtable +0x1c)(obj + adj, 6, 0, 0, 0, 0)
+            0x0013_3380 => h.vcall_1c(i, 6, 0),
             // FUN_00164640(obj, k, ctx): class 133, ClassHost hook (ctx = the +0xf8 word restored on exit)
             0x0016_4640 => {
                 let k = match args.first() {

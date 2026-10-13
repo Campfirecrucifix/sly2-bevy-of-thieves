@@ -12,8 +12,9 @@
 //! FUN_0022b490(world, desc, spawn, parent, flags, a): a == -1 posts the request straight away
 //! (FUN_0020df80), otherwise it goes through the wipe with oid `a` (0x30a in most scripts).
 //!
-//! Fade timer: FUN_001618f8(secs) starts the world +0x3bc4 fade object (message -1) and sets
-//! world +0x476c = t + secs; FUN_00161958 stops it and clears +0x476c (`TransitionState::t_fade_end`).
+//! WP-C9: FUN_001618f8(secs) / FUN_00161958 are NOT a screen fade: world +0x3bc4 is HUD slot 3 (the
+//! countdown label, oid 0x36f, `ui::hud_slots`) and +0x476c its end time; the load carry-over goes to
+//! `UiGame::countdown_carry`. `ScreenWipe::fade_in` is no longer called by the game.
 //!
 //! Sky: class 97 (C2d9500, vtable 0x2d9500) update slot 15 C2d9500_v15 (0x1ef8c8) moves the object to
 //! the camera position (g_cm +0x90) every frame, keeping its own z when field +0x150 is 0.
@@ -160,7 +161,7 @@ pub fn wipe_alpha(state: i32, t: f32) -> f32 {
     }
 }
 
-/// Opacity of the world +0x476c fade (FUN_001618f8 fade-in of `secs` ending at `t_end`), now `t`.
+/// Opacity of a screen fade-in of `secs` ending at `t_end`, now `t` (WP-C9: no longer fed by FUN_001618f8).
 pub fn fade_alpha(t_end: f32, secs: f32, t: f32) -> f32 {
     if secs <= 0.0 {
         return 0.0;
@@ -172,6 +173,67 @@ pub fn fade_alpha(t_end: f32, secs: f32, t: f32) -> f32 {
 /// its own position `own` and field +0x150 (`follow_z`).
 pub fn C2d9500_v15(cam: [f32; 3], own: [f32; 3], follow_z: bool) -> [f32; 3] {
     if follow_z { cam } else { [cam[0], cam[1], own[2]] }
+}
+
+/// WP-C8 translucent order. The PS2 render list (RPL, Sly 1 render.h: +4 z, +0x10 pos) sorts its translucent
+/// entries back to front by z (NCmpPrplReverseZ: larger z first, ties keep submission order); z is the
+/// distance of the RPL position (the drawn record's centre). Bevy sorts transparent entities by their
+/// origin, so a translucent prim is re-centred on its bounds centre (`sort_centre`) and its entity
+/// moved there: the same sort key, vertices unchanged in world space.
+pub fn sort_centre(pos: &[[f32; 3]]) -> [f32; 3] {
+    if pos.is_empty() {
+        return [0.0; 3];
+    }
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for p in pos {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5]
+}
+
+/// WP-C8 blob shadows (Sly 1 alo.h +0x28c sFastShadowRadius / +0x290 depth, RenderFastShadow): a dark
+/// disc under the character on the first surface below it. REPLACED: the fast-shadow texture pass and
+/// the per-ALO radius (Sly 2 field not identified) -> class radius below, ground = SO segment down.
+/// Character classes: 53 = JT (Sly), 57..=67 = guards (class 56 base).
+pub fn blob_radius(class: u16) -> Option<f32> {
+    match class {
+        53 => Some(BLOB_JT),
+        57..=67 => Some(BLOB_GUARD),
+        _ => None,
+    }
+}
+pub const BLOB_JT: f32 = 45.0;
+pub const BLOB_GUARD: f32 = 60.0;
+/// how far below the object origin the ground is searched (PS2 units)
+pub const BLOB_REACH: f32 = 400.0;
+/// opacity at the object, fading to 0 at `BLOB_REACH`
+pub const BLOB_ALPHA: f32 = 0.55;
+
+/// Blob placement for an object at `pos`: ground hit z (from a downward segment) -> (z, alpha).
+pub fn blob_at(pos: [f32; 3], ground_z: Option<f32>) -> Option<(f32, f32)> {
+    let z = ground_z?;
+    let h = pos[2] - z;
+    if !(-20.0..BLOB_REACH).contains(&h) {
+        return None;
+    }
+    Some((z + 1.0, BLOB_ALPHA * (1.0 - h.max(0.0) / BLOB_REACH)))
+}
+
+/// WP-C8 light changes (flicker): a script member write on a LIGHT object (set-o, FUN_00200598 ->
+/// LIGHT setter 0x1a35b0.. + FUN_001a3968) as the raw property bytes `light::set_field` takes.
+pub fn light_write_bytes(v: &crate::engine::splice::value::Ref) -> Option<Vec<u8>> {
+    use crate::engine::splice::value::Ref;
+    Some(match v {
+        Ref::F32(f) => f.to_le_bytes().to_vec(),
+        Ref::S32(i) => i.to_le_bytes().to_vec(),
+        Ref::Bool(b) => vec![*b as u8, 0, 0, 0],
+        Ref::Vector(v) => v.iter().flat_map(|f| f.to_le_bytes()).collect(),
+        _ => return None,
+    })
 }
 
 #[cfg(feature = "game")]
@@ -296,7 +358,9 @@ mod bevy_side {
                 // own 2D camera (order 9: over the 3D view, under the HUD camera of order 10) on its own
                 // render layer; the sprite is far larger than any window so every aspect is covered
                 let layer = bevy::camera::visibility::RenderLayers::layer(WIPE_LAYER);
-                commands.spawn((Camera2d, Camera { order: 9, clear_color: ClearColorConfig::None, ..default() }, layer.clone()));
+                // UiCamera: ui::plugin::sync_overlay_camera copies the 3D camera's Hdr / Msaa / main texture usages
+                // (Solari runs Msaa::Off; a mismatched sample count is a wgpu validation error)
+                commands.spawn((Camera2d, Camera { order: 9, clear_color: ClearColorConfig::None, ..default() }, layer.clone(), crate::engine::ui::plugin::UiCamera));
                 commands.spawn((ScreenWipeOverlay, Sprite { color: Color::srgba(0.0, 0.0, 0.0, a), custom_size: Some(Vec2::splat(1.0e6)), ..default() }, Transform::default(), layer));
             }
         }
@@ -340,12 +404,73 @@ mod bevy_side {
         }
     }
 
+    /// G5: script LIGHT writes -> `LightPropQueue` (applied by `apply_light_props`).
+    pub fn drain_light_writes(st: Option<NonSendMut<crate::engine::game::vm_state::SpliceState>>, q: Option<ResMut<crate::engine::gfx::game::LightPropQueue>>) {
+        let (Some(mut st), Some(mut q)) = (st, q) else { return };
+        for (obj, field, v) in st.sched.objs.light_writes.drain(..) {
+            if let Some(value) = light_write_bytes(&v) {
+                q.0.push(crate::engine::gfx::game::LightPropSet { object: obj as usize, field: field as i16, value, world: None });
+            }
+        }
+    }
+
+    #[derive(Component)]
+    pub struct BlobShadow(pub Entity);
+
+    /// G4: one disc per character entity, placed on the SO ground below it every frame.
+    #[allow(clippy::type_complexity)]
+    pub fn update_blob_shadows(
+        mut commands: Commands,
+        world: Option<Res<World>>,
+        pw: Option<Res<crate::engine::player::plugin::PlayerWorldData>>,
+        roots: Query<Entity, With<crate::engine::gfx::game::LevelGeometryRoot>>,
+        chars: Query<(Entity, &crate::engine::gfx::game::AloObject, &GlobalTransform, &InheritedVisibility)>,
+        mut blobs: Query<(Entity, &BlobShadow, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        mut mats: ResMut<Assets<StandardMaterial>>,
+        mut disc: Local<Option<Handle<Mesh>>>,
+    ) {
+        let (Some(world), Ok(root)) = (world, roots.single()) else { return };
+        let cw = pw.as_ref().and_then(|p| p.cw.clone());
+        let mut have = std::collections::HashSet::new();
+        for (b, s, mut t, m) in &mut blobs {
+            let Ok((_, o, g, vis)) = chars.get(s.0) else {
+                commands.entity(b).despawn();
+                continue;
+            };
+            have.insert(s.0);
+            let r = world.objects.get(o.0).and_then(|lo| blob_radius(lo.class)).unwrap_or(0.0);
+            // Bevy world -> PS2 (root = Rx(-90deg)): ps2 = (x, -z, y)
+            let p = g.translation();
+            let pos = [p.x, -p.z, p.y];
+            let ground = cw.as_ref().and_then(|cw| cw.clip_segment(pos, [pos[0], pos[1], pos[2] - BLOB_REACH]).first().map(|h| h.pos[0][2]));
+            match blob_at(pos, ground).filter(|_| vis.get()) {
+                Some((z, a)) => {
+                    *t = Transform::from_xyz(pos[0], pos[1], z).with_scale(Vec3::splat(r));
+                    if let Some(mut mat) = mats.get_mut(&m.0) {
+                        mat.base_color = Color::srgba(0.0, 0.0, 0.0, a);
+                    }
+                }
+                None => t.scale = Vec3::ZERO,
+            }
+        }
+        for (e, o, _, _) in &chars {
+            if have.contains(&e) || world.objects.get(o.0).and_then(|lo| blob_radius(lo.class)).is_none() {
+                continue;
+            }
+            let d = disc.get_or_insert_with(|| meshes.add(Circle::new(1.0))).clone();
+            let mat = mats.add(StandardMaterial { base_color: Color::NONE, unlit: true, alpha_mode: AlphaMode::Blend, depth_bias: 1.0, fog_enabled: false, ..default() });
+            commands.spawn((BlobShadow(e), Mesh3d(d), MeshMaterial3d(mat), Transform::from_scale(Vec3::ZERO), bevy::light::NotShadowCaster, ChildOf(root)));
+        }
+    }
+
     pub struct ScreenPlugin;
 
     impl Plugin for ScreenPlugin {
         fn build(&self, app: &mut App) {
             app.init_resource::<ScreenWipe>()
-                .add_systems(Update, update_screen_wipe)
+                .add_systems(Update, (update_screen_wipe, drain_light_writes.before(crate::engine::gfx::game::apply_light_props)))
+                .add_systems(PostUpdate, update_blob_shadows.after(bevy::transform::TransformSystems::Propagate))
                 .add_systems(PostUpdate, (tag_sky_objects, update_sky_follow).chain().before(bevy::transform::TransformSystems::Propagate));
         }
     }

@@ -15,11 +15,12 @@ textures, sounds, videos, scripts and text — is read at run time from **your o
 
 ## Progress
 
-**42.5 %** of the game's EE code ported (2174 functions ported/replaced + 234 partial of 6362, as of 2026-10-13;
+**60.4 %** of the game's EE code ported (3273 functions ported/replaced + 432 partial of 6362, as of 2026-10-13;
 partially ported functions count half).
 
-**Playable: 34 %** of the Episode 1 release checklist passes (boot -> title -> New Game -> prologue works; the
-Paris hub loads; missions, pickpocketing, respawn and save/load are still being finished). Expect bugs.
+**Playable: 69 %** of the Episode 1 release checklist passes (boot -> title -> New Game -> prologue -> Episode 1
+hub, pickpocketing, save/load, controller + keyboard work; missions, guard combat and respawn are still being
+finished). Expect bugs.
 
 ## What works
 
@@ -101,8 +102,11 @@ Most options are also in the in-game options menu.
 
 ```sh
 cd recomp
-cargo test --release
+cargo test --release                         # fast tier
+cargo test --release -- --include-ignored    # full tier (heavy all-level tests)
 ```
+
+All tests are modules of one test binary (`tests/all/`, shared helpers in `tests/all/common.rs`).
 
 Most tests read the game from `Sly 2 - Band of Thieves (USA).iso` in the repository root (next to
 `recomp/`); put your ISO (or a link to it) there. The ISO is git-ignored.

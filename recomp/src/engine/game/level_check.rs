@@ -16,6 +16,8 @@ pub enum NotALevel {
     Movie { lsn: u32, size: u32 },
     Unreadable(String),
     NoWorld(String),
+    /// WP-EP1c: a menu level (row 1 abandon_icon): no JT (class 53) and no spawn object (class 0x2a)
+    NoPlayer { objects: usize },
 }
 
 impl std::fmt::Display for NotALevel {
@@ -25,6 +27,7 @@ impl std::fmt::Display for NotALevel {
             NotALevel::Movie { lsn, size } => write!(f, "a movie (MPEG-PS at lsn {lsn}, {size} bytes), not a level; movies play through the FMV queue"),
             NotALevel::Unreadable(e) => write!(f, "not readable as a level: {e}"),
             NotALevel::NoWorld(e) => write!(f, "not a level (world load failed: {e})"),
+            NotALevel::NoPlayer { objects } => write!(f, "a menu level ({objects} objects, no player character and no spawn point)"),
         }
     }
 }
@@ -34,7 +37,7 @@ pub fn is_movie(iso: &IsoImage, d: &Descriptor) -> bool {
     iso.read_sectors(d.lsn(), 1).is_ok_and(|s| s.starts_with(&MPEG_PS_PACK))
 }
 
-/// Full check: not empty, not a movie, decompresses, and builds a world. Blocking (startup only).
+/// Full check: not empty, not a movie, decompresses, builds a world, and has a JT or a spawn object. Blocking (startup only).
 pub fn check_level_row(loader: &LevelLoader, d: Descriptor) -> Result<(), NotALevel> {
     if d.size() == 0 {
         return Err(NotALevel::EmptyRow);
@@ -44,7 +47,12 @@ pub fn check_level_row(loader: &LevelLoader, d: Descriptor) -> Result<(), NotALe
     }
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let lv = loader.load_blocking(d).map_err(|e| NotALevel::Unreadable(e.to_string()))?;
-        World::load(&lv, LoadOptions::default()).map(|_| ()).map_err(|e| NotALevel::NoWorld(e.to_string()))
+        let w = World::load(&lv, LoadOptions::default()).map_err(|e| NotALevel::NoWorld(e.to_string()))?;
+        // WP-EP1c: nothing to play (FUN_0020e890 finds no spawn and no JT to control)
+        if super::spawn::player_object(&w).is_none() && w.objects.iter().all(|o| o.class != super::spawn::CLASS_SPAWN) {
+            return Err(NotALevel::NoPlayer { objects: w.objects.len() });
+        }
+        Ok(())
     }));
     r.unwrap_or_else(|_| Err(NotALevel::Unreadable("decoder panicked".into())))
 }

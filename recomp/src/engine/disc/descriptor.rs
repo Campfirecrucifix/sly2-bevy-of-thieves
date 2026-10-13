@@ -107,6 +107,12 @@ pub struct LevelTable {
     pub slots: [Descriptor; 9],
 }
 
+/// FUN_002109d0 (WP-C9): row of `desc` in the level table (first same-file row, +8 ^ +0x38), -1 when none.
+pub fn ee_sub_2109d0(t: &LevelTable, desc: &Descriptor) -> i32 {
+    // 0x002109d0
+    t.entries.iter().position(|e| e.desc.same_file(desc)).map_or(-1, |i| i as i32)
+}
+
 /// FUN_0020f318: read the level table from the level stream.
 pub fn read_level_table(s: &mut BinaryInputStream) -> LevelTable {
     // 0x0020f318

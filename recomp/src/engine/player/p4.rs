@@ -608,6 +608,11 @@ impl Jt {
         self.calls.push((0x00192bd8, sub));
         self.attach.sub = sub;
         self.calls.push((CALL_ATTACH, kind));
+        // WP-K33: kind 7 = FUN_001938c0 on an is-a 0x23 target (the DAT_003e1414 use points, classes 35-37; class 37
+        // C2cb9f8 = the guard loot holder). Its jts-7 frame 0x1911a8 kind 7 is: drop (SetJtJts(jt, 0) -> attach -1)
+        // + target vt+0x19c (slot 50)(target, jt). REPLACED: no attach state body runs for targets without attach
+        // data, so that frame runs at the next JT input step (`k7_pending`, player/mod.rs `input`).
+        self.k7_pending = kind == 7;
     }
 
     /// 0x00194170(attach) jts 7 edge forces: attach kind 3 with target +0x1bc set. `dir` = FUN_001e67b8

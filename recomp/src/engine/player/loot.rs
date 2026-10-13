@@ -51,6 +51,8 @@ pub struct Loot {
     /// +0x18c: fx handle (REPLACED timer id) and its arrival time
     pub fx: u32,
     pub fx_end: f32,
+    /// WP-K33: FUN_001a58d0 parent (0 = none)
+    pub parent: u32,
     /// pool record +8 (RECORDED_1cb488 / 1cb4b8)
     pub active: bool,
 }
@@ -64,6 +66,8 @@ pub struct Guard {
     pub kind: i32,
     pub alert: i32,
     pub loot: Option<usize>,
+    /// +0x18c: timed-loot countdown seconds (field 1173, default 15)
+    pub timer: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,6 +89,9 @@ pub struct LootSys {
     pub vault: bool,
     /// recorded engine calls (address / vt offset, object, argument)
     pub calls: Vec<(u32, u32, i32)>,
+    /// WP-K33: HUD countdown requests of this system for ui::hud_slots: Some(secs) = FUN_001618f8(secs, world),
+    /// None = FUN_00161958(world)
+    pub hud: Vec<Option<f32>>,
     fx_seq: u32,
 }
 
@@ -138,6 +145,19 @@ impl LootSys {
         lo.fx_end = self.now + if d < 250.0 { 250.0 } else { d } * FX_PER_UNIT;
     }
 
+    /// WP-K33: FUN_001a62e8 of loot `l`: FUN_001a58d0 parents a held loot to its guard (state 1) or its
+    /// thief's anchor (state 4), so it sits at that parent (REPLACED: `pos` only knows the load placement).
+    fn loot_pos(&self, l: usize, pos: &dyn Fn(u32) -> [f32; 3]) -> [f32; 3] {
+        let lo = &self.loots[l];
+        pos(if lo.parent != 0 { lo.parent } else { lo.obj })
+    }
+
+    /// FUN_001a58d0(loot, parent) (recorded) + the parent `loot_pos` follows.
+    fn ee_sub_1a58d0(&mut self, l: usize, parent: u32) {
+        self.calls.push((0x001a58d0, self.loots[l].obj, parent as i32));
+        self.loots[l].parent = parent;
+    }
+
     fn anchor_of(&self, jt: u32) -> u32 {
         self.anchor.get(&jt).copied().unwrap_or(jt)
     }
@@ -168,7 +188,11 @@ impl LootSys {
             1 => {
                 let g = self.loots[l].guard;
                 if def.timed != 0 {
+                    // FUN_001618f8(guard +0x18c + 0.99, world): world +0x476c (= DAT_003e1bfc) = now + t
+                    let t = self.guard_of(g).map_or(0.0, |gi| self.guards[gi].timer) + 0.99;
                     self.calls.push((0x001618f8, g, 0));
+                    self.t_3e1bfc = self.now + t;
+                    self.hud.push(Some(t));
                 }
                 self.calls.push((0x00156c80, g, 1));
                 if s == 2 {
@@ -195,8 +219,11 @@ impl LootSys {
                     self.calls.push((0x001f6ac8, obj, def.mesh));
                 }
                 if def.timed != 0 {
+                    // FUN_00161958(world): +0x476c = 0
                     self.calls.push((0x00161958, obj, 0));
-                    }
+                    self.t_3e1bfc = 0.0;
+                    self.hud.push(None);
+                }
             }
             5 => {
                 let g = self.loots[l].guard;
@@ -215,13 +242,13 @@ impl LootSys {
         match s {
             0 => {
                 self.loots[l].def = None;
-                self.calls.push((0x001a58d0, obj, 0));
+                self.ee_sub_1a58d0(l, 0);
                 self.calls.push((0x4c, obj, 0));
             }
             1 => {
                 let g = self.loots[l].guard;
                 self.calls.push((0x00156c80, g, -1));
-                self.calls.push((0x001a58d0, obj, g as i32));
+                self.ee_sub_1a58d0(l, g);
                 if let Some(gi) = self.guard_of(g) {
                     self.guards[gi].loot = Some(l);
                 }
@@ -235,23 +262,25 @@ impl LootSys {
                 let anc = self.anchor_of(thief);
                 self.calls.push((0x44, anc, 0));
                 if s == 2 {
-                    self.fx(l, pos(obj), pos(anc));
+                    let from = self.loot_pos(l, pos);
+                    self.fx(l, from, pos(anc));
                     self.calls.push((0x44, obj, 0));
                 } else {
                     self.loots[l].fx = 0;
                     self.calls.push((0x1c, obj, 6));
                     self.calls.push((0x1c, obj, 5));
                 }
-                self.calls.push((0x001a58d0, obj, anc as i32));
+                self.ee_sub_1a58d0(l, anc);
                 if self.loots[l].fx == 0 {
                     self.ee_sub_13c560(l, 4, pos);
                 }
             }
             3 => {
                 let g = self.loots[l].guard;
-                self.calls.push((0x001a58d0, obj, g as i32));
+                self.ee_sub_1a58d0(l, g);
                 let anc = self.anchor_of(thief);
-                self.fx(l, pos(anc), pos(obj));
+                let at = self.loot_pos(l, pos);
+                self.fx(l, pos(anc), at);
                 self.calls.push((0x44, obj, 0));
                 // the fx always exists in the port (FxQueue_push failing -> SetState(1))
             }
@@ -263,7 +292,7 @@ impl LootSys {
             }
             5 => {
                 // detach, physics on, velocity = vt+0xfc dir * 1000, random spin in (-2pi, 2pi), activity 0x30
-                self.calls.push((0x001a58d0, obj, 0));
+                self.ee_sub_1a58d0(l, 0);
                 self.calls.push((0x001f5720, obj, 0));
                 self.calls.push((0x001f57c0, obj, 0));
                 self.calls.push((0x11c, obj, 1000));
@@ -528,10 +557,23 @@ impl LootSys {
     /// +0x190 alert), their field-1168 FUN_0013d328 calls (fed at load), then the slot-22 deferred call
     /// FUN_00149ab8(DAT_002a4bb0) = PMF {0, -1, 0x13cf38}: FUN_0013cf38 hands every holder its loot.
     pub fn from_class_set(classes: impl IntoIterator<Item = u16>, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], defs: &[LootDef], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
-        let mut s = Self::from_objects(classes.into_iter().enumerate().map(|(i, c)| (i as u32 + 1, c)), defs);
+        Self::from_objects(classes.into_iter().enumerate().map(|(i, c)| (i as u32 + 1, c)), defs).load_post(k31, pos)
+    }
+    /// WP-K33: `from_class_set` with every class-103 object's own def rows (`defs_of_props` of its load props).
+    pub fn from_world(w: &crate::engine::world::World, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
+        let mut s = Self::from_objects(w.objects.iter().enumerate().map(|(i, o)| (i as u32 + 1, o.class as u16)), &[]);
+        for l in &mut s.loots {
+            let i = l.obj as usize - 1;
+            let o = w.objects.get(w.objects[i].clone_of.unwrap_or(i));
+            l.defs = defs_of_props(o.and_then(crate::engine::game::fields::object_props).unwrap_or(&[]));
+        }
+        s.load_post(k31, pos)
+    }
+    fn load_post(mut self, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
+        let s = &mut self;
         for g in &mut s.guards {
             if let Some((_, c)) = k31.iter().find(|x| x.0 as u32 + 1 == g.obj) {
-                (g.idx, g.booty, g.kind, g.alert) = (c.f_180, c.f_184, c.f_188, c.f_190);
+                (g.idx, g.booty, g.kind, g.alert, g.timer) = (c.f_180, c.f_184, c.f_188, c.f_190, c.f_18c);
             }
         }
         for gi in 0..s.guards.len() {
@@ -543,6 +585,53 @@ impl LootSys {
         for gi in 0..s.guards.len() {
             s.ee_sub_13cf38(gi, pos);
         }
-        s
+        self
     }
+}
+
+/// WP-K33: the def rows a class-103 object's load writes (Splice method fields, in stream order):
+/// 1152 thunk 0x10e008 -> FUN_0013c3b8(loot, id, key, kind): FUN_0013c440, then if +0x150 < 0x20 a new row
+/// [0] id [1] key [5] kind [6] -1 [7] 0 becomes current (+0x158); 1153 0x10e0c0 -> FUN_0013c440 (+0x158 = 0);
+/// 1154 0x10e138 -> FUN_0013c448 (row +0x1c count < 3: +0x20 + 4n = arg). Row fields (flags 0x2080, base =
+/// getter 0x13c4d8 = current row, offset = desc +0x18): 1155 [6] mesh (s32), 1161 [3] timed, 1162 [2], 1163
+/// [4] allowed (bytes). NOT KEPT: [2] and the +0x1c / +0x20 list (no ported reader).
+pub fn defs_of_props(props: &[crate::engine::world::props::Prop]) -> Vec<LootDef> {
+    use crate::engine::world::props::{ArrayItem, PropValue};
+    let words = |v: &PropValue| -> Vec<i32> {
+        let w = |b: &[u8]| b.iter().take(4).enumerate().fold(0u32, |a, (i, x)| a | (*x as u32) << (8 * i)) as i32;
+        match v {
+            PropValue::Scalar(b) => vec![w(b)],
+            PropValue::Array(a) => a.iter().flat_map(|i| match i {
+                ArrayItem::One(_, b) => vec![w(b)],
+                ArrayItem::List(_, l) => l.iter().map(|b| w(b)).collect(),
+            }).collect(),
+        }
+    };
+    let mut defs: Vec<LootDef> = Vec::new();
+    let mut cur: Option<usize> = None;
+    for p in props {
+        let a = words(&p.value);
+        let at = |i: usize| a.get(i).copied().unwrap_or(0);
+        match p.field {
+            1152 => {
+                cur = None;
+                if defs.len() < 0x20 {
+                    defs.push(LootDef { id: at(0), key: at(1), kind: at(2), mesh: -1, ..Default::default() });
+                    cur = Some(defs.len() - 1);
+                }
+            }
+            1153 => cur = None,
+            1155 | 1161 | 1163 => {
+                if let Some(d) = cur.map(|c| &mut defs[c]) {
+                    match p.field {
+                        1155 => d.mesh = at(0),
+                        1161 => d.timed = at(0) & 0xff,
+                        _ => d.allowed = at(0) & 0xff,
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    defs
 }

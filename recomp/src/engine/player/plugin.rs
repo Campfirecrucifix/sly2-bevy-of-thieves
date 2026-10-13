@@ -55,6 +55,8 @@ pub struct PlayerWorldData {
     /// WP-P9: the SO collision set Sly collides with (`CollisionWorld::build_so`: ALO parts in world space,
     /// no class-5 / 22-27 volumes, no water). Preferred over `PlayerLevel::cw` (which keeps every geom).
     pub cw: Option<Arc<CollisionWorld>>,
+    /// WP-EP1d: the class host's `so_gen` `cw` was built for (FUN_001f6ac8 / 001f6b48 part links)
+    pub so_gen: u32,
 }
 
 /// WP-P9 (port addition, verification): env `SLY2_PAD_SCRIPT="a-b:x,y[:buttons];..."` replaces the pad with a
@@ -193,6 +195,32 @@ pub struct LootWorld {
     pub key: usize,
     pub sys: super::loot::LootSys,
     pub t: f32,
+    /// WP-K33: the DAT_003e1414 category-0x80 list for the JT's FUN_00194a40 (None = no world yet)
+    pub cands: Option<Vec<super::TargetCand>>,
+}
+
+/// WP-K33: the DAT_003e1414 entry of a class 35 / 36 / 37 use point (C2d1ee8 base) for 0x194688: TARGET member
+/// +0xe0 = `Sub182c70` (member vt 0x2d1ea8: +0x14 = 0x182cc8 sub 0, +0x1c = 0x184208 position = FUN_001a62e8(obj)),
+/// +0x10 prio, +0x18 group, +0x1c mask; obj +0x10 (owner) != 0 -> radius test with obj +0x38.
+#[cfg(feature = "game")]
+pub fn use_point_cand(obj: usize, class: i32, b: &crate::engine::classes::k10::C2d1ee8, h: &mut dyn crate::engine::classes::ClassHost) -> Option<super::TargetCand> {
+    let o = obj as u32 + 1;
+    let pos = h.ee_sub_1a62e8(o);
+    let radius = (h.parent_10(o) != 0).then_some((pos, b.f_38));
+    Some(super::TargetCand {
+        obj: o as usize,
+        class,
+        f_10c: b.f_10c as i32,
+        radius,
+        member: 0xe0,
+        prio: b.sub.f_10 as i32,
+        group: b.sub.f_18 as i32,
+        mask: b.sub.f_1c as u32,
+        sub: 0,
+        pos,
+        category: 0x80,
+        f_e8: false,
+    })
 }
 
 /// WP-EP1a: builds `LootWorld` once per class set (`LootSys::from_class_set`: holders get their loot through
@@ -200,34 +228,87 @@ pub struct LootWorld {
 /// liveness = FUN_001a62e8 / FUN_001a61a0 of the class host. The pickpocket itself (C2cb9f8 slot 50 =
 /// `LootSys::ee_sub_13d020`) needs the guard pickpocket-zone volume test (+0x364.., unported, see p13).
 #[cfg(feature = "game")]
-pub fn loot_link(w: Option<Res<crate::engine::world::World>>, clk: Option<Res<PlayerClock>>, mut lw: ResMut<LootWorld>, classes: Option<ResMut<crate::engine::classes::plugin::Classes>>) {
+pub fn loot_link(w: Option<Res<crate::engine::world::World>>, clk: Option<Res<PlayerClock>>, mut lw: ResMut<LootWorld>, classes: Option<ResMut<crate::engine::classes::plugin::Classes>>, mut players: Query<&mut Player>) {
     use crate::engine::classes::ClassHost;
+    use crate::engine::classes::guard::PLAYER_HANDLE;
     let (Some(w), Some(mut c)) = (w, classes) else { return };
     let c = &mut *c;
-    if c.set.k31.is_empty() && !w.objects.iter().any(|o| o.class == super::loot::CLASS_LOOT) {
-        return;
-    }
     let host = std::cell::RefCell::new(&mut c.host);
     let pos = |h: u32| host.borrow_mut().ee_sub_1a62e8(h);
     let alive = |h: u32| host.borrow_mut().ee_sub_1a61a0(h);
     let key = &*w as *const crate::engine::world::World as usize;
     let lw = &mut *lw;
     if lw.key != key {
-        lw.sys = super::loot::LootSys::from_class_set(w.objects.iter().map(|o| o.class as u16), &c.set.k31, &[], &pos);
+        lw.sys = super::loot::LootSys::from_world(&w, &c.set.k31, &pos);
         lw.key = key;
         lw.t = 0.0;
         log::info!("EP1a loot: {} holders, {} loot, {} on holders", lw.sys.guards.len(), lw.sys.loots.len(), lw.sys.guards.iter().filter(|g| g.loot.is_some()).count());
     }
     lw.t += clk.map_or(PLAYER_DT, |c| c.dt.max(0.0));
+    lw.sys.now = lw.t;
+    // WP-K33: the JT's 0x1911a8 kind-7 calls target vt+0x19c (slot 50)(target, jt) of this frame
+    for mut pl in &mut players {
+        for t in std::mem::take(&mut pl.jt.slot50) {
+            let i = t.wrapping_sub(1);
+            if c.set.k31.iter().any(|x| x.0 == i) {
+                // class 37 C2cb9f8_v50 = FUN_0013d020 (JT = class 0x34 subtree)
+                let ok = lw.sys.ee_sub_13d020(t as u32, PLAYER_HANDLE, true, &pos);
+                log::info!("K33 pickpocket obj {} -> {} sly {:?} holder {:?} guard {:?} vault {} held {:?}", i, ok, pos(PLAYER_HANDLE), pos(t as u32), lw.sys.guards.iter().find(|g| g.obj == t as u32), lw.sys.vault, lw.sys.held_by(PLAYER_HANDLE));
+            } else {
+                // class 35 / 36 slot 50 FUN_00184130 / FUN_00184330 (Sly = class 0x35)
+                c.set.k10_use(i, PLAYER_HANDLE, 0x35, &mut **host.borrow_mut());
+            }
+        }
+    }
     lw.sys.update(lw.t, &pos, &alive);
+    // WP-K33: timed-loot countdown HUD (FUN_001618f8 / FUN_00161958 of FUN_0013c560)
+    for r in std::mem::take(&mut lw.sys.hud) {
+        let n = host.borrow().hud_timer.0 + 1;
+        host.borrow_mut().hud_timer = (n, r.unwrap_or(-1.0));
+    }
+    // WP-K33: DAT_003e1414 (classes 35 / 36 / 37) for the next JT frame's FUN_00194a40
+    let mut cands = Vec::new();
+    {
+        use crate::engine::classes::{k10::K10, Inst};
+        let h = &mut **host.borrow_mut();
+        // members of DAT_003e1414 only (slot 22 enters, slot 21 leaves)
+        let list = c.set.g.k10_lists.get(&crate::engine::classes::k10::L_3E1414).cloned().unwrap_or_default();
+        for (i, k) in &c.set.k10 {
+            if !list.contains(&(*i as u32 + 1)) {
+                continue;
+            }
+            if let Inst::K10(k) = k {
+                match &**k {
+                    K10::C2d1ee8(b) => cands.extend(use_point_cand(*i, 35, b, h)),
+                    K10::C2d1d00(d) => cands.extend(use_point_cand(*i, 36, &d.base, h)),
+                    _ => {}
+                }
+            }
+        }
+        for (i, x) in c.set.k31.iter().filter(|x| list.contains(&(x.0 as u32 + 1))) {
+            cands.extend(use_point_cand(*i, 37, &x.base, h));
+        }
+    }
+    lw.cands = Some(cands);
 }
 
-pub fn spawn_player(mut cmd: Commands, lvl: Res<PlayerLevel>, hull: Option<Res<PlayerHull>>, q: Query<(), With<Player>>) {
-    // WP-P13 (port addition, verification): env `SLY2_SPAWN="x,y,z"` overrides the spawn point
-    let env = std::env::var("SLY2_SPAWN").ok().and_then(|s| {
+pub fn spawn_player(mut cmd: Commands, lvl: Res<PlayerLevel>, hull: Option<Res<PlayerHull>>, q: Query<(), With<Player>>, wd: Res<PlayerWorldData>, mut live: Query<&mut Player>) {
+    // WP-EP1c: a new level / the death reload (FUN_0022b490 -> FUN_0020e890) frees the world with its JT and
+    // builds a fresh one at the spawn; hpCur / gadgets survive as save data (0x1440d0 refills hp 0 on JT init)
+    // WP-K33 (port addition, verification): SLY2_SPAWN also overrides this respawn (else --table ignores it)
+    let env_spawn = || std::env::var("SLY2_SPAWN").ok().and_then(|s| {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         (v.len() == 3).then(|| [v[0], v[1], v[2]])
     });
+    if lvl.is_changed() && !lvl.is_added() {
+        if let Some(p) = env_spawn().or(lvl.spawn) {
+            for mut pl in &mut live {
+                respawn_in_place(&mut pl.jt, p, (wd.generation != 0).then_some(&wd.lvl));
+            }
+        }
+    }
+    // WP-P13 (port addition, verification): env `SLY2_SPAWN="x,y,z"` overrides the spawn point
+    let env = env_spawn();
     if let (Some(p), true) = (env.or(lvl.spawn), q.is_empty()) {
         let mut jt = Jt::new([p[0], p[1], p[2] + JT_RADIUS + 5.0]);
         // WP-P18 (port addition, verification): env `SLY2_GADGETS="1b,1d"` (hex ids) = acquired gadgets; the ones
@@ -248,8 +329,22 @@ pub fn spawn_player(mut cmd: Commands, lvl: Res<PlayerLevel>, hull: Option<Res<P
 }
 
 /// WP-P6: rebuild `PlayerWorldData` / `PlayerHull` from a new or changed `World`.
-pub fn load_player_world(w: Option<Res<crate::engine::world::World>>, mut d: ResMut<PlayerWorldData>, mut jobs: ResMut<PlayerJobs>, mut cmd: Commands) {
+pub fn load_player_world(
+    w: Option<Res<crate::engine::world::World>>,
+    mut d: ResMut<PlayerWorldData>,
+    mut jobs: ResMut<PlayerJobs>,
+    classes: Option<Res<crate::engine::classes::plugin::Classes>>,
+    mut cmd: Commands,
+) {
+    // WP-EP1d: run-time SO part links (FUN_001f6ac8 / 001f6b48) rebuild Sly's collision set
+    if let (Some(w), Some(c)) = (w.as_ref().filter(|w| !w.is_changed()), classes.as_ref()) {
+        if c.host.so_gen != d.so_gen && d.cw.is_some() {
+            d.so_gen = c.host.so_gen;
+            d.cw = Some(Arc::new(super::p10::player_collision_world_masked(w, &c.host.so_parts)));
+        }
+    }
     if let Some(w) = w.filter(|w| w.is_changed()) {
+        d.so_gen = classes.as_ref().map_or(0, |c| c.host.so_gen);
         d.lvl = super::p6::P6Level::load(&w);
         d.hz = super::p8_hazard::Hazards::load(&w);
         d.cw = Some(Arc::new(super::p10::player_collision_world(&w))); // WP-P10: without sensor parts
@@ -289,6 +384,7 @@ pub fn tick_player(
     mut q: Query<(&mut Player, &mut JtAnimEvents)>,
     mut script: Option<ResMut<PadScript>>,
     mut emitters: Option<ResMut<crate::engine::audio::emitter::EmitterSystem>>,
+    loot: Option<Res<LootWorld>>,
 ) {
     // WP-EP1a: a script with only app-frame (`g`) items leaves the player on the real (scripted) pad
     let scripted = script.as_mut().filter(|s| !q.is_empty() && !s.steps.is_empty()).map(|s| s.next());
@@ -311,6 +407,8 @@ pub fn tick_player(
         if let Some(p) = &pad_now {
             pl.jt.feed_pad(p);
         }
+        // WP-K33: category lists of FUN_00194a40 (only DAT_003e1414 is fed; the other lists stay empty)
+        pl.jt.cands = loot.as_ref().and_then(|l| l.cands.clone());
         // WP-P8: DAT_003e0f9c for 0x161a58 / 0x1a2388, hazards after the JT update, death events -> jobs
         pl.jt.dmg_env.job = jobs.0.cur.is_some();
         let n_ev = pl.jt.dmg.ev.len();
@@ -385,7 +483,8 @@ pub fn po_link(
     let Some(mut pl) = q.iter_mut().next() else { return };
     let c = &mut *c;
     let key = &*w as *const crate::engine::world::World as usize;
-    if cur.world_key != key {
+    // WP-EP1c: `is_changed` = a same-level reload (same World address)
+    if cur.world_key != key || w.is_changed() {
         *cur = super::p20::PoCurrent::default();
         if super::p20::apply_po(&w, super::p20::oid_po_current(&jobs.0), &mut c.set, &mut c.host, &mut cur) {
             cur.world_key = key;

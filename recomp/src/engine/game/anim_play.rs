@@ -10,7 +10,8 @@
 //! Everything else stays in `pending` (callee roles not identified: see ENGINE_PORT.md J5 findings).
 //! Replaced: the live ASEGA set 0x3e1218 is `LevelAnims::players`; which ASEGs run from the start
 //! (the original starts them from object activation / scripts / other ASEG events) is approximated by
-//! `start_live`: every ASEG in the activation list plays once at svt 1 (no loop flags).
+//! `start_live`: every ASEG in the activation list plays once at svt 1 (no loop flags), except those
+//! owned by a JT (WP-EP1e).
 
 use crate::engine::anim::aseg::Aseg;
 use crate::engine::anim::events::{EffectCall, EffectHost, EffectSink};
@@ -138,7 +139,10 @@ impl LevelAnims {
     pub fn start_live(&mut self, w: &World, active: &[usize]) {
         self.players.clear();
         for &i in active {
-            if w.objects.get(i).is_some_and(|o| o.class == CLASS_ASEG) {
+            // WP-EP1e: not the ASEGs of a JT (class 53): the JT state machine (player/) starts those; playing
+            // Sly's whole move set at load fired ~250 full-volume sounds in the first 2 s (Paris, row 2)
+            let jt_owned = w.objects.get(i).and_then(|o| o.owner).is_some_and(|o| w.objects.get(o).is_some_and(|o| o.class == crate::engine::playerdraw::CLASS_JT));
+            if !jt_owned && w.objects.get(i).is_some_and(|o| o.class == CLASS_ASEG) {
                 self.play(w, i, 1.0);
             }
         }

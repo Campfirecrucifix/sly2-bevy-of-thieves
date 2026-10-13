@@ -167,6 +167,11 @@ pub fn job_messages(sched: &mut Schedule, m: &crate::engine::jobs::JobMgr) {
             (0x00163d18, 0x13) => v.task,
             (0x00162a60, 0x14) => if pj != v.job { pj } else { v.job },
             (0x00163f48, 0x14) => if pt != v.task { pt } else { v.task },
+            // WP-EP1d: FUN_002283d0(job +0xcc / task +0xc4 warp volume), run when the classes are lent
+            (0x002283d0, oid) => {
+                sched.cls.warp_oids.push(oid);
+                None
+            }
             _ => None,
         };
         if let Some(o) = o {
@@ -585,6 +590,8 @@ impl SpliceHost for PersistentHost<'_> {
                     g.ee_sub_1da578(int(0));
                 }
             }
+            // WP-Q3: user-property setters 0x001002a8..0x00100760 -> FUN_00132bc8..FUN_00132e40 (q_131990)
+            id if super::q_131990::call(&mut self.sched.objs, id, m.object, &a) => {}
             // WP-J7: class-runtime rows (methods::cls)
             id if self.sched.cls.call(id, desc.map(|d| d.callee).unwrap_or(0), m.object, args, a.clone()) => {}
             // spawn alias methods and anything else: J3 host

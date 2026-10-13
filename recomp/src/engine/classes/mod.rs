@@ -81,6 +81,7 @@ pub mod k30_cam;
 pub mod k31;
 pub mod shared;
 pub mod plugin;
+pub mod q;
 
 use crate::engine::physics::driven::GameRng;
 use crate::engine::world::loads_b4::B4Load;
@@ -1422,6 +1423,14 @@ impl ClassSet {
     /// K3 per-frame slots (C2ceb78 slot 15).
     fn frame_more(&mut self, h: &mut dyn ClassHost) {
         let mut chain = Vec::new();
+        // WP-EP1d: class-131 intro start (FUN_0015e938 + FUN_00228358(o, 3) + FUN_002283d0(o))
+        for oid in c2dc6f0::take_warp_starts() {
+            let o = h.ee_sub_15e938(5, oid, 0);
+            if let Some((i, Inst::C2dc6f0(c))) = self.more.iter_mut().find(|x| o != 0 && x.0 + 1 == o as usize) {
+                c.ee_sub_228358(*i, 3, &mut self.g, h);
+                chain.extend(c.ee_sub_2283d0(*i, &mut self.g, h));
+            }
+        }
         // K27: sequence guard actions 0x55 / 0x56 (FUN_00171cf8 / FUN_00171d58), run on the guards after
         // the sequence object's update
         let mut running = self.k27_running();

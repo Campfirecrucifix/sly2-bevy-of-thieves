@@ -368,13 +368,13 @@ pub fn queue_movie(q: &mut crate::engine::game::fmv::MovieQueue, d: crate::engin
 /// A14: class-131 requests wired to the engine (FUN_0022b490 posts are taken by J16's transition):
 /// LoadDesc = FUN_001b3a48(0x2f66b0, desc) + FUN_0022b490(null desc = current level, 0x189, -1, 0, -1)
 /// (theater / cutscene movie through the UI queue -> FmvPlayback); EnterEpisode =
-/// FUN_0022b490(FUN_00210b98(ep), 0x189, -1, 0, 0x30a). IntroMovie (FUN_00228358 / FUN_002283d0 warp
-/// object state machine, classes/) is REPLACED by entering the episode like EnterEpisode. Labels / anims /
+/// FUN_0022b490(FUN_00210b98(ep), 0x189, -1, 0, 0x30a). IntroMovie = FUN_00228358(o, 3) + FUN_002283d0(o) on
+/// the warp object (WP-EP1d: queued to `classes::c2dc6f0::post_warp_start`, run by the class set). Labels / anims /
 /// sounds / card dialog stay logged (ui::plugin). Movies are played by the caller (FUN_001b3b08).
 pub fn episode_event(
     movies: &mut crate::engine::game::fmv::MovieQueue,
     ev: EpEvent,
-    ep: i32,
+    _ep: i32,
     p: &mut crate::engine::input::pad::PadState,
 ) {
     use crate::engine::game::flow::{self, Dest, Post};
@@ -387,7 +387,8 @@ pub fn episode_event(
             post(Dest::Current, -1);
         }
         EpEvent::EnterEpisode(e) => post(Dest::Slot(e), 0x30a),
-        EpEvent::IntroMovie(_) => post(Dest::Slot(ep), 0x30a),
+        // WP-EP1d: 1:1 FUN_00228358(o, 3) + FUN_002283d0(o) on the intro warp object (classes::c2dc6f0)
+        EpEvent::IntroMovie(oid) => crate::engine::classes::c2dc6f0::post_warp_start(oid),
         EpEvent::PadReset => crate::engine::input::pad::FUN_00187e78(p),
         _ => {}
     }

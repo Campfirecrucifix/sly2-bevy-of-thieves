@@ -63,6 +63,9 @@ pub struct EngineHost {
     /// A14: FUN_00161868 (coin HUD) / FUN_001618b0 (clue-bottle HUD) calls, read by ui/ (world+0x3bac / +0x3bb8 labels)
     pub hud_coins: u32,
     pub hud_bottles: u32,
+    /// WP-K33: last FUN_001618f8 / FUN_00161958 countdown request of the loot system (request count, seconds;
+    /// < 0 = stop), read by ui/ (world+0x3bc4 label)
+    pub hud_timer: (u32, f32),
     pub k22_title_active: bool,
     pub k22_seq_actions: Vec<(u32, u32, [u32; 20])>,
     pub k22_po_switches: Vec<u32>,
@@ -108,6 +111,16 @@ pub struct EngineHost {
     pub k26: super::k26::K26Rt,
     /// K26: world matrices of the objects posed by the class-run ASEGAs this frame (classes/k26.rs k26_bind)
     pub k26_posed: std::collections::HashMap<usize, crate::engine::gfx::scene::Affine>,
+    /// WP-EP1d: run-time SO collision part +0x10 bit 50 state (FUN_001f6ac8 / 001f6b48: (object index, part)
+    /// -> linked), part +0x18 words (FUN_001f6bc8), bumped `so_gen` on every change (the player layer
+    /// rebuilds its collision set when it moves), for the world `so_for`
+    pub so_parts: std::collections::HashMap<(usize, usize), bool>,
+    pub so_part_18: std::collections::HashMap<(usize, usize), u32>,
+    pub so_gen: u32,
+    /// WP-EP1d: SetParent (FUN_001a58d0 -> vtable +0x54, ALO FUN_001f21b8) run-time hierarchy: object index ->
+    /// (new parent handle, 0 = none; matrix relative to it), for the world `pos_for`
+    pub rt_parent: std::collections::HashMap<usize, (u32, crate::engine::gfx::scene::Affine)>,
+    pub rt_depth: u32,
     /// K29: the ASEG -> bone binding (anim::bind, D6) of the class-run ASEGAs (k26_bind); shared on clone
     pub k29_binder: Arc<std::sync::Mutex<crate::engine::anim::bind::AnimBinder>>,
     /// K29: world matrices of the bones (object, bone) the class-run ASEGAs drive this frame (and their descendants)
@@ -202,6 +215,8 @@ impl EngineHost {
         let id = Arc::as_ptr(&w) as usize;
         if self.k7_for != id {
             self.blockers = Some(Arc::new(super::guard::los::Blockers::build(&w)));
+            self.so_parts.clear();
+            self.so_part_18.clear();
             self.so = Some(Arc::new(crate::engine::physics::query::CollisionWorld::build_so(&w)));
             self.k7_for = id;
         }
@@ -747,6 +762,19 @@ impl ClassHost for EngineHost {
             // FUN_0012dc18(obj, xf, prio, f_14, f_1c) with the vector argument lost in the decompile (0)
             (0x12dc18, &[obj, xf, prio, f14, f1c, ..]) => self.k25_con(obj, xf, prio as i32, f14, f1c, [0.0; 3]) as i64,
             // K27: FUN_001f7c68(fade, obj) fade-in: REPLACED by alpha +0x12c = 1 at once (classes/k27.rs)
+            // WP-EP1d: FUN_001a58d0(obj, parent, flags) SetParent / FUN_001f6bc8(obj, id, v) part +0x18
+            (0x1a58d0, &[o, p, f, ..]) => {
+                if let Some(i) = (o as usize).checked_sub(1) {
+                    self.ee_sub_1a58d0_set_parent(i, p, f);
+                }
+                0
+            }
+            (0x1f6bc8, &[o, id, v, ..]) => {
+                if let Some(i) = (o as usize).checked_sub(1) {
+                    self.ee_sub_1f6bc8(i, id as i32, v);
+                }
+                0
+            }
             (0x1f7c68, &[_, o, ..]) => {
                 self.k27_fades += 1;
                 self.obj_set_u32(o, 0x12c, 1f32.to_bits());
@@ -884,6 +912,12 @@ impl ClassHost for EngineHost {
     /// K24: obj +0x10 = the owning LO (FUN_0013fb40 param_1; world `Lo::owner`)
     fn parent_10(&mut self, obj: u32) -> u32 {
         let Some(w) = self.world.as_ref() else { return 0 };
+        // WP-EP1d: run-time SetParent first
+        if self.pos_for == Arc::as_ptr(w) as usize {
+            if let Some(&(p, _)) = (obj as usize).checked_sub(1).and_then(|i| self.rt_parent.get(&i)) {
+                return p;
+            }
+        }
         (obj as usize).checked_sub(1).and_then(|i| w.objects.get(i)).and_then(|o| o.owner).map_or(0, |o| o as u32 + 1)
     }
     fn path_len_1e6648(&mut self, path: u32) -> f32 {
@@ -925,7 +959,28 @@ impl ClassHost for EngineHost {
     }
     fn alo_children(&mut self, obj: u32) -> Vec<u32> {
         let Some(w) = &self.world else { return Vec::new() };
-        (obj as usize).checked_sub(1).and_then(|i| w.objects.get(i)).map(|o| o.children.iter().map(|&c| c as u32 + 1).collect()).unwrap_or_default()
+        let mut v: Vec<u32> = (obj as usize).checked_sub(1).and_then(|i| w.objects.get(i)).map(|o| o.children.iter().map(|&c| c as u32 + 1).collect()).unwrap_or_default();
+        // WP-EP1d: run-time SetParent moves children between lists
+        if self.pos_for == Arc::as_ptr(w) as usize && !self.rt_parent.is_empty() {
+            v.retain(|&c| self.rt_parent.get(&(c as usize - 1)).is_none_or(|&(p, _)| p == obj));
+            let mut add: Vec<u32> = self.rt_parent.iter().filter(|&(&c, &(p, _))| p == obj && !v.contains(&(c as u32 + 1))).map(|(&c, _)| c as u32 + 1).collect();
+            add.sort_unstable();
+            v.extend(add);
+        }
+        v
+    }
+    // ---- WP-EP1d: SetParent / SO collision parts
+    fn ee_sub_1a58d0(&mut self, obj: usize, a: i32, b: i32) {
+        self.ee_sub_1a58d0_set_parent(obj, a as u32, b as u32);
+    }
+    fn ee_sub_1a58d0_to(&mut self, obj: usize, other: u32, k: i32) {
+        self.ee_sub_1a58d0_set_parent(obj, other, k as u32);
+    }
+    fn ee_sub_1f6ac8(&mut self, obj: usize, id: i32) {
+        self.so_part_link(obj, id, true);
+    }
+    fn ee_sub_1f6b48(&mut self, obj: usize, id: i32) {
+        self.so_part_link(obj, id, false);
     }
     // ---- K21
     fn k21_world(&mut self) -> Option<Arc<World>> {
@@ -1192,19 +1247,120 @@ impl EngineHost {
         if self.pos_for != id {
             self.pos_cache.clear();
             self.k26_posed.clear();
+            self.rt_parent.clear();
             self.pos_for = id;
         }
         // K26: posed by a class-run ASEGA channel (classes/k26.rs)
         if let Some(m) = self.k26_posed.get(&i) {
             return Some(*m);
         }
+        // WP-EP1d: re-parented at run time (SetParent): the kept matrix relative to the new parent
+        if let Some(&(p, local)) = self.rt_parent.get(&i) {
+            return Some(match p {
+                0 => local,
+                _ if self.rt_depth > 64 => local,
+                _ => {
+                    self.rt_depth += 1;
+                    let pw = self.rt_world(p);
+                    self.rt_depth -= 1;
+                    crate::engine::gfx::scene::mul(&local, &pw)
+                }
+            });
+        }
         Some(*self.pos_cache.entry(i).or_insert_with(|| {
             use crate::engine::gfx::attach::{affine_from_bytes, BoneWorlds};
             let mut bw = BoneWorlds::default();
             match w.life.placed.get(&i).map(affine_from_bytes) {
                 Some(pm) => crate::engine::gfx::scene::mul(&bw.get(&w, i, 0), &pm),
+                // WP-K33: an XFM on a bone of a placed (P15) object, e.g. a class-37 guard loot holder under its
+                // class-48 owner: local x the owner bone x the owner's placement (the case above for bone k)
+                None if let (Some((_, local)), Some(crate::engine::gfx::attach::BoneRef::Bone(o, k))) =
+                    (crate::engine::gfx::attach::xfm_of(&w, i), crate::engine::gfx::attach::xfm_bone_ref(&w, i))
+                    && w.life.placed.contains_key(&o) =>
+                {
+                    let pm = affine_from_bytes(&w.life.placed[&o]);
+                    crate::engine::gfx::scene::mul(&local, &crate::engine::gfx::scene::mul(&bw.get(&w, o, k), &pm))
+                }
                 None => bw.xfm_world(&w, i).or_else(|| super::shared::path10::world_xf(&w, i, None)).unwrap_or_else(|| bw.get(&w, i, 0)),
             }
         }))
+    }
+
+    /// WP-EP1d: world matrix of a handle as the hierarchy sees it (the player = Sly's position, K27-driven
+    /// objects their physics position, else `k24_world_xf`; unknown = identity)
+    fn rt_world(&mut self, h: u32) -> crate::engine::gfx::scene::Affine {
+        use crate::engine::gfx::scene::IDENTITY;
+        if h == super::guard::PLAYER_HANDLE {
+            let mut m = IDENTITY;
+            m[3] = self.player_pos;
+            return m;
+        }
+        let mut m = self.k24_world_xf(h).unwrap_or(IDENTITY);
+        if let Some(p) = (h as usize).checked_sub(1).and_then(|i| self.k27_pos(i)) {
+            m[3] = p;
+        }
+        m
+    }
+
+    /// WP-EP1d: FUN_001a58d0(obj, parent, flags) = (vtable +0x54)(obj, parent, 0, flags): ALO SetParent
+    /// FUN_001f21b8 (classes 5 / 48 / 98 share it). flags & 3: the world matrix is kept (computed up the old
+    /// chain, made relative to the new parent by vtable +0xec / +0xf4); else the local +0x40 matrix is kept
+    /// (the object moves with the new parent). `parent` 0 = detach (world root). REPLACED: the +0x60 / +0xa0
+    /// LO child-list relink (C2c94e0_v9) is the `rt_parent` table (`parent_10` / `alo_children` /
+    /// `k24_world_xf` read it); flags 4 / 8 (velocity / angular velocity via +0x10c / +0x114 -> +0x11c /
+    /// +0x124) carry no state here (the class physics owns velocities); the +0x54 0x100-record +0xa0 rebinding
+    /// and FUN_001f2468 / 001f26a8 / 001f8668 (attachment refresh, SO re-link) are not modelled.
+    pub fn ee_sub_1a58d0_set_parent(&mut self, obj: usize, parent: u32, flags: u32) {
+        use crate::engine::gfx::scene::{invert, mul};
+        let Some(w) = self.world.clone() else { return };
+        if obj >= w.objects.len() {
+            return;
+        }
+        // the old parent as the hierarchy sees it now
+        let old = self.parent_10(obj as u32 + 1);
+        let world_now = self.rt_world(obj as u32 + 1);
+        let base = if flags & 3 != 0 { parent } else { old };
+        let local = match base {
+            0 => world_now,
+            b => mul(&world_now, &invert(&self.rt_world(b))),
+        };
+        let parent = if parent == obj as u32 + 1 { 0 } else { parent };
+        self.rt_parent.insert(obj, (parent, local));
+        self.pos_cache.clear();
+    }
+
+    /// WP-EP1d: FUN_001f6ac8 (on) / FUN_001f6b48 (off): every +0xe4 part (0xb0 B, count +0xe0) whose +0xc
+    /// word == id: FUN_001f2a60 (bit 50 set -> clear, link into the SO set FUN_001f2870 when the object is in
+    /// the world, +0x28 bit 60) / FUN_001f2ad0 (bit 50 clear -> set, unlink FUN_001f2930). REPLACED: the SO set
+    /// is rebuilt (`so`, `so_gen` for the player layer); the in-world test is always true.
+    pub fn so_part_link(&mut self, obj: usize, id: i32, on: bool) {
+        use crate::engine::world::objects::{LoadData, Payload};
+        let Some(w) = self.k7_cache() else { return };
+        let Some(Payload::Loaded(LoadData::Alo { alo, .. })) = w.objects.get(obj).map(|o| &o.payload) else { return };
+        let mut changed = false;
+        for (k, p) in alo.parts.iter().enumerate() {
+            if p.w0 != id {
+                continue;
+            }
+            let cur = self.so_parts.get(&(obj, k)).copied().unwrap_or(p.b2 & 1 == 0);
+            if cur != on {
+                self.so_parts.insert((obj, k), on);
+                changed = true;
+            }
+        }
+        if changed {
+            self.so = Some(Arc::new(crate::engine::physics::query::CollisionWorld::build_so_masked(&w, &self.so_parts)));
+            self.so_gen = self.so_gen.wrapping_add(1);
+        }
+    }
+
+    /// WP-EP1d: FUN_001f6bc8(obj, id, v): +0x18 = v of every part whose +0xc word == id
+    pub fn ee_sub_1f6bc8(&mut self, obj: usize, id: i32, v: u32) {
+        use crate::engine::world::objects::{LoadData, Payload};
+        let Some(w) = self.k7_cache() else { return };
+        let Some(Payload::Loaded(LoadData::Alo { alo, .. })) = w.objects.get(obj).map(|o| &o.payload) else { return };
+        for (k, _) in alo.parts.iter().enumerate().filter(|(_, p)| p.w0 == id) {
+            self.so_part_18.insert((obj, k), v);
+        }
     }
 }

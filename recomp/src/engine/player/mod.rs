@@ -435,6 +435,14 @@ pub struct Jt {
     // ---- WP-P4 ----
     /// DAT_003e1b08 / DAT_003e1b10 target list (FUN_00194a40)
     pub targets: Vec<JtTarget>,
+    /// WP-K33: the category-list objects of 0x18b7e8's FUN_00194a40(world, jt, 0xffff), filled by the game
+    /// layer (None = not driven: `targets` is left as set, headless tests)
+    pub cands: Option<Vec<p4::TargetCand>>,
+    /// WP-K33: target vt+0x19c (slot 50)(target, jt) calls of 0x1911a8 kind 7 (pickpocket / use point), drained
+    /// by the game layer (`player::plugin::loot_link`)
+    pub slot50: Vec<usize>,
+    /// WP-K33: a recorded kind-7 attach waiting for its first jts-7 frame (0x1911a8)
+    pub k7_pending: bool,
     /// jt+0x4c0 attach object
     pub attach: Attach,
     /// jt+0x1000 target category mask (TARGET +0x1c test)
@@ -610,6 +618,9 @@ impl Jt {
             t_aseg_end: f32::MAX,
             calls: Vec::new(),
             targets: Vec::new(),
+            cands: None,
+            slot50: Vec::new(),
+            k7_pending: false,
             attach: Attach::default(),
             mask_1000: u32::MAX,
             is_player: true,
@@ -948,6 +959,20 @@ impl Jt {
 
     /// Input step 0x18b7e8 -> 0x18a8c8 (jts 0/1/2 parts, see module doc).
     fn input(&mut self, cw: &CollisionWorld, mut inp: JtInput, anim: &mut dyn JtAnim) {
+        // WP-K33: 0x18b7e8 -> FUN_00194a40(&DAT_003dd490, jt, 0xffff) before 0x18b2c0
+        if let Some(c) = self.cands.take() {
+            self.FUN_00194a40(&c, 0xffff);
+            self.cands = Some(c);
+        }
+        // WP-K33: 0x1911a8 kind 7 of a recorded attach (the attach state body is unported, see p4 FUN_001928f8):
+        // drop (SetJtJts(jt, 0) -> FUN_00192bd8(-1)) + target vt+0x19c (slot 50)(target, jt), queued in `slot50`
+        if std::mem::take(&mut self.k7_pending) && self.attach.kind == 7 {
+            if let Some(t) = self.attach.target.take() {
+                self.slot50.push(t);
+            }
+            self.calls.push((0x00192bd8, -1));
+            self.attach.sub = -1;
+        }
         // WP-P15: 0x18b7e8 -> 0x18b2c0 binocucom before 0x18a8c8 (mode 0 clears the stick)
         if self.FUN_0018b2c0(anim) {
             inp.stick = [0.0; 2];

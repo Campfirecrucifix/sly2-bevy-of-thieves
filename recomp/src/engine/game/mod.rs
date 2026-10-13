@@ -29,6 +29,7 @@ pub mod splice_host;
 pub mod startup;
 pub mod transition;
 pub mod vm_state;
+pub mod q_131990;
 
 #[cfg(feature = "game")]
 pub mod app;
@@ -36,3 +37,9 @@ pub mod app;
 pub mod flow_app;
 #[cfg(feature = "game")]
 pub mod fmv_app;
+pub mod q_0021c6c8;
+pub mod q_001bd040;
+pub mod q_001c0320;
+pub mod q_001f6838;
+pub mod q_001e9090;
+pub mod q_00141ef8;

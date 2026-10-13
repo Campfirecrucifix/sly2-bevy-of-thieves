@@ -222,6 +222,9 @@ fn main() {
         .insert_resource(Cm::new())
         .insert_resource(AudioSystem::new())
         .insert_resource(EmitterSystem::default())
+        // WP-EP1e: replaced 989snd client state + the verification monitor (env SLY2_AUDIO_LOG=1)
+        .insert_resource(sly2_recomp::engine::audio::emitter_tick::Snd989::default())
+        .insert_resource(sly2_recomp::engine::audio::bevy_out::AudioMonitor { on: std::env::var("SLY2_AUDIO_LOG").is_ok_and(|v| v == "1"), ..default() })
         .insert_resource(LevelGame { spawn_request: (-1, -1), ..default() })
         .insert_resource(GameAudio::new(settings.master_volume * settings.music_volume, settings.master_volume * settings.sfx_volume))
         .insert_resource(RumbleQueue::default())
@@ -245,7 +248,7 @@ fn main() {
                 (level_transition, poll_level_loads, capture_level_data, japp::capture_level_game, build_world, japp::activate_world, feed_player_level, feed_classes_level, level_scripts).chain(),
                 (clock_step, tick_scripts.after(japp::lend_classes)).chain(),
                 (report_world, spawn_level_geometry, japp::frame_camera, hor_plus, sync_cm_camera).chain(),
-                (japp::start_level_audio, japp::poll_level_audio, japp::update_music_layers, sly2_recomp::engine::disc::mods_sound::apply_sound_mods_system, japp::play_sound_events, japp::apply_rumble).chain(),
+                (japp::start_level_audio, japp::poll_level_audio, japp::update_music_layers, sly2_recomp::engine::disc::mods_sound::apply_sound_mods_system, japp::tick_sound_emitters, sly2_recomp::engine::audio::bevy_out::drain_snd_cmds, japp::play_sound_events, japp::apply_rumble, japp::audio_monitor).chain(),
                 frame_end,
             )
                 .chain()
@@ -340,15 +343,16 @@ fn setup(mut commands: Commands, s: Res<AppSettings>) {
     info!("lighting: {lighting:?}");
     // WP-R / A12: gfx::rt::rt_switch adds / removes SolariLighting on this camera whenever RtState::requested
     // changes (settings.toml at start, then the Graphics menu); stays raster when the GPU lacks ray tracing.
-    commands.spawn((Camera3d::default(), CmCamera, Transform::default()));
-    // PS2 lighting is mostly baked into vertex colours (COLOR attribute); a soft ambient + sun keeps the
-    // lit StandardMaterial readable in raster mode.
+    // WP-C9: no stand-in sun / fixed ambient: the level's LIGHT objects set both (gfx::game::spawn_level_lights,
+    // light::level_ambient). Tonemapping::None: the PS2 output is a plain clamp of texel * vcol * L (no filmic curve).
+    // The startup 600 nits stay only as the reference for the RT baked-light fill / sky (gfx::rt, R2
+    // tuning, read before any level exists); spawn_level_lights replaces it per level.
     commands.insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() });
-    commands.spawn((DirectionalLight { illuminance: 3000.0, ..default() }, Transform::from_xyz(1.0, 2.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y)));
+    commands.spawn((Camera3d::default(), CmCamera, Transform::default(), bevy::core_pipeline::tonemapping::Tonemapping::None));
 }
 
 /// MainStep::LevelTransition (FUN_0020e890).
-fn level_transition(mut commands: Commands, loader: Res<LevelLoader>, mut g: ResMut<GameLoop>, mut lg: ResMut<LevelGame>, mut fr: ResMut<sly2_recomp::engine::game::flow_app::FlowRequests>, mut fmv: ResMut<FmvPlayback>, (mut wipe, w): (ResMut<sly2_recomp::engine::gfx::screen::ScreenWipe>, Option<Res<World>>)) {
+fn level_transition(mut commands: Commands, loader: Res<LevelLoader>, mut g: ResMut<GameLoop>, mut lg: ResMut<LevelGame>, mut fr: ResMut<sly2_recomp::engine::game::flow_app::FlowRequests>, mut fmv: ResMut<FmvPlayback>, (mut wipe, w, ui): (ResMut<sly2_recomp::engine::gfx::screen::ScreenWipe>, Option<Res<World>>, Option<ResMut<sly2_recomp::engine::ui::plugin::UiGame>>)) {
     let g = &mut *g;
     // WP-J15: FUN_001660f8 (quit to title): the boot queue again
     if sly2_recomp::engine::game::boot::take_restart() {
@@ -376,9 +380,13 @@ fn level_transition(mut commands: Commands, loader: Res<LevelLoader>, mut g: Res
             lg.spawn_request = (r.spawn, r.spawn_parent);
         }
         g.world_reported = false;
-        // WP-C8: FUN_001618f8 fade-in carry-over and FUN_0022b420 (wipe re-found in the new level)
+        // WP-C8: FUN_0022b420 (wipe re-found in the new level). WP-C9: FUN_001618f8 is the HUD countdown
+        // (world+0x3bc4 = slot 3 of world+0x3ba0, oid 0x36f), not a screen fade: the carried-over
+        // seconds restart that countdown in the new level
         if let sly2_recomp::engine::game::transition::TransitionOutcome::Loaded { fade, .. } = o {
-            wipe.fade_in(fade);
+            if let Some(mut ui) = ui {
+                ui.countdown_carry = (fade > 0.0).then_some(fade);
+            }
             wipe.level_load_started(w.as_deref());
         }
         if let sly2_recomp::engine::game::transition::TransitionOutcome::OpenFailed(_) = &o {
@@ -448,7 +456,9 @@ fn frame_end(mut g: ResMut<GameLoop>) {
 /// WP-P2 wiring: hand the active world's collision + spawn point to the player (once per world).
 fn feed_player_level(w: Option<Res<World>>, lg: Res<LevelGame>, mut pl: ResMut<sly2_recomp::engine::player::plugin::PlayerLevel>, mut done: Local<Option<usize>>) {
     let Some(w) = w else { return };
-    let key = &*w as *const World as usize;
+    // WP-EP1c: keyed by the load count, not the World address (a same-level reload reuses the resource slot,
+    // so the death reload never re-fed the spawn / collision and Sly kept dying in the old JT)
+    let key = lg.loads as usize;
     if *done == Some(key) || lg.spawn.is_none() { return; }
     *done = Some(key);
     pl.cw = std::sync::Arc::new(sly2_recomp::engine::physics::CollisionWorld::build(&w));
@@ -460,7 +470,8 @@ fn feed_player_level(w: Option<Res<World>>, lg: Res<LevelGame>, mut pl: ResMut<s
 fn feed_classes_level(w: Option<Res<World>>, mut cl: ResMut<sly2_recomp::engine::classes::plugin::ClassesLevel>, mut done: Local<usize>) {
     let Some(w) = w else { return };
     let key = &*w as *const World as usize;
-    if *done == key { return; }
+    // WP-EP1c: a same-level reload reuses the World address; `is_changed` catches it
+    if *done == key && !w.is_changed() { return; }
     *done = key;
     cl.0 = Some(std::sync::Arc::new((*w).clone()));
 }

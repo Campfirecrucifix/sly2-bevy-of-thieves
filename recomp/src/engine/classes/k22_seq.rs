@@ -163,14 +163,14 @@ fn layout(f: i16) -> Option<(u32, B)> {
     let k = match f {
         625..=661 => (f - 625) as u32,
         662..=708 => (f - 626) as u32,
-        // K27: FUN_001e19b0..FUN_001e1b10 (fields 710..716 -> kinds 0x54..0x5a). Field 709 (FUN_001e1970,
-        // kind 0x53) is left out: its float / int argument order is ambiguous in the decompile.
-        710..=716 => (f - 626) as u32,
+        // K27: FUN_001e19b0..FUN_001e1b10 (fields 710..716 -> kinds 0x54..0x5a). Q4: field 709 (FUN_001e1970,
+        // kind 0x53): disasm 0x1e1970 + thunk 0x10a240: a1 = arg0 -> +0x10, f12 = arg1 -> +0x14, a2 = arg2 -> +4.
+        709..=716 => (f - 626) as u32,
         _ => return None,
     };
     let b = match f {
         628 | 629 | 652 | 654..=660 | 665 | 666 | 692 | 693 | 694 | 700 | 704 | 706..=708 => C(0),
-        711 | 714 | 715 | 716 => A(2),
+        709 | 711 | 714 | 715 | 716 => A(2),
         635 | 636 | 639 | 651 | 653 | 670 | 671 | 677 | 695 => A(2),
         638 | 661 | 662 | 667 | 668 | 669 | 685 => A(3),
         676 | 687 | 688 | 690 => A(1),
@@ -193,9 +193,16 @@ fn words(it: &ArrayItem) -> Vec<u32> {
 
 /// the record adders FUN_001e0290..FUN_001e1940 (through their field thunks)
 pub fn add_record(c: &mut C2d8c48, p: &Prop) {
-    let Some((kind, b)) = layout(p.field) else { return };
     let PropValue::Array(items) = &p.value else { return };
     let args: Vec<Vec<u32>> = items.iter().map(words).collect();
+    add_record_args(c, p.field, &args);
+}
+
+/// WP-Q2: the record adder of field `field` with its arguments as words (one Vec per argument; vectors
+/// 3 floats, oid lists one word per oid) - shared by the field load path and the script method thunks
+/// 0x106a80..0x10a1b8 (`game::methods::cls`).
+pub fn add_record_args(c: &mut C2d8c48, field: i16, args: &[Vec<u32>]) {
+    let Some((kind, b)) = layout(field) else { return };
     let a = |i: usize| args.get(i).and_then(|x| x.first().copied()).unwrap_or(0);
     let bv = match b {
         B::C(v) => v,
@@ -203,7 +210,7 @@ pub fn add_record(c: &mut C2d8c48, p: &Prop) {
     };
     let Some(k) = c.ee_sub_1e01f8(kind, bv) else { return };
     let r = &mut c.f_54[k];
-    match p.field {
+    match field {
         // FUN_001e0310: count (at most 4) + the oid list
         628 => {
             let l = args.first().cloned().unwrap_or_default();
@@ -221,7 +228,7 @@ pub fn add_record(c: &mut C2d8c48, p: &Prop) {
                 r[8 + j] = (f32::from_bits(*x) * 0.017453294).to_bits();
             }
             r[12] = a(2);
-            if p.field != 689 {
+            if field != 689 {
                 r[16] = a(3);
                 r[17] = a(4);
             }
@@ -248,7 +255,7 @@ pub fn add_record(c: &mut C2d8c48, p: &Prop) {
                     }
                 }
             }
-            match p.field {
+            match field {
                 // FUN_001e05a0: a4 != 0 -> +4 = 1
                 638 if a(4) != 0 => r[1] = 1,
                 // FUN_001e0b90 / 0c08: +0x24 = 1 / 0

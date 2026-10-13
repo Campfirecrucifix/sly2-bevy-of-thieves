@@ -240,6 +240,13 @@ impl AnimRt {
             x.st.svt = rate * x.f48 * x.f4c;
         }
     }
+    /// FUN_00131a20(v, asega): +0x48 = v, +0x40 = +0x44 * v * +0x4c (WP-Q3)
+    pub fn ee_sub_131a20(&mut self, v: f32, a: u32) {
+        if let Some(x) = self.asegas.get_mut(&a) {
+            x.f48 = v;
+            x.st.svt = x.st.svt2 * v * x.f4c;
+        }
+    }
     /// FUN_00204e38(t = +0x1c, obj, asega): root-channel velocity at the effective rate (+0x40); zero when not live
     pub fn ee_sub_204e38(&self, w: &World, a: u32) -> [f32; 3] {
         let Some(x) = self.asegas.get(&a).filter(|x| x.st.alive) else { return [0.0; 3] };

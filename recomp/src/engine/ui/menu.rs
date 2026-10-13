@@ -107,6 +107,10 @@ pub enum MenuEvent {
     JobHelp,
     /// FUN_001ad250 save slot n
     Slot(i32),
+    /// WP-EP1e: FUN_001ad480 "Save Game..." slot n (item +8)
+    SaveSlot(i32),
+    /// WP-EP1e: FUN_001ad320 "Load Game..." slot n (item +8)
+    LoadSlot(i32),
     /// FUN_001afb88 settings apply for the item's (new) string id
     Setting(i32),
     /// FUN_001aff88: slider cancelled -> FUN_001d8ff8 re-applies the stored options
@@ -535,6 +539,15 @@ impl MenuMgr {
             0x001a_d250 => {
                 self.events.push(MenuEvent::Slot(it.n));
                 it.flags
+            }
+            // WP-EP1e: both set the item's handled bit (+0x1c |= 2) when they do not leave the menu
+            0x001a_d480 => {
+                self.events.push(MenuEvent::SaveSlot(it.n));
+                handled
+            }
+            0x001a_d320 => {
+                self.events.push(MenuEvent::LoadSlot(it.n));
+                handled
             }
             a => {
                 self.events.push(MenuEvent::Other(a));

@@ -56,9 +56,12 @@ impl Plugin for PadPlugin {
             bindings,
             actuator: [0; 2],
         })
-        .add_systems(PreUpdate, pad_update.after(bevy::input::InputSystems));
+        .add_systems(PreUpdate, (device_script, pad_update).chain().after(bevy::input::InputSystems));
         if let Some(g) = std::env::var("SLY2_PAD_SCRIPT").ok().map(|s| GlobalPadScript::parse(&s)).filter(|g| !g.steps.is_empty()) {
             app.insert_resource(g);
+        }
+        if let Some(d) = std::env::var("SLY2_PAD_SCRIPT").ok().map(|s| DeviceScript::parse(&s)).filter(|d| !d.steps.is_empty()) {
+            app.insert_resource(d);
         }
     }
 }
@@ -97,6 +100,89 @@ impl GlobalPadScript {
             btn |= k;
         }
         (st, btn)
+    }
+}
+
+/// WP-EP1e (port addition, verification of R13): items `kA-B:Key[+Key]` / `pA-B:Pad[+Pad]` of env `SLY2_PAD_SCRIPT`
+/// hold keyboard keys (Bevy `KeyCode` / `Mouse:*` names) or buttons / axes (`GamepadButton` names, `LeftStickY+`)
+/// of a synthetic gamepad over APP frames [A, B), so the real `sample` path (controls.toml) is exercised.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct DeviceScript {
+    /// (from, to, keyboard?, names)
+    pub steps: Vec<(u32, u32, bool, Vec<String>)>,
+    pub frame: u32,
+    pub pad: Option<Entity>,
+}
+
+impl DeviceScript {
+    pub fn parse(src: &str) -> Self {
+        let mut steps = Vec::new();
+        for item in src.split(';').map(str::trim) {
+            let (kb, rest) = match item.split_at_checked(1) {
+                Some(("k", r)) => (true, r),
+                Some(("p", r)) => (false, r),
+                _ => continue,
+            };
+            let Some((range, names)) = rest.split_once(':') else { continue };
+            let Some((a, b)) = range.split_once('-') else { continue };
+            let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse()) else { continue };
+            // names joined by `+`; an axis name keeps its own trailing sign (`LeftStickY+`)
+            let mut list: Vec<String> = Vec::new();
+            for n in names.split('+').map(str::trim) {
+                match list.last_mut() {
+                    Some(l) if n.is_empty() => l.push('+'),
+                    _ if n.is_empty() => {}
+                    _ => list.push(n.to_string()),
+                }
+            }
+            steps.push((a, b, kb, list));
+        }
+        DeviceScript { steps, ..Default::default() }
+    }
+}
+
+fn device_script(
+    mut s: ResMut<DeviceScript>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut pads: Query<&mut Gamepad>,
+    mut commands: Commands,
+) {
+    let s = &mut *s;
+    let f = s.frame;
+    s.frame += 1;
+    let Some(e) = s.pad else {
+        s.pad = Some(commands.spawn(Gamepad::default()).id());
+        return;
+    };
+    let mut pad = pads.get_mut(e).ok();
+    for (a, b, kb, names) in &s.steps {
+        let on = f >= *a && f < *b;
+        if !on && f != *b {
+            continue;
+        }
+        for n in names {
+            if *kb {
+                match (key_code(n), mouse_button(n)) {
+                    (Some(k), _) if on => keys.press(k),
+                    (Some(k), _) => keys.release(k),
+                    (_, Some(m)) if on => mouse.press(m),
+                    (_, Some(m)) => mouse.release(m),
+                    _ => {}
+                }
+            } else if let Some(g) = pad.as_deref_mut() {
+                if let Some(btn) = pad_button(n) {
+                    if on {
+                        g.digital_mut().press(btn);
+                    } else {
+                        g.digital_mut().release(btn);
+                    }
+                    g.analog_mut().set(btn, if on { 1.0 } else { 0.0 });
+                } else if let Some((axis, sign)) = pad_axis(n) {
+                    g.analog_mut().set(axis, if on { sign } else { 0.0 });
+                }
+            }
+        }
     }
 }
 
@@ -189,7 +275,7 @@ fn apply(v: &mut VirtualPad, action: Action, value: f32) {
 }
 
 /// Sample everything into one virtual DualShock2 (keyboard/mouse and the first gamepad are merged).
-fn sample(
+pub fn sample(
     b: &Bindings,
     keys: &ButtonInput<KeyCode>,
     mouse: &ButtonInput<MouseButton>,
@@ -200,7 +286,9 @@ fn sample(
     for (name, srcs) in &b.keyboard {
         let Some(action) = action_by_name(name) else { continue };
         for s in srcs {
-            let held = key_code(s).is_some_and(|k| keys.pressed(k)) || mouse_button(s).is_some_and(|m| mouse.pressed(m));
+            // a tap pressed and released within one frame still counts (just_pressed)
+            let held = key_code(s).is_some_and(|k| keys.pressed(k) || keys.just_pressed(k))
+                || mouse_button(s).is_some_and(|m| mouse.pressed(m) || mouse.just_pressed(m));
             apply(&mut v, action, if held { 1.0 } else { 0.0 });
         }
     }
@@ -209,7 +297,8 @@ fn sample(
             let Some(action) = action_by_name(name) else { continue };
             for s in srcs {
                 let value = if let Some(btn) = pad_button(s) {
-                    g.get(btn).unwrap_or(if g.pressed(btn) { 1.0 } else { 0.0 })
+                    let v = g.get(btn).unwrap_or(0.0);
+                    if (g.pressed(btn) || g.just_pressed(btn)) && v < 0.5 { 1.0 } else { v }
                 } else if let Some((axis, sign)) = pad_axis(s) {
                     g.get(axis).unwrap_or(0.0) * sign
                 } else {
@@ -236,15 +325,22 @@ fn pad_update(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     gamepads: Query<(Entity, &Gamepad)>,
     mut rumble: MessageWriter<GamepadRumbleRequest>,
     script: Option<ResMut<GlobalPadScript>>,
+    dev_script: Option<Res<DeviceScript>>,
+    mut log: Local<(u32, Option<bool>, VirtualPad)>,
 ) {
     let dt = time.delta_secs();
     // DAT_002ddf10 is never 0 in the original; guard the first frame
     let clock = Clock { t: time.elapsed_secs(), dt: if dt > 0.0 { dt } else { 1.0 / 60.0 } };
     let first = gamepads.iter().next();
-    let mut v = sample(&input.bindings, &keys, &mouse, motion.delta, first.map(|(_, g)| g));
+    // raw mouse motion is reported even while the window is in the background: only a focused window
+    // turns it into right-stick input (and never during a scripted verification run)
+    let focused = windows.iter().next().is_some_and(|w| w.focused) && script.is_none() && dev_script.is_none();
+    let motion = if focused { motion.delta } else { Vec2::ZERO };
+    let mut v = sample(&input.bindings, &keys, &mouse, motion, first.map(|(_, g)| g));
     // WP-EP1a: scripted app-frame pad (verification)
     if let Some(mut s) = script {
         let (st, btn) = s.next();
@@ -259,6 +355,13 @@ fn pad_update(
         }
     }
     let raw = v.to_raw();
+    // WP-EP1e (verification): env SLY2_INPUT_LOG=1 logs the sampled virtual pad whenever it changes
+    let on = *log.1.get_or_insert_with(|| std::env::var("SLY2_INPUT_LOG").is_ok_and(|s| s == "1"));
+    log.0 += 1;
+    if on && v != log.2 {
+        info!("input f{}: buttons {:#06x} sticks {:?} (gamepads {})", log.0, v.buttons, v.sticks, gamepads.iter().count());
+        log.2 = v;
+    }
     let input = &mut *input;
     let mut sent: Option<[u8; 2]> = None;
     let r = pad::FUN_001871c0(

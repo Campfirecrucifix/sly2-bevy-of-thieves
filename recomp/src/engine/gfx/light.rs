@@ -231,5 +231,58 @@ pub fn ps2_light_unit_lux(ev100: f32) -> f32 {
     std::f32::consts::PI * 1.2 * ev100.exp2()
 }
 
+/// WP-C9: the VU1 setup block of overlay 376110651 (0x3e0..0x5e0) multiplies EVERY uploaded
+/// light term by 2.0 (MULi 0x568..0x590) before storing rows 21..30: a full-strength light facing
+/// the surface gives L = 2, and the GS modulate (texel * Cv / 0x80) shows 2x the texel byte. The
+/// level textures are authored for that (grey CLUT ramps mostly 0x20..0x9f, J3), so "1 PS2 light
+/// unit" = albedo only for half the VU light value.
+pub const VU1_LIGHT_SCALE: f32 = 2.0;
+
+/// WP-C9: the PS2 lights and the vertex colours scale bytes in display (gamma) space
+/// (`texel * vcol * L`, clamped by the GS), Bevy multiplies linear values. A display factor x is
+/// the linear factor x^2.2 (sRGB ~ gamma 2.2): `out_lin = texel_lin * x^2.2` encodes to
+/// `texel * x`. Without it a dark term (L = 0.37) showed as 0.64 -> flat, low contrast frames.
+pub const PS2_GAMMA: f32 = 2.2;
+
+/// display-space factor -> linear factor (`PS2_GAMMA`), per channel, negatives clamped.
+pub fn ps2_linear(x: f32) -> f32 {
+    x.max(0.0).powf(PS2_GAMMA)
+}
+
+/// WP-C9: per-light terms as the VU1 applies them (PS2 display units, `VU1_LIGHT_SCALE`
+/// included): (ambient, facing). FUN_001a4478 uploads +0x120..+0x14f (q0 = (+0x120, du, ru,
+/// +0x12c), q1 = colour rgb/g + k13c, q2 = vec) to VU rows 0x15 + 3i; the setup sums
+/// `colour_i * du_i` into the ambient row (vf10 = row 29) and the angular slope into the light
+/// matrix, so a surface perpendicular to the light gets `colour * du` and one facing it
+/// `colour * g/255` (the FitLinear end point).
+pub fn vu1_light_terms(d: &LightDerived) -> ([f32; 3], [f32; 3]) {
+    let amb = d.color.map(|c| VU1_LIGHT_SCALE * c * d.du.max(0.0));
+    let face = d.color.map(|c| VU1_LIGHT_SCALE * c * d.g / 255.0);
+    (amb, face)
+}
+
 /// ev100 of bevy_camera `Exposure::default()` (= `Exposure::BLENDER`).
 pub const BEVY_DEFAULT_EV100: f32 = 9.7;
+
+/// WP-C9: the VU1 ambient row (vf10 = row 29) of the global (directional, FUN_001a3d00 bit set
+/// +0x4570) lights: sum of `colour * du` x2 over every active directional LIGHT, linearised, as
+/// `GlobalAmbientLight` (gfx::game::ambient_resource; colour, brightness in nits: Bevy shows `albedo * brightness * exposure`,
+/// so one PS2 unit = `ps2_light_lux() / PI` = 998.6 nits at the default exposure). Point lights'
+/// du parts are local (BSP buckets) and not folded in.
+pub fn level_ambient<'a>(lights: impl IntoIterator<Item = &'a (LightParams, Affine)>) -> [f32; 3] {
+    let mut a = [0.0f32; 3];
+    for (p, w) in lights {
+        if p.excluded || p.kind != 0 {
+            continue;
+        }
+        let d = ee_sub_1a3968(p, w, false);
+        if d.g <= 0.0 {
+            continue;
+        }
+        let (amb, _) = vu1_light_terms(&d);
+        for k in 0..3 {
+            a[k] += amb[k];
+        }
+    }
+    a.map(ps2_linear)
+}

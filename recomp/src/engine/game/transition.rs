@@ -2,7 +2,7 @@
 //! Level transition state machine: FUN_0020e890 (level open + load, run once per frame from main()).
 //! The request lives in the world struct: +0x3bf0 pending flag, +0x3bf4 request (0x4c bytes:
 //! u32 flags, 64-byte descriptor, u32 spawn oid (+0x3c38), u32 spawn parent oid (+0x3c3c)),
-//! +0x3c40 current level descriptor, +0x3c88/+0x3c8c last spawn used, +0x476c fade end time.
+//! +0x3c40 current level descriptor, +0x3c88/+0x3c8c last spawn used, +0x476c HUD countdown end time (WP-C9).
 //! Disc open/LZ/parse go through WP-A `LevelLoader` and WP-B `World::load` (via `LevelHost`).
 
 use super::clock::{self, Clock};
@@ -56,7 +56,7 @@ pub struct TransitionState {
     pub current: Option<Descriptor>,
     /// +0x3c88/+0x3c8c: spawn used by the last load (set only when the spawn object was found)
     pub last_spawn: Option<(i32, i32)>,
-    /// +0x476c: fade end time (game clock)
+    /// +0x476c: HUD countdown end time (game clock; FUN_001618f8 / FUN_00161958, WP-C9)
     pub t_fade_end: f32,
 }
 
@@ -84,7 +84,7 @@ pub trait LevelHost {
     fn find_spawn(&mut self, _spawn: i32, _parent: i32) -> bool {
         false
     }
-    /// FUN_001618f8(fade): start a fade-in of `fade` seconds.
+    /// FUN_001618f8(t): restart the HUD countdown (world+0x3bc4 slot 3) with `t` seconds left (WP-C9).
     fn fade_in(&mut self, _fade: f32) {}
 }
 

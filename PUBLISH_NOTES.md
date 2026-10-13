@@ -8,12 +8,15 @@ Created from the development repo (`Sly 2/recomp`) on 2026-10-13 as a single com
 - `recomp/vendor/sly2_db/` — only `final_build.rs` of the dev analysis crate (graphics settings, Hor+, mod
   load order). The database / decompiler / extraction modules and their dependencies (rusqlite, regex, ...)
   are not published; `Cargo.lock` was pruned accordingly by cargo.
-- `recomp/tests/` — 48 of the 128 dev test files: the ones that need only the user's ISO. Changes vs dev:
-  hard-coded `C:/Users/...` ISO paths -> `<repo>/Sly 2 - Band of Thieves (USA).iso`; repo-root detection
-  checks the ISO instead of `db/sly2.sqlite`; `engine_j15` writes its dumps to the OS temp dir;
-  `engine_k20::levels()` (shared by d6, k21-k29, x3) enumerates levels from the boot level's level table
-  + `level_check::check_level_row` instead of the DB (verified: same 43 LSNs as the DB's `disc_files`).
-  Dropped: every test that opens `db/sly2.sqlite`, `extracted/`, `bin/` or checks committed screenshots.
+- `recomp/tests/all/` (single test binary since dev WP-T1; refreshed by WP-INT1) — 108 of the 147 dev test
+  modules: the ones that need only the user's ISO. Generated from dev `tests/all` by a script: hard-coded
+  `C:/Users/...` paths -> `CARGO_MANIFEST_DIR/..`; `C:/Temp` dumps -> OS temp dir; repo-root detection checks
+  the ISO; every module-local DB-based `levels()` and `common::levels()` -> the boot level's level table
+  (non-empty rows = the same 43 level files as the DB's `disc_files`); the level cache lives in the OS temp dir.
+  Dropped: modules that open `db/sly2.sqlite`, `extracted/`, `bin/`, Ghidra output or committed screenshots,
+  and `q2` (needs the table below). Full tier (`-- --include-ignored`): 41 + 649 tests pass.
+- `src/engine/classes/q/q2_thunks.rs` (dev WP-Q2: 176 thunk -> callee pairs, used only by the dev test q2)
+  is NOT published (embedded game table; the game reads thunk callees from SCUS_973.16 via exe_scan).
 - `recomp/mods/README.md` (= dev `MODDING.md`: overlay paths + load order), `recomp/settings.example.toml`.
 - Not included: ISO/ELF/extracted files, `db/*.sqlite`, decompiled C, Ghidra projects, tools, screenshots,
   dev notes (ENGINE_PORT.md / PROGRESS.md / work-package briefs).

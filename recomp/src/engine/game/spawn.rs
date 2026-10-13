@@ -120,6 +120,11 @@ pub fn player_object(w: &World) -> Option<usize> {
     w.of_class(53, false).next()
 }
 
+/// WP-EP1c: the object's load position is exactly the world origin (placeholder spawn / JT load position).
+pub fn at_origin(w: &World, i: usize) -> bool {
+    spawn_position(w, i) == Some([0.0; 3])
+}
+
 /// Spawn object transform (FUN_00231170 local matrix at +0x60: 4 rows x 3 f32, row 3 = position).
 /// WP-J12: for the JT ([`player_object`]) its load position (FUN_001a62e8 world matrix row 3).
 pub fn spawn_position(w: &World, i: usize) -> Option<[f32; 3]> {

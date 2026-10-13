@@ -70,7 +70,15 @@ impl CollisionWorld {
     /// ref == 0 -> +0 = DAT_002c44f0 and the copy aliases the streamed geom (already world space); else
     /// +0 = vtable +0x19c(ref) (bone) and FUN_00166270(local, bone world) (rest pose here; parts are not
     /// re-transformed when bones move). Water (class 89) parts are hazard volumes (player::p8_hazard).
+    /// WP-EP1d: FUN_001f2b20 links only the parts without +0x10 bit 50 (stream flag byte b2) into the SO
+    /// collision set; FUN_001f6ac8 / 001f6b48 clear / set the bit at run time (`build_so_masked`).
     pub fn build_so(w: &World) -> Self {
+        Self::build_so_masked(w, &std::collections::HashMap::new())
+    }
+
+    /// WP-EP1d: `build_so` with the run-time part +0x10 bit 50 state `on[(object, part)]` (true = linked,
+    /// FUN_001f2a60; false = unlinked, FUN_001f2ad0); parts not in `on` keep the streamed bit.
+    pub fn build_so_masked(w: &World, on: &std::collections::HashMap<(usize, usize), bool>) -> Self {
         use crate::engine::gfx::attach::{ee_sub_22d6b0, BoneRef, BoneWorlds};
         use super::geom::FUN_00166270;
         let mut bw = BoneWorlds::default();
@@ -81,6 +89,9 @@ impl CollisionWorld {
                 continue;
             }
             for (k, p) in alo.parts.iter().enumerate() {
+                if !on.get(&(i, k)).copied().unwrap_or(p.b2 & 1 == 0) {
+                    continue;
+                }
                 let local = build_geom(&p.geom);
                 let geom = if p.r#ref == 0 {
                     local

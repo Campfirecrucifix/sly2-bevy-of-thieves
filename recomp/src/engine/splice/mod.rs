@@ -7,6 +7,7 @@ pub mod frame;
 pub mod host;
 pub mod serialize;
 pub mod value;
+pub mod q_run_001285d8;
 
 pub use eval::Vm;
 pub use host::{NullHost, SpliceHost};

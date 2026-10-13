@@ -368,6 +368,14 @@ pub fn FUN_00210b98(t: &LevelTable, i: i32) -> Option<Descriptor> {
     (d.0[4..8] != d.0[0x3c..0x40]).then_some(d)
 }
 
+/// WP-EP1d: 0x00210b70 hub level of the job complete / end paths (0x162e38 / 0x162a60):
+/// FUN_00210b98(FUN_00210ae0()) = slot descriptor DAT_003e1c50[DAT_003e1c44[current row]]; REPLACED: the
+/// descriptor -> the level-table row loading the same file (`JobReload` carries rows).
+pub fn FUN_00210b70(t: &LevelTable, cur_row: i32) -> Option<i32> {
+    let d = FUN_00210b98(t, crate::engine::game::flow::FUN_00210ae0(cur_row, Some(t)))?;
+    t.entries.iter().position(|e| e.desc.same_file(&d)).map(|k| k as i32)
+}
+
 /// FUN_00165e38 save-variable reads (REPLACED, see the module doc).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NewGameVars {

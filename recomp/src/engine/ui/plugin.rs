@@ -107,6 +107,11 @@ pub struct UiGame {
     /// FUN_001618b0 counts
     pub slots: super::hud_slots::HudSlots,
     pub slot_feed: (u32, u32),
+    /// WP-C9: FUN_0020e890 tail `FUN_001618f8(world, (int)(+0x476c - t))`: countdown seconds carried over a
+    /// level load, started once the new level's slots exist (after FUN_0020f710)
+    pub countdown_carry: Option<f32>,
+    /// WP-K33: last seen `EngineHost::hud_timer` request count
+    pub timer_feed: u32,
     /// A14: DAT_002f6334 (card slot chosen on the load menu, 1-based; 0 = none -> START = New Game)
     pub card_slot: i32,
     /// A14: port load menu over the title (REPLACES the card manager's slot choice)
@@ -153,6 +158,8 @@ impl Plugin for UiPlugin {
                 title_shows_seen: 0,
                 slots: Default::default(),
                 slot_feed: (0, 0),
+                countdown_carry: None,
+                timer_feed: 0,
                 card_slot: 0,
                 load: Default::default(),
                 fresh_blob: None,
@@ -472,7 +479,11 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
         game.binoc_req = -1;
         // A14: FUN_0020f710 (level start, world+0x3ba0 slots)
         game.slots.FUN_0020f710();
+        if let Some(t) = game.countdown_carry.take() {
+            game.slots.FUN_001618f8(t, time.elapsed_secs());
+        }
         game.slot_feed = classes.as_ref().map_or((0, 0), |c| (c.host.hud_coins, c.host.hud_bottles));
+        game.timer_feed = classes.as_ref().map_or(0, |c| c.host.hud_timer.0);
         // debug hook (port): SLY2_HUD_POP=1 pops the coin / bottle labels and a 30 s countdown
         if std::env::var("SLY2_HUD_POP").is_ok_and(|v| v == "1") {
             let now = time.elapsed_secs();
@@ -494,6 +505,15 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
             game.slots.FUN_001618b0(now);
         }
         game.slot_feed = feed;
+        // WP-K33: loot countdown (FUN_001618f8 / FUN_00161958 of the loot system)
+        if c.host.hud_timer.0 != game.timer_feed {
+            game.timer_feed = c.host.hud_timer.0;
+            if c.host.hud_timer.1 >= 0.0 {
+                game.slots.FUN_001618f8(c.host.hud_timer.1, now);
+            } else {
+                game.slots.FUN_00161958(now);
+            }
+        }
     }
     game.slots.meter_shown = game.meter.health_shown || game.meter.power_shown;
     let covered = game.menu.depth > 0 || game.title;
@@ -540,6 +560,12 @@ fn ui_update(
     mut lg: Option<ResMut<LevelGame>>,
     audio: Option<ResMut<AudioSystem>>,
     gfx: Option<ResMut<GfxSettings>>,
+    (mut slots, mut card, mut cap, mut prev_depth): (
+        Option<ResMut<crate::engine::game::flow_app::SaveSlots>>,
+        Local<super::card_app::CardApp>,
+        ResMut<UiCaption>,
+        Local<i32>,
+    ),
 ) {
     let Some(mut pad) = pad else { return };
     let game = &mut *game;
@@ -588,10 +614,40 @@ fn ui_update(
     } else if game.menu.depth == 0 && pad::FUN_00187d80(p, 0x800) != 0 && !game.menu.FUN_001b0290(&ctx) {
         pad::FUN_00187e08(p, 0x800);
     }
-    game.menu.FUN_001aeee0(p, clock, &ctx);
+    // WP-EP1e: FUN_001acc38 card refresh of the slot copies when the pause menu opens (MenuMgr::slots /
+    // cur_slot feed FUN_001ad538 and the slot rows)
+    if game.menu.depth > 0 && *prev_depth == 0 {
+        card_refresh(game, &card, slots.as_deref(), lg.as_deref());
+    }
+    *prev_depth = game.menu.depth;
+    // WP-EP1e: the memory-card dialog 0x2e6550 (FUN_001accc8) runs before the menu; while one of its
+    // messages is up the menu gets no input
+    let mut out = card_dialog_run(game, &mut card, p, clock.t, lg.as_deref_mut(), slots.as_deref_mut(), |h| h.run(|d, h| d.FUN_001accc8(h)));
+    if card.dlg.msg == -1 {
+        game.menu.FUN_001aeee0(p, clock, &ctx);
+    }
     let events: Vec<MenuEvent> = game.menu.events.drain(..).collect();
     for e in events {
+        debug!("ui: menu event {e:?}");
         match e {
+            MenuEvent::SaveSlot(n) => {
+                out.merge(card_dialog_run(game, &mut card, p, clock.t, lg.as_deref_mut(), slots.as_deref_mut(), |h| {
+                    h.run(|d, h| {
+                        d.FUN_001ad480(h, n);
+                    })
+                }));
+            }
+            MenuEvent::LoadSlot(n) => card_load(game, &mut card, n, lg.as_deref_mut(), slots.as_deref_mut()),
+            MenuEvent::DeleteSlot(n) => {
+                if let Some(s) = slots.as_deref() {
+                    let path = s.card.slot_path(n.clamp(0, 2) as usize);
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => info!("card: deleted slot {} ({})", n + 1, path.display()),
+                        Err(e) => warn!("card: delete slot {}: {e}", n + 1),
+                    }
+                }
+                card_refresh(game, &card, slots.as_deref(), lg.as_deref());
+            }
             MenuEvent::Setting(_) | MenuEvent::Revert => {
                 let Some(g) = lg.as_deref_mut() else { continue };
                 let Some(v) = g.vars.as_ref() else { continue };
@@ -601,15 +657,51 @@ fn ui_update(
                     opt::FUN_001d8ff8(&mut game.menu.opts, v, &game.paths, &g.data);
                 }
             }
-            // FUN_001b0878 with no slot in use -> FUN_001660f8 (back to the title / episode screen)
+            // FUN_001b0878 "Yes, Quit": with a slot in use save first (dialog purpose 1 quits afterwards),
+            // else FUN_001660f8 (back to the title / episode screen)
             MenuEvent::Quit | MenuEvent::ExitToEpisode => {
-                game.menu.depth = 0;
-                game.menu.state = 0;
-                game.title = true;
+                let mut saving = false;
+                if e == MenuEvent::Quit {
+                    out.merge(card_dialog_run(game, &mut card, p, clock.t, lg.as_deref_mut(), slots.as_deref_mut(), |h| saving = h.FUN_001b0878()));
+                }
+                if !saving {
+                    game.menu.depth = 0;
+                    game.menu.state = 0;
+                    game.title = true;
+                }
             }
             MenuEvent::Graphics => apply_graphics(game, gfx.as_deref()),
             MenuEvent::Video | MenuEvent::Audio | MenuEvent::Mods => game.port_events.push(e),
             _ => info!("ui: menu event {e:?} (effect not ported)"),
+        }
+    }
+    {
+        let o = out;
+        if o.saved.is_some() {
+            card_refresh(game, &card, slots.as_deref(), lg.as_deref());
+        }
+        if o.pop {
+            game.menu.FUN_001af608();
+        }
+        if o.close_all {
+            game.menu.FUN_001af660();
+        }
+        if o.quit {
+            // FUN_001660f8
+            game.menu.depth = 0;
+            game.menu.state = 0;
+            game.title = true;
+        }
+    }
+    // the dialog message (REPLACED: screen string 0x52c) as the caption
+    if card.dlg.msg != card.logged {
+        info!("card: dialog msg {:#x} -> {:#x} (purpose {})", card.logged, card.dlg.msg, card.dlg.purpose);
+        card.logged = card.dlg.msg;
+    }
+    let text = super::card_app::msg_text(card.dlg.msg).map(str::to_string);
+    if text.is_some() || card.dlg.msg == -1 && cap.0.as_deref().is_some_and(|c| (0..0x30).any(|m| super::card_app::msg_text(m) == Some(c))) {
+        if cap.0 != text {
+            cap.0 = text;
         }
     }
     if let Some(mut gfx) = gfx {
@@ -625,6 +717,80 @@ fn ui_update(
             a.sfx_volume = o.effects;
         }
     }
+}
+
+/// WP-EP1e: run `f` with the card dialog host (no-op without a level / save table / slot files).
+fn card_dialog_run(
+    game: &mut UiGame,
+    card: &mut super::card_app::CardApp,
+    p: &mut pad::PadState,
+    now: f32,
+    lg: Option<&mut LevelGame>,
+    slots: Option<&mut crate::engine::game::flow_app::SaveSlots>,
+    f: impl FnOnce(&mut super::card_app::Host),
+) -> super::card_app::CardOut {
+    let (Some(g), Some(s)) = (lg, slots) else { return Default::default() };
+    let Some(vars) = g.vars.as_ref() else { return Default::default() };
+    let top = game.menu.FUN_001b0078();
+    let mut h = super::card_app::Host {
+        app: card,
+        now,
+        pad: p,
+        card: &s.card,
+        slot: &mut s.slot,
+        vars,
+        paths: &game.paths,
+        data: &mut g.data,
+        vibration: game.menu.opts.vibration,
+        title: game.title,
+        save_menu: game.menu.depth > 0 && matches!(top, 0x19 | 0x1e | 0x1f),
+        purpose: None,
+        out: Default::default(),
+    };
+    f(&mut h);
+    h.out
+}
+
+/// WP-EP1e: FUN_001acc38(0x2e6550, 1) card refresh -> MenuMgr::slots (`dt` of each slot file) / cur_slot.
+fn card_refresh(game: &mut UiGame, card: &super::card_app::CardApp, slots: Option<&crate::engine::game::flow_app::SaveSlots>, lg: Option<&LevelGame>) {
+    let (Some(s), Some(v)) = (slots, lg.and_then(|g| g.vars.as_ref())) else { return };
+    game.menu.slots = super::card_app::slots_dt(&s.card, v, &game.paths);
+    game.menu.cur_slot = card.in_use.then_some(s.slot as i32);
+}
+
+/// WP-EP1e: FUN_001ad320 (in-game "Load Game..." slot n): DAT_002f6330 = the slot; an empty slot (dt == 0)
+/// gets FUN_001d8d80(slot, 1); then FUN_00165e38 continues from it (`flow::FUN_00165e38_full`: the episode
+/// level / hideout request, or a new game on an empty slot). REPLACED: the slot blob becomes the live blob
+/// here (the original's level load copies DAT_002deb4c) and the menus close.
+fn card_load(game: &mut UiGame, card: &mut super::card_app::CardApp, n: i32, lg: Option<&mut LevelGame>, slots: Option<&mut crate::engine::game::flow_app::SaveSlots>) {
+    use crate::engine::game::flow;
+    let (Some(g), Some(s)) = (lg, slots) else { return };
+    let Some(vars) = g.vars.as_ref() else { return };
+    let Ok(i) = usize::try_from(n) else { return };
+    let paths = flow::StartPaths::new(vars);
+    let d = match flow::FUN_001ad320(&s.card, i, vars, paths.dt.as_deref()) {
+        Ok(d) => d,
+        Err(crate::engine::game::save::McError::NoFile) => {
+            // an empty slot: a fresh blob keeping the options (FUN_001d8d80(slot, 1))
+            let mut d = g.data.clone();
+            let kept: Vec<_> = game.paths.flags.iter().flatten().map(|p| (p, vars.ee_sub_1d7ed8(p, &g.data))).collect();
+            vars.ee_sub_1d8d80(&mut d, false, &[], None);
+            for (p, v) in kept {
+                vars.ee_sub_1d80c8(p, v, &mut d);
+            }
+            d
+        }
+        Err(e) => {
+            warn!("card: load slot {}: {e:?}", i + 1);
+            return;
+        }
+    };
+    s.slot = i;
+    card.in_use = true;
+    g.data = d;
+    let st = flow::FUN_00165e38_full(false, vars, &paths, &g.data, g.table.as_ref(), i as i32 + 1);
+    info!("card: load slot {}: {st:?} (completion {}%): {}", i + 1, flow::FUN_001d82b8(vars, &paths, &g.data), super::card_app::blob_summary(vars, &game.paths, &g.data));
+    game.menu.FUN_001af660();
 }
 
 /// Port addition: write the graphics page into settings.toml (ink outlines also apply live).
@@ -715,6 +881,11 @@ fn draw_ui(
 /// other frame (title back after START) and dropped the `k22_title_active` mirror.
 fn title_from_sequence(mut game: ResMut<UiGame>, classes: Option<ResMut<crate::engine::classes::plugin::Classes>>) {
     let Some(mut c) = classes else { return };
+    // WP-EP1c: while the class set is lent to the script host `Classes` holds a default host (counter 0):
+    // not a new world, so the seen count must not be reset (the title log re-fired ~every 18 frames)
+    if c.host.world.is_none() {
+        return;
+    }
     let shows = c.host.k22_title_shows;
     if shows < game.title_shows_seen {
         game.title_shows_seen = 0;
@@ -870,6 +1041,7 @@ fn title_input(
                             game.fresh_blob = Some(g.data.clone());
                         }
                         g.data = d;
+                        info!("card: title load slot {}: {}", i + 1, super::card_app::blob_summary(v, &game.paths, &g.data));
                         game.card_slot = i as i32 + 1;
                         s.slot = i;
                     }

@@ -536,6 +536,13 @@ impl MeshSet {
     }
 }
 
+/// WP-C9 debug (REPLACED, not in the original): `SLY2_COSTUME=<mission row>` also loads the mesh records
+/// listed for that row (the per-mission disguise pieces, e.g. 11 = tuxedo) in every level.
+pub fn costume_override() -> Option<i16> {
+    static C: std::sync::OnceLock<Option<i16>> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var("SLY2_COSTUME").ok()?.trim().parse().ok())
+}
+
 pub fn ee_sub_167320(s: S, mission: i16) -> Result<MeshSet, WorldError> {
     // 0x00167320
     let no_bounds = s.read_u8();
@@ -555,8 +562,8 @@ pub fn ee_sub_167320(s: S, mission: i16) -> Result<MeshSet, WorldError> {
         if k != 0 {
             let list: Vec<i16> = (0..k.max(0)).map(|_| s.read_s16()).collect();
             let size = s.read_u32();
-            // FUN_0013fad0
-            if !ee_sub_13fad0(mission, &list) {
+            // FUN_0013fad0 (WP-C9: + debug costume override, see `costume_override`)
+            if !ee_sub_13fad0(mission, &list) && !costume_override().is_some_and(|c| list.contains(&c)) {
                 s.read((size as i32).max(0) as usize, None); // FUN_001179b8
                 records.push(MeshRecord {
                     filter: Some((list, size)),

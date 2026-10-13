@@ -6,7 +6,9 @@
 use super::save::{GameData, SaveVars};
 use super::spawn::{self, SpawnAliases};
 use super::splice_host::RumbleRequest;
+use crate::engine::audio::bevy_out::AudioMonitor;
 use crate::engine::audio::emitter::{EmitterId, EmitterSystem};
+use crate::engine::audio::emitter_tick::Snd989;
 use crate::engine::audio::music_layers::{self, InstState, MusicLayers, PlayerMusic};
 use crate::engine::audio::{self, bank::Bank, music, vpk, AudioSystem, Pcm, SoundFileKind};
 use crate::engine::camera::{cm, Cm, CmClock};
@@ -59,17 +61,30 @@ pub struct LevelGame {
     pub loads: u32,
     /// WP-J5: live ASEGAs of the level (driven in `tick_scripts`)
     pub anims: super::anim_play::LevelAnims,
+    /// WP-EP1e: 0x3dd040 sound records of the level (FUN_001fd0e8 +0xfc kinds / +0x100 id map)
+    pub snd_table: Option<crate::engine::audio::emitter_tick::SoundTable>,
 }
 
 /// Schedule `.before(world::build_world)`: keeps what WP-J needs from the level header.
-pub fn capture_level_game(mut g: ResMut<LevelGame>, res: Option<Res<LevelLoadResult>>) {
+pub fn capture_level_game(mut g: ResMut<LevelGame>, res: Option<Res<LevelLoadResult>>, opt: Option<ResMut<crate::engine::world::WorldOptions>>) {
     let Some(Ok(l)) = res.as_deref().map(|r| &r.0) else { return };
+    // WP-C9: DAT_003e1110 (world+0x3c80, FUN_00210a88) = level-table row of the level being loaded
+    // (FUN_002109d0: first row whose descriptor is the same file, -1 when none). It drives the mission
+    // lists of FUN_0013fad0: with -1 every list passes and Sly drew all disguise pieces (rows 11 / 17 / 32)
+    // over his normal outfit.
+    if let Some(mut o) = opt {
+        o.0.mission = crate::engine::disc::descriptor::ee_sub_2109d0(&l.header.level_table, &l.desc) as i16;
+    }
     let b = &l.header.block_3dd040;
     let files = audio::level_sound_files(b);
     g.bank = files.iter().find(|(k, _)| *k == SoundFileKind::Bank).map(|(_, d)| *d);
     g.music = b.desc2.filter(|d| d.size() > 0).or_else(|| files.iter().find(|(k, _)| *k == SoundFileKind::MusicStream).map(|(_, d)| *d));
     let vars = SaveVars::from_block(&l.header.block_3a18);
+    // WP-EP1e: the save-variable table load ends with FUN_001d7c80(table, 0x3d4a60): stamp the live
+    // blob's layout signature (cleared when the layout differs)
+    vars.ee_sub_1d7c80(&mut g.data);
     g.vars = Some(vars);
+    g.snd_table = Some(crate::engine::audio::emitter_tick::SoundTable::from_block(b));
     g.level_data = Some(l.data.clone());
     g.scripts = None;
     g.table = Some(l.header.level_table.clone());
@@ -93,7 +108,10 @@ pub fn activate_world(mut g: ResMut<LevelGame>, w: Option<Res<World>>, opt: Opti
     g.last_spawn = if found.is_some() { (oid, parent) } else { (0, 0) };
     // WP-J17: debug entry (`--table` / `--level`: the first load, default request) into a level without
     // spawn 0x189 -> the task spawn the game's own request would carry (`spawn::debug_entry_spawn`, REPLACED)
-    if found.is_none() && g.loads == 1 && (oid, parent) == (crate::engine::game::transition::SPAWN_DEFAULT, -1) {
+    // WP-EP1c: also when the found default spawn is an origin placeholder (identity load transform, row 38
+    // spawn 0x189 obj 2329: the game enters that level only through a task spawn)
+    let placeholder = found.is_some_and(|i| spawn::at_origin(&w, i));
+    if (found.is_none() || placeholder) && g.loads == 1 && (oid, parent) == (crate::engine::game::transition::SPAWN_DEFAULT, -1) {
         let row = opt.map_or(-1, |o| o.0.mission as i32);
         if let Some((i, s)) = spawn::debug_entry_spawn(&w, &g.aliases, row) {
             found = Some(i);
@@ -104,6 +122,13 @@ pub fn activate_world(mut g: ResMut<LevelGame>, w: Option<Res<World>>, opt: Opti
     // (vtable +0x134 via FUN_00228750 / the +0x3ebc loop); otherwise the JT stays where the level load
     // put it. Was: the first class-0x2a object with a transform (table 30: the cable-car retry spawn).
     g.spawn = found.or_else(|| spawn::player_object(&w));
+    // WP-EP1c (REPLACED debug entry): a debug load whose only spawn / JT load position is the origin
+    // placeholder (row 16: spawn 77108 and JT 465 at (0,0,0), Sly embedded in geometry) leaves the player
+    // unplaced (the camera frames the level bounds) instead of starting him inside the level geometry
+    if g.loads == 1 && (oid, parent) == (crate::engine::game::transition::SPAWN_DEFAULT, -1) && g.spawn.is_some_and(|i| spawn::at_origin(&w, i)) {
+        warn!("debug entry: spawn {:?} is an origin placeholder, player not placed", g.spawn);
+        g.spawn = None;
+    }
     g.active = spawn::active_objects(&w);
     let LevelGame { anims, active, .. } = &mut *g;
     anims.start_live(&w, active);
@@ -167,6 +192,9 @@ pub struct GameAudio {
     task: Option<Task<AudioLoad>>,
     /// WP-J16: one looping player per layer (volume = 0x3dd040 layer volume, FUN_001fd830 step)
     music: Vec<Entity>,
+    /// WP-EP1e: the layers' PCM (AudioMonitor software mix) and the time they started
+    music_pcm: Vec<Arc<Pcm>>,
+    music_t0: f64,
     /// WP-J16: 0x3dd040 layer state (FUN_001fdc08 / FUN_001fc2e0)
     pub layers: MusicLayers,
     /// frames since the music instance started (+0x52 / +0x50 & 1 while 0)
@@ -238,7 +266,7 @@ fn source(pcm: &Pcm) -> AudioSource {
     AudioSource { bytes: Arc::from(pcm.to_wav()) }
 }
 
-pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands) {
+pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands, time: Res<Time>) {
     let Some(t) = ga.task.as_mut() else { return };
     let Some(r) = block_on(future::poll_once(t)) else { return };
     ga.task = None;
@@ -251,6 +279,8 @@ pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>,
         info!("audio: music {} Hz, {:.1} s, {} layers", m.sample_rate, m.samples.len() as f32 / 2.0 / m.sample_rate.max(1) as f32, r.music.len());
     }
     // all layers start together (silent until the first FUN_001fdc08 pass sets their volumes)
+    ga.music_pcm = r.music.iter().map(|m| Arc::new(m.clone())).collect();
+    ga.music_t0 = time.elapsed_secs_f64();
     for m in &r.music {
         let h = sources.add(source(m));
         let e = commands.spawn((AudioPlayer(h), PlaybackSettings { volume: Volume::Linear(0.0), ..PlaybackSettings::LOOP })).id();
@@ -288,27 +318,138 @@ pub fn update_music_layers(mut ga: ResMut<GameAudio>, players: Query<&crate::eng
     }
 }
 
-/// Starts PCM for new emitters (BIF 129 / FUN_001fbb90) and AudioSystem voices.
-pub fn play_sound_events(mut ga: ResMut<GameAudio>, sys: Res<AudioSystem>, emitters: Res<EmitterSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands) {
+/// Starts PCM for new AudioSystem voices. WP-EP1e: emitters (BIF 129 / FUN_001fbb90) are no longer
+/// started here (once, by sound id, without falloff); they run the 1:1 FUN_001fb8e0 machine in
+/// `tick_sound_emitters` and play through `audio::bevy_out::drain_snd_cmds`.
+pub fn play_sound_events(mut ga: ResMut<GameAudio>, sys: Res<AudioSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands, (mut mon, time): (Option<ResMut<AudioMonitor>>, Res<Time>)) {
     let vol = ga.sfx_volume;
     let mut play = |sound: i32, v: f32, commands: &mut Commands| {
         if let Some(p) = sys.sound_pcm(sound) {
+            if let Some(m) = mon.as_deref_mut() {
+                m.record(sound, v * vol, &p, time.elapsed_secs_f64());
+            }
             let h = sources.add(source(&p));
             commands.spawn((AudioPlayer(h), PlaybackSettings { volume: Volume::Linear(v * vol), ..PlaybackSettings::DESPAWN }));
         }
     };
-    for &id in &emitters.active {
-        if ga.started_emitters.insert(id) {
-            if let Some(e) = emitters.get(id) {
-                play(e.sound, e.f10, &mut commands);
-            }
-        }
-    }
     for v in &sys.voices {
         if ga.started_voices.insert(v.handle) {
             play(v.sound, v.volume, &mut commands);
         }
     }
+}
+
+/// WP-EP1e: the emitter part of FUN_001fd830 (world update): FUN_001fb8e0 on every emitter of the active
+/// list 0x3dd08c (`music_mgr::tick_all`), then the snd_FlushSoundCommands callbacks; the commands go to
+/// `audio::bevy_out::drain_snd_cmds`. The options' effects volume is the replaced bus volume.
+pub fn tick_sound_emitters(
+    g: Res<LevelGame>,
+    ga: Res<GameAudio>,
+    mut es: ResMut<EmitterSystem>,
+    mut snd: ResMut<Snd989>,
+    mut sys: ResMut<AudioSystem>,
+    (w, cm, players, sly): (Option<Res<World>>, Res<Cm>, Query<&crate::engine::player::plugin::Player>, Option<Res<crate::engine::playerdraw::plugin::SlyDraw>>),
+) {
+    sys.sfx_volume = ga.sfx_volume;
+    if let Some(t) = &g.snd_table {
+        if snd.table.map != t.map || snd.table.kinds != t.kinds {
+            snd.table = t.clone();
+        }
+        // DAT_003dd128: 0 until the bank is loaded
+        snd.table.bank = sys.bank.is_some() as u32;
+    }
+    // the JT subtree (Sly's ALOs + the JT itself = their owner)
+    let mut jt: Vec<usize> = sly.map(|s| s.objects.iter().flat_map(|o| [Some(o.1), o.2]).flatten().collect()).unwrap_or_default();
+    if let (Some(w), Some(&first)) = (w.as_deref(), jt.first()) {
+        jt.extend(w.objects.get(first).and_then(|o| o.owner));
+    }
+    let world = GameEmitterWorld { w: w.as_deref(), cm: &cm, player: players.iter().next().map(|p| p.jt.phys.pos), jt };
+    crate::engine::audio::music_mgr::tick_all(&mut es, &mut snd, &world);
+    snd.flush_231c48(&mut es);
+}
+
+/// `EmitterWorld` of the running game.
+pub struct GameEmitterWorld<'a> {
+    pub w: Option<&'a World>,
+    pub cm: &'a Cm,
+    pub player: Option<[f32; 3]>,
+    /// objects of the JT subtree: their world position is the live player position (playerdraw draws
+    /// Sly at `jt.phys.pos`; the BoneWorlds matrices are the rest pose)
+    pub jt: Vec<usize>,
+}
+
+impl crate::engine::audio::emitter_tick::EmitterWorld for GameEmitterWorld<'_> {
+    fn listener(&self) -> [f32; 3] {
+        // FUN_001c4a48(0x3dd490) player position, else the camera position _DAT_002ddfd0 (cm +0x90)
+        self.player.unwrap_or([self.cm.mat[3][0], self.cm.mat[3][1], self.cm.mat[3][2]])
+    }
+    fn to_camera(&self, v: [f32; 3]) -> [f32; 3] {
+        // FUN_001a7348(0, cm+0x60, v): components along the camera columns (forward, left, up)
+        let m = &self.cm.mat;
+        let d = |c: &[f32; 4]| c[0] * v[0] + c[1] * v[1] + c[2] * v[2];
+        [d(&m[0]), d(&m[1]), d(&m[2])]
+    }
+    fn attach_live(&self, obj: i32) -> bool {
+        // attach = object index + 1 (game::anim_play FUN_00210740); live = loaded and not out of the world
+        self.w.is_some_and(|w| obj > 0 && ((obj - 1) as usize) < w.objects.len() && !super::fields::out_of_world_at_load(w, (obj - 1) as usize))
+    }
+    fn attach_pos(&self, obj: i32, pos: [f32; 3]) -> [f32; 3] {
+        // FUN_001a6f00(obj, 0, pos): pos in the object's world frame (row vectors)
+        if let Some(p) = self.player.filter(|_| obj > 0 && self.jt.contains(&((obj - 1) as usize))) {
+            return [p[0] + pos[0], p[1] + pos[1], p[2] + pos[2]];
+        }
+        match self.w.filter(|w| obj > 0 && ((obj - 1) as usize) < w.objects.len()) {
+            Some(w) => {
+                let m = super::fields::ee_sub_1a6318(w, (obj - 1) as usize);
+                std::array::from_fn(|k| pos[0] * m[0][k] + pos[1] * m[1][k] + pos[2] * m[2][k] + m[3][k])
+            }
+            None => pos,
+        }
+    }
+}
+
+/// WP-EP1e verification (env `SLY2_AUDIO_LOG=1`): once per second, the sounds started in that second,
+/// the music layer volumes and the RMS of a software mix of everything audible in the second (music
+/// layers x layer volume x music volume + started sounds x their gain; channel average, 8 kHz sampling).
+pub fn audio_monitor(mut mon: ResMut<AudioMonitor>, ga: Res<GameAudio>, time: Res<Time>, mut last: Local<f64>) {
+    if !mon.on {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    if now - *last < 1.0 {
+        return;
+    }
+    let t0 = *last;
+    *last = now;
+    let secs = |p: &Pcm| p.samples.len() as f64 / p.channels.max(1) as f64 / p.sample_rate.max(1) as f64;
+    let at = |p: &Pcm, t: f64| -> f32 {
+        let ch = p.channels.max(1) as usize;
+        let i = (t * p.sample_rate as f64) as usize * ch;
+        (0..ch).map(|c| p.samples.get(i + c).copied().unwrap_or(0) as f32 / 32768.0).sum::<f32>() / ch as f32
+    };
+    let n = ((now - t0) * 8000.0) as usize;
+    let (mut sum, mut peak) = (0.0f64, 0.0f32);
+    for k in 0..n {
+        let t = t0 + k as f64 / 8000.0;
+        let mut x = 0.0f32;
+        for (i, p) in ga.music_pcm.iter().enumerate() {
+            if t >= ga.music_t0 {
+                x += at(p, (t - ga.music_t0).rem_euclid(secs(p).max(1e-3))) * ga.layers.vol.get(i).copied().unwrap_or(0.0) * ga.music_volume;
+            }
+        }
+        for (_, g, p, s) in &mon.started {
+            if t >= *s {
+                x += at(p, t - s) * g;
+            }
+        }
+        sum += (x * x) as f64;
+        peak = peak.max(x.abs());
+    }
+    let rms = if n > 0 { (sum / n as f64).sqrt() } else { 0.0 };
+    let plays: Vec<(i32, f32)> = { mon.plays.clear(); mon.started.iter().filter(|x| x.3 >= t0).map(|x| (x.0, (x.1 * 100.0).round() / 100.0)).collect() };
+    let nl = ga.music_pcm.len().min(6);
+    info!("audio monitor t {now:.1}: rms {rms:.4} peak {peak:.3} music layers {:?} x {:.2}, sfx started {} {:?}", &ga.layers.vol[..nl], ga.music_volume, plays.len(), &plays[..plays.len().min(12)]);
+    mon.started.retain(|(_, _, p, s)| now - s < secs(p));
 }
 
 // ---------------------------------------------------------------- scripts (WP-J3)
@@ -557,6 +698,8 @@ pub fn job_level_loaded(w: Option<Res<World>>, mut jobs: ResMut<crate::engine::p
     let js = &mut *js;
     // WP-J15: DAT_003e1110 current level row (FUN_00210a88) = the row the world was loaded as
     jobs.0.cur_row = opt.map_or(-1, |o| o.0.mission as i32);
+    // WP-EP1d: FUN_00210b70 hub level of the job complete / end reloads
+    jobs.0.hub_row = lg.as_ref().and_then(|lg| super::job_flow::FUN_00210b70(lg.table.as_ref()?, jobs.0.cur_row));
     // WP-J14: job post-load (slot 14 FUN_00162780, asegs by oid); WP-J15: save reads through the
     // kind-0x16 handles (`job_flow::saved_job` / `saved_task`; no level save table -> defaults)
     let find = |oid: i32| w.objects.iter().any(|o| o.oid as i32 == oid).then_some(oid);

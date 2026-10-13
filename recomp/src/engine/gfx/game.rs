@@ -113,7 +113,7 @@ pub fn spawn_level_geometry(
         v.0.clear();
     }
     let scene = LevelScene::build_from(data.lsn, &data.data, &world);
-    let mut mat_cache: HashMap<(usize, Option<u32>, bool, bool), (Handle<StandardMaterial>, Option<super::material::TwoLayerMeans>)> = HashMap::new();
+    let mut mat_cache: HashMap<(usize, Option<u32>, bool, bool, bool), (Handle<StandardMaterial>, Option<super::material::TwoLayerMeans>)> = HashMap::new();
     let root = commands
         .spawn((LevelGeometryRoot(data.lsn), Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), Visibility::default()))
         .id();
@@ -160,11 +160,14 @@ pub fn spawn_level_geometry(
                 _ => 1.0,
             };
             let fog = super::fog::fog_enabled_for(fog);
-            let key = (so.entry, p.prim.shader, p.prim.cull_back, fog);
+            // WP-C9: GS As = At * Av (TFX modulate): vertex alpha below 0x80 makes a blended prim
+            // translucent even with an opaque texture (Paris moonlight shafts, material::vertex_alpha)
+            let valpha = super::material::vertex_alpha(&p.prim.colors);
+            let key = (so.entry, p.prim.shader, p.prim.cull_back, fog, valpha);
             let (mat, two_layer) = mat_cache
                 .entry(key)
                 .or_insert_with(|| {
-                    let (mut m, tl) = make_material(&scene, so.entry, p.prim.shader, p.prim.cull_back, loader.as_deref(), &mut images);
+                    let (mut m, tl) = make_material(&scene, so.entry, p.prim.shader, p.prim.cull_back, valpha, loader.as_deref(), &mut images);
                     m.fog_enabled = fog;
                     // WP-C7: env-only shaders -> light volume (gfx::envvol), level material drawn invisible
                     let sh = p.prim.shader.and_then(|s| scene.textures.get(so.entry)?.shaders.get(s as usize));
@@ -179,7 +182,8 @@ pub fn spawn_level_geometry(
                 })
                 .clone();
             // WP-A10: folded two-layer prims: the vertex colour hue only tints the colour layer
-            let fix_colors = |mesh: Mesh| two_layer_colors(two_layer.as_ref(), mesh);
+            // WP-C9: then the display-space PS2 colour factors -> linear (`linear_vertex_colors`)
+            let fix_colors = |mesh: Mesh| linear_vertex_colors(two_layer_colors(two_layer.as_ref(), mesh));
             // WP-C5: prims with weights -> skinned mesh, joints = entities for the record's
             // weight_refs bones (children of the object entity), driven by anim::skin::AnimSkin.
             if let Some(skinned) = crate::engine::anim::skin_mesh::bevy_skinned_mesh(&p.prim) {
@@ -208,9 +212,19 @@ pub fn spawn_level_geometry(
                 ));
                 continue;
             }
-            let m = meshes.add(fix_colors(strip_env_colors(&scene, so.entry, p.prim.shader, to_bevy_mesh(&p.prim))));
+            let mut mesh = fix_colors(strip_env_colors(&scene, so.entry, p.prim.shader, to_bevy_mesh(&p.prim)));
+            let mut tf = affine_to_transform(&p.local);
+            // WP-C8: translucent prims sort by their record centre (gfx::screen::sort_centre)
+            if materials.get(&mat).is_some_and(|m| matches!(m.alpha_mode, AlphaMode::Blend | AlphaMode::Add | AlphaMode::Multiply)) {
+                if let Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) = mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+                    let c = super::screen::sort_centre(v);
+                    v.iter_mut().for_each(|p| (0..3).for_each(|k| p[k] -= c[k]));
+                    tf = tf.mul_transform(Transform::from_translation(Vec3::from_array(c)));
+                }
+            }
+            let m = meshes.add(mesh);
             let tag = super::pick::PrimTag { object, oid: world.objects[object].oid, entry: so.entry, shader: p.prim.shader, record: p.record };
-            commands.spawn((Mesh3d(m), MeshMaterial3d(mat), affine_to_transform(&p.local), ChildOf(e), tag));
+            commands.spawn((Mesh3d(m), MeshMaterial3d(mat), tf, ChildOf(e), tag));
         }
     }
     for (i, so) in scene.objects.iter().enumerate() {
@@ -268,7 +282,14 @@ pub fn bevy_light(p: &super::light::LightParams, world: &Affine) -> Option<BevyL
         return None;
     }
     let d = super::light::ee_sub_1a3968(p, world, false);
-    let c = d.color.map(|x| x * d.g / 255.0);
+    // WP-C9: VU1 terms (x2 scale, ambient part du split off for directional lights) in display
+    // units -> linear (`light::ps2_linear`); the facing total stays exact: ambient^2.2 (global
+    // ambient, `level_ambient`) + (facing^2.2 - ambient^2.2) (Lambert at full facing).
+    let (amb, face) = super::light::vu1_light_terms(&d);
+    let c: [f32; 3] = match p.kind {
+        0 => [0, 1, 2].map(|k| (super::light::ps2_linear(face[k]) - super::light::ps2_linear(amb[k])).max(0.0)),
+        _ => face.map(super::light::ps2_linear),
+    };
     let strength = c.iter().cloned().fold(0.0f32, f32::max);
     if strength <= 0.0 {
         return None;
@@ -298,6 +319,13 @@ pub fn bevy_light(p: &super::light::LightParams, world: &Affine) -> Option<BevyL
     }
 }
 
+/// `level_ambient` -> Bevy resource.
+pub fn ambient_resource(a: [f32; 3]) -> GlobalAmbientLight {
+    let m = a[0].max(a[1]).max(a[2]);
+    let color = if m > 0.0 { Color::linear_rgb(a[0] / m, a[1] / m, a[2] / m) } else { Color::WHITE };
+    GlobalAmbientLight { color, brightness: m * ps2_light_lux() / std::f32::consts::PI, ..default() }
+}
+
 fn insert_bevy_light(e: &mut EntityCommands, l: Option<BevyLight>) {
     e.remove::<(DirectionalLight, PointLight)>();
     match l {
@@ -316,7 +344,11 @@ fn insert_bevy_light(e: &mut EntityCommands, l: Option<BevyLight>) {
 /// original would put into an active set carry a Bevy light.
 pub fn spawn_level_lights(commands: &mut Commands, world: &World, root: Entity) {
     let mut bw = super::attach::BoneWorlds::default();
-    for l in super::light::level_lights(world, &mut bw) {
+    let lights = super::light::level_lights(world, &mut bw);
+    // WP-C9: the level's directional lights set the ambient (replaces the bin's fixed 600 nits + sun)
+    let set: Vec<_> = lights.iter().map(|l| (l.params, l.world)).collect();
+    commands.insert_resource(ambient_resource(super::light::level_ambient(&set)));
+    for l in lights {
         let mut e = commands.spawn((LevelLightObject(l.object), LightLive { params: l.params, world: l.world }, Transform::IDENTITY, ChildOf(root)));
         insert_bevy_light(&mut e, bevy_light(&l.params, &l.world));
     }
@@ -457,9 +489,23 @@ pub fn two_layer_colors(m: Option<&super::material::TwoLayerMeans>, mut mesh: Me
     mesh
 }
 
+/// WP-C9: the GS multiplies the texel by the vertex colour in display (gamma) space
+/// (`texel * Cv / 0x80`); Bevy multiplies COLOR with the linear albedo, so the rgb factors are
+/// raised to `light::PS2_GAMMA` (alpha unchanged: blending is linear in both).
+pub fn linear_vertex_colors(mut mesh: Mesh) -> Mesh {
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x4(c)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+        for v in c.iter_mut() {
+            for k in 0..3 {
+                v[k] = super::light::ps2_linear(v[k]);
+            }
+        }
+    }
+    mesh
+}
+
 /// The level material of a prim, plus the layer means when the kinds-1/7 colour layer was folded
 /// into the albedo (WP-A10, `two_layer_colors`).
-fn make_material(scene: &LevelScene, entry: usize, shader: Option<u32>, cull_back: bool, loader: Option<&LevelLoader>, images: &mut Assets<Image>) -> (StandardMaterial, Option<super::material::TwoLayerMeans>) {
+fn make_material(scene: &LevelScene, entry: usize, shader: Option<u32>, cull_back: bool, vertex_alpha: bool, loader: Option<&LevelLoader>, images: &mut Assets<Image>) -> (StandardMaterial, Option<super::material::TwoLayerMeans>) {
     // VU1 back-face test (material::vu1_cull_back) -> Bevy cull mode
     let cull_mode = cull_back.then_some(bevy::render::render_resource::Face::Back);
     let mut m = StandardMaterial { perceptual_roughness: 0.9, reflectance: 0.2, double_sided: !cull_back, cull_mode, ..default() };
@@ -489,7 +535,7 @@ fn make_material(scene: &LevelScene, entry: usize, shader: Option<u32>, cull_bac
         }
         t
     });
-    desc_has_alpha = decoded.as_ref().is_some_and(|t| t.has_alpha()) || over.is_some();
+    desc_has_alpha = decoded.as_ref().is_some_and(|t| t.has_alpha()) || over.is_some() || vertex_alpha;
     let d = material_from(sh, desc_has_alpha);
     let img = match (over, decoded) {
         (Some(mut i), _) => {

@@ -25,7 +25,12 @@ pub fn part_is_sensor(w: &World, object: usize, source: Source) -> bool {
 
 /// The JT's collision set: `CollisionWorld::build_so` without sensor parts (see module doc).
 pub fn player_collision_world(w: &World) -> CollisionWorld {
-    let mut cw = CollisionWorld::build_so(w);
+    player_collision_world_masked(w, &Default::default())
+}
+
+/// WP-EP1d: `player_collision_world` with the run-time part bit-50 state (`CollisionWorld::build_so_masked`).
+pub fn player_collision_world_masked(w: &World, on: &std::collections::HashMap<(usize, usize), bool>) -> CollisionWorld {
+    let mut cw = CollisionWorld::build_so_masked(w, on);
     cw.colliders.retain(|c| !part_is_sensor(w, c.object, c.source));
     cw
 }

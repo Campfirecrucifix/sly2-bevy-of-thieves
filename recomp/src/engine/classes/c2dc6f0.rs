@@ -4,6 +4,22 @@
 use super::{ClassGlobals, ClassHost};
 use crate::engine::world::props::{Prop, PropValue};
 
+/// WP-EP1d: class-131 FUN_0015cf30 mode 10 intro start of a never-played episode:
+/// `o = FUN_0015e938(0x3dd490, 5, 0x2be2a8[ep], 0)`, FUN_00228358(o, 3), FUN_002283d0(o). The UI side
+/// (`ui::episode::episode_event`) posts the oid here; the class set runs it at its next frame
+/// (`ClassSet::frame_more`), the warp then plays its movies and posts its own descriptor (state 4).
+static WARP_STARTS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+/// WP-EP1d: queue the intro-warp start of class-26 object `oid` (see `WARP_STARTS`).
+pub fn post_warp_start(oid: i32) {
+    WARP_STARTS.lock().unwrap_or_else(|e| e.into_inner()).push(oid);
+}
+
+/// WP-EP1d: queued intro-warp starts (drained).
+pub fn take_warp_starts() -> Vec<i32> {
+    std::mem::take(&mut *WARP_STARTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct C2dc6f0 {
     /// +0x130 / +0x134 / +0x138 (fields 782-784)

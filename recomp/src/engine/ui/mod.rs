@@ -4,6 +4,7 @@ pub mod binoc_hud;
 pub mod binoc_recon;
 pub mod bind;
 pub mod caption;
+pub mod card_app;
 pub mod card_dialog;
 pub mod episode;
 pub mod font;

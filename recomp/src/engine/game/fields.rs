@@ -207,6 +207,9 @@ pub struct ObjectFields {
     /// WP-J11: objects out of the world (LO +0x28 bit 60 clear); None until the first script Add / Remove
     /// (until then [`out_of_world_at_load`] answers). See [`ObjectFields::in_world`].
     pub out_of_world: Option<std::collections::HashSet<u32>>,
+    /// WP-C8: member writes on LIGHT (class 4) objects, (object, field, value); FUN_00200598 calls the
+    /// LIGHT setter (0x1a35b0.., ends with FUN_001a3968). Drained by `gfx::screen::drain_light_writes`.
+    pub light_writes: Vec<(u32, u16, Ref)>,
 }
 
 /// WP-J9: Basic payloads of `ObjectFields::rt` records (bit 29; emitters use bit 30, objects are indices).
@@ -525,6 +528,12 @@ impl ObjectFields {
         }
         // FUN_001ffcf8 + FUN_00200598 (member store; no field = nothing written)
         if let Some(field) = class.and_then(|c| ee_sub_1ffcf8_field(c, symid as u16)) {
+            if class == Some(4) {
+                if self.light_writes.len() >= 256 {
+                    self.light_writes.remove(0);
+                }
+                self.light_writes.push((obj, field, v.clone()));
+            }
             self.members.insert((obj, field), v);
         }
         Ref::Void

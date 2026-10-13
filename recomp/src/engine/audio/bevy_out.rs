@@ -3,8 +3,9 @@
 //! record index FUN_001fd070), Stop / StopFade -> despawn (fade not rendered), Pause / Resume / SetParams
 //! (volume) -> `AudioSink`. Voices whose player entity is gone are reported in `Snd989::ended` (the
 //! FUN_001fbfb0 poll). Gain = vol / 1024 x effects bus (0x3dd040 +0x1c0[0] when `MusicMgr` exists, else
-//! `AudioSystem::sfx_volume`). Pan / pitch are not rendered (no stereo pan in bevy_audio's sink).
-//! Registration (`Snd989`, `MusicMgr` resources + this system after the world update) is the game app's.
+//! `AudioSystem::sfx_volume`). WP-EP1e: the start pan (Play mask 8, degrees 0 ahead / 90 right) is baked
+//! into a stereo copy of the PCM (`pan_gains`; later SetParams pans and pitch are not rendered).
+//! Registration (`Snd989` + this system after `game::app::tick_sound_emitters`) is the game app's.
 
 use super::emitter_tick::{Snd989, SndCmd};
 use super::music_mgr::MusicMgr;
@@ -22,6 +23,42 @@ fn source(p: &Pcm) -> AudioSource {
     AudioSource { bytes: Arc::from(p.to_wav()) }
 }
 
+/// WP-EP1e (REPLACED SPU2 voice pan): 989snd pan degrees (0 ahead, 90 right, 180 behind, 270 left) ->
+/// (left, right) gains, unity in the centre, the far side falls linearly to 0 at +-90 degrees.
+pub fn pan_gains(deg: i32) -> (f32, f32) {
+    let x = (deg as f32).to_radians().sin();
+    ((1.0 - x).min(1.0), (1.0 + x).min(1.0))
+}
+
+/// Mono PCM -> stereo with the pan gains (other channel counts unchanged).
+pub fn pan_pcm(p: &Pcm, deg: i32) -> Pcm {
+    if p.channels != 1 {
+        return p.clone();
+    }
+    let (l, r) = pan_gains(deg);
+    let samples = p.samples.iter().flat_map(|&s| [(s as f32 * l) as i16, (s as f32 * r) as i16]).collect();
+    Pcm { sample_rate: p.sample_rate, channels: 2, samples }
+}
+
+/// WP-EP1e verification (env `SLY2_AUDIO_LOG=1`): every sound started by the replaced voice playback
+/// (bank sound, gain, pcm, start time s) for the per-second software-mix RMS of `game::app::audio_monitor`.
+#[derive(Resource, Default)]
+pub struct AudioMonitor {
+    pub on: bool,
+    pub started: Vec<(i32, f32, Arc<Pcm>, f64)>,
+    /// sounds started since the last log line
+    pub plays: Vec<i32>,
+}
+
+impl AudioMonitor {
+    pub fn record(&mut self, sound: i32, gain: f32, p: &Pcm, t: f64) {
+        if self.on {
+            self.plays.push(sound);
+            self.started.push((sound, gain, Arc::new(p.clone()), t));
+        }
+    }
+}
+
 /// voice -> (entity, seen in a previous frame)
 #[derive(Default)]
 pub struct Voices(HashMap<u32, (Entity, bool)>);
@@ -35,6 +72,7 @@ pub fn drain_snd_cmds(
     mut sinks: Query<&mut AudioSink, With<SndVoice>>,
     mut voices: Local<Voices>,
     mut commands: Commands,
+    (mut mon, time): (Option<ResMut<AudioMonitor>>, Res<Time>),
 ) {
     let bus = mgr.map_or(sys.sfx_volume, |m| m.bus[0]);
     let gain = |mask: u32, vol: i32| if mask & 4 != 0 { vol as f32 / 1024.0 } else { 1.0 } * bus;
@@ -46,8 +84,12 @@ pub fn drain_snd_cmds(
     voices.0.values_mut().for_each(|x| x.1 = true);
     for c in std::mem::take(&mut snd.cmds) {
         match c {
-            SndCmd::Play { bank_sound, mask, vol, voice, .. } => {
+            SndCmd::Play { bank_sound, mask, vol, pan, voice, .. } => {
                 let Some(p) = sys.sound_pcm(bank_sound) else { continue };
+                let p = if mask & 8 != 0 { pan_pcm(&p, pan) } else { p };
+                if let Some(m) = mon.as_deref_mut() {
+                    m.record(bank_sound, gain(mask, vol), &p, time.elapsed_secs_f64());
+                }
                 let h = sources.add(source(&p));
                 let e = commands.spawn((AudioPlayer(h), PlaybackSettings { volume: Volume::Linear(gain(mask, vol)), ..PlaybackSettings::DESPAWN }, SndVoice(voice.unwrap_or(0)))).id();
                 if let Some(v) = voice {

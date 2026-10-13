@@ -702,7 +702,10 @@ impl Cplcy for CplcyFollow {
         s_pitch = p2;
         s_dist = l2;
         self.pos = v4(want, 0.0);
-        let campos = add(focus, scale(d, (s_dist + cm.s_near_clip) / s_dist));
+        // 0x00221dd8 tail: (fStack_120 + DAT_002ddf8c) / fStack_120. WP-EP1c: a track with distance 0 (+4 = 0, rows
+        // 15 22 32 38 at spawn) divides by 0: the PS2 FPU gives +-FMAX (no inf/NaN) and d = 0, so campos = focus.
+        let k = if s_dist == 0.0 { f32::MAX.copysign(s_dist + cm.s_near_clip) } else { (s_dist + cm.s_near_clip) / s_dist };
+        let campos = add(focus, scale(d, k));
         let a_yaw = (f31 * cm.x_scale).atan();
         let a_pitch = (f30 * cm.y_scale).atan();
         if !self.first {
