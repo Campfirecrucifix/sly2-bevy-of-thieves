@@ -226,12 +226,26 @@ impl Brain {
             Child::Routine(r) => r.tick(cx),
             Child::Script(s) => s.tick(cx),
             Child::Search(s) => s.tick(&m.sg, cx),
-            Child::React(..) | Child::Chase | Child::Wait | Child::None | Child::Hit(_) => cx.body.f_190 = [0.0; 3],
+            // FUN_00179328: HitGoal per-tick update (C2d09b0 slot 9)
+            Child::Hit(g) => {
+                cx.body.f_190 = [0.0; 3];
+                // face against the hit vector (kind 0x40000: face from owner forward)
+                let v = g.hit.vec;
+                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                let heading = if len > 1.0e-4 && g.hit.kind != 0x40000 {
+                    (-v[1]).atan2(-v[0])
+                } else {
+                    // FUN_001a6318 -> atan2 of owner forward (row 0 of +0xfc matrix) = current yaw
+                    cx.body.yaw
+                };
+                super::patrol::ee_sub_209818(cx.body, heading);
+            }
+            Child::React(..) | Child::Chase | Child::Wait | Child::None => cx.body.f_190 = [0.0; 3],
             // K24: 0xb0 slot 9 (ground = +0x208: not flying the REPLACED lift integrator)
             Child::Lifted => {
                 cx.body.f_190 = [0.0; 3];
                 if let Some(b) = self.b0.as_mut() {
-                    b.ee_sub_17a7f8(!cx.body.k24_air, cx.now);
+                    b.ee_sub_17a7f8(!cx.body.k24_air, cx.now, cx.guard, cx.h);
                 }
             }
         }

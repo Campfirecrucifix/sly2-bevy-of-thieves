@@ -49,9 +49,7 @@ pub fn FUN_0011e208(yaw: f32, pitch: f32, r: f32) -> V3 {
 
 /// 0x0011efb0: cartesian -> (yaw, pitch, len).
 pub fn FUN_0011efb0(v: V3) -> (f32, f32, f32) {
-    let yaw = FUN_0011cf60(v[1].atan2(v[0]));
-    let pitch = FUN_0011cf60(v[2].atan2((v[0] * v[0] + v[1] * v[1]).sqrt()));
-    (yaw, pitch, len(v))
+    crate::engine::camera::math::FUN_0011efb0(v)
 }
 
 /// 0x00155fb0 with its world inputs: `p0` player position, `fwd` the player matrix row 0 (x, y), `vel`

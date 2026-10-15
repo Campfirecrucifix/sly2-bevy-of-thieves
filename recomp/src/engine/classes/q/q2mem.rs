@@ -16,6 +16,13 @@ pub trait QMem {
     fn w8(&mut self, a: u32, v: u8);
     /// engine function `addr` (not in the calling package / not ported here)
     fn call(&mut self, addr: u32, a: &[u32], v: &[V4]) -> (u32, V4);
+    /// PAD1: record a FUN_001619a0(addr, event, arg) call for host drain (default: no-op)
+    fn record_1619a0(&mut self, _addr: u32, _ev: i32, _arg: i32) {}
+    /// PAD1: record a FUN_00164640(handle, state) call for host drain (default: no-op)
+    fn record_164640(&mut self, _handle: u32, _state: i32) {}
+    /// PAD1: record a gadget-purchase save-variable write for host drain (default: no-op).
+    /// entry_id = the gadget entry, purchased = true/false.
+    fn record_gadget_purchase(&mut self, _entry_id: u32, _purchased: bool) {}
 
     fn r16(&mut self, a: u32) -> u16 {
         u16::from_le_bytes([self.r8(a), self.r8(a + 1)])

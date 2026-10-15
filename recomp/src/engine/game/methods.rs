@@ -183,6 +183,10 @@ pub const IMPLEMENTED: &[u32] = &[
     0x0010_b8f8, // FUN_002289b0 spawn alias 0x189 (class 42)
     0x0010_b970, // FUN_002289d0 spawn alias 0x18a
     0x0010_b9e8, // FUN_00228988 spawn alias (arg)
+    0x0010_ba70, // WP-P25: FUN_002288d8 spawn rec (class 42, +0xe0/+0xe4)
+    0x0010_bb38, // WP-P25: FUN_00228920 spawn task (class 42, +0x124/+0x128)
+    0x0010_bbe0, // WP-P25: FUN_00228958 spawn pair (class 42, +0x148/+0x14c)
+    0x0010_b850, // WP-SCR10: FUN_002284e0 warp-volume task (class 26, +0x164/+0x168)
     0x0010_1d20, // WP-J5: FUN_00130b18 ASEG retract (class 109/110) -> fields::ObjectFields::retract
 ];
 

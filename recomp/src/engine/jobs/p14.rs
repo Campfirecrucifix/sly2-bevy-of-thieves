@@ -115,7 +115,7 @@ impl JobMgr {
                 self.FUN_00164df0(e, 3);
             }
         }
-        self.FUN_001619a0(0x20, j as i32);
+        self.FUN_001619a0(0x20, (self.jobs[j].obj + 1) as i32);
         self.FUN_00162908(j);
         if self.jobs[j].f_78 == 0 {
             self.autosave += 1; // FUN_001abd98(0x2e65e0, 0)
@@ -194,7 +194,7 @@ impl JobMgr {
     pub fn FUN_00163e88(&mut self, t: usize, s: i32) {
         if self.FUN_001637e8(t) {
             self.deb38 = s;
-            self.FUN_001619a0(0x27, t as i32);
+            self.FUN_001619a0(0x27, (self.tasks[t].obj + 1) as i32);
             self.calls.push((0x00163e88, 0x12));
         }
         if let Some(j) = self.tasks[t].job {

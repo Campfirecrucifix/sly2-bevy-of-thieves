@@ -15,6 +15,14 @@ use super::font::{Fonts, GlyphQuad};
 use super::strings::LevelStrings;
 use super::text::{Text, TextRect};
 
+/// WP-UI4: meter fill colours in the `box_quad` 0xAABBGGRR order (little-endian RGBA, same as `ROW_COLOR` /
+/// the K3 records). The health fill is the blue/teal bar (R 0x20, G 0x40, B 0xc0) and the gadget-power fill is
+/// orange (R 0xc0, G 0x60, B 0x20). FIX: these were written as 0xff2040c0 / 0xffc06020 in 0xAARRGGBB order, so
+/// `box_quad().to_le_bytes()` read R from the low byte and swapped them -- the health bar came out orange (the
+/// bar at the top of every EP2a / EP1a screenshot) and the power bar blue; the bytes are now in GS order.
+pub const HEALTH_FILL: u32 = 0xffc0_4020;
+pub const POWER_FILL: u32 = 0xff20_60c0;
+
 /// Player values the HUD shows (P7 `Dmg` on the JT).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HudPlayer {
@@ -52,7 +60,7 @@ pub fn hud(fonts: &mut Fonts, table: &[Binding], strings: &LevelStrings, ctx: &B
         // health meter: hp of hp_max (P7 Dmg, max 0x28) as a bar
         let w = 200.0 * (p.hp.clamp(0, p.hp_max) as f32 / p.hp_max as f32);
         out.boxes.push(box_quad(38.0, 26.0, 242.0, 42.0, 0x8000_0000));
-        out.boxes.push(box_quad(40.0, 28.0, 40.0 + w, 40.0, 0xff20_40c0));
+        out.boxes.push(box_quad(40.0, 28.0, 40.0 + w, 40.0, HEALTH_FILL));
     }
     if ctx.count.1 > 0 {
         let s = bind::FUN_00216bc8_text(table, strings, ctx, 1, 0x2d0);
@@ -84,16 +92,27 @@ pub fn slots(fonts: &mut Fonts, table: &[Binding], strings: &LevelStrings, ctx: 
     }
 }
 
+/// WP-UI4: the vault / safe HUD object 0x2e1e60 (FUN_001a3078 show / FUN_001a30d0 hide, screen element
+/// 0x373) shown while a class-78 vault is being cracked (world +0x3d80 > 0). REPLACED: the level screen
+/// element 0x373 art; the port draws a small indicator box at the top-centre (like the binocucom marker).
+pub fn vault(shown: bool, out: &mut UiFrame) {
+    if !shown {
+        return;
+    }
+    out.boxes.push(box_quad(296.0, 18.0, 344.0, 34.0, 0x8000_0000));
+    out.boxes.push(box_quad(300.0, 22.0, 340.0, 30.0, SEL_COLOR));
+}
+
 /// A12: HUD meter (`ui::meter::HudMeter`, FUN_001d9df8) as two bars top-left: health (fill 0x34f) and,
 /// when shown, gadget power (fill 0x350) under it. REPLACED: the screen object 0x36b art / timelines.
 pub fn meter(m: &super::meter::HudMeter, out: &mut UiFrame) {
     if m.health_shown {
         out.boxes.push(box_quad(38.0, 26.0, 242.0, 42.0, 0x8000_0000));
-        out.boxes.push(box_quad(40.0, 28.0, 40.0 + 200.0 * m.health.clamp(0.0, 1.0), 40.0, 0xff20_40c0));
+        out.boxes.push(box_quad(40.0, 28.0, 40.0 + 200.0 * m.health.clamp(0.0, 1.0), 40.0, HEALTH_FILL));
     }
     if m.power_shown {
         out.boxes.push(box_quad(38.0, 44.0, 242.0, 56.0, 0x8000_0000));
-        out.boxes.push(box_quad(40.0, 46.0, 40.0 + 200.0 * m.power.clamp(0.0, 1.0), 54.0, 0xffc0_6020));
+        out.boxes.push(box_quad(40.0, 46.0, 40.0 + 200.0 * m.power.clamp(0.0, 1.0), 54.0, POWER_FILL));
     }
 }
 

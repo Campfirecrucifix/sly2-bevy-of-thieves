@@ -52,6 +52,55 @@ impl C2cf880 {
         self.f_50.last_mut().unwrap()
     }
 
+    /// FUN_00170b40(obj, id): kind 0 node (method thunk 0x00105d58, field 595)
+    pub fn ee_sub_170b40(&mut self, id: i32) {
+        self.ee_sub_170e00(0, id);
+    }
+
+    /// Field of the method callee FUN_00170b40..FUN_00170dd0 (see `apply_field`).
+    pub fn field_of_callee(callee: u32) -> Option<i16> {
+        Some(match callee {
+            0x170b40 => 595, 0x170b60 => 596, 0x170ba0 => 597, 0x170be0 => 598, 0x170c00 => 599, 0x170c20 => 600,
+            0x170c50 => 601, 0x170c90 => 602, 0x170cd0 => 603, 0x170cf0 => 604, 0x170d10 => 605, 0x170d70 => 606,
+            0x170d30 => 607, 0x170d50 => 608, 0x170da0 => 611, 0x170dd0 => 612,
+            _ => return None,
+        })
+    }
+
+    /// One load-time method call of field 595-612 (FUN_00170b40..FUN_00170dd0): `arg(i)` = word of argument i,
+    /// `arg8(i)` = its first 8 bytes (kind-10 vector arguments).
+    pub fn apply_field(&mut self, field: i16, arg: impl Fn(usize) -> u32, arg8: impl Fn(usize) -> [u32; 2]) {
+        match field {
+            595 => self.ee_sub_170b40(arg(0) as i32), // FUN_00170b40
+            596 => self.ee_sub_170e00(1, -1).f_8 = arg8(0), // FUN_00170b60
+            597 => self.ee_sub_170e00(2, -1).f_8 = arg8(0), // FUN_00170ba0
+            598 => { self.ee_sub_170e00(3, arg(0) as i32); } // FUN_00170be0
+            599 => { self.ee_sub_170e00(4, arg(0) as i32); } // FUN_00170c00
+            600 => self.ee_sub_170e00(5, -1).f_8[0] = arg(0), // FUN_00170c20
+            601 => {
+                // FUN_00170c50(obj, a, b, c)
+                let e = self.ee_sub_170e00(6, arg(0) as i32);
+                e.f_8 = [arg(1), arg(2)];
+            }
+            602 => {
+                // FUN_00170c90(b, obj, a, c)
+                let (x, y, z) = (arg(0), arg(1), arg(2));
+                let e = self.ee_sub_170e00(7, x as i32);
+                e.f_10 = z;
+                e.f_14 = y;
+            }
+            603 => { self.ee_sub_170e00(8, arg(0) as i32); } // FUN_00170cd0
+            604 => { self.ee_sub_170e00(9, arg(0) as i32); } // FUN_00170cf0
+            605 => { self.ee_sub_170e00(10, arg(0) as i32); } // FUN_00170d10
+            606 => self.ee_sub_170e00(0xd, arg(0) as i32).f_8[0] = arg(1), // FUN_00170d70
+            607 => { self.ee_sub_170e00(0xb, -1); } // FUN_00170d30
+            608 => { self.ee_sub_170e00(0xc, -1); } // FUN_00170d50
+            611 => self.ee_sub_170e00(0xe, arg(0) as i32).f_8[0] = arg(1), // FUN_00170da0
+            612 => self.ee_sub_170e00(0xf, arg(0) as i32).f_8[0] = arg(1), // FUN_00170dd0
+            _ => {} // 609 / 610: no handler
+        }
+    }
+
     /// Load-time method calls (fields 595-612). Arguments as FUN_00201360 hands them over: one word each
     /// (the first 8 bytes for the kind-10 vector arguments of 596 / 597).
     pub fn feed(&mut self, props: &[Prop]) {
@@ -71,35 +120,7 @@ impl C2cf880 {
             };
             let arg = |i: usize| a.get(i).map(|b| w(b, 0)).unwrap_or(0);
             let arg8 = |i: usize| a.get(i).map(|b| [w(b, 0), w(b, 1)]).unwrap_or([0, 0]);
-            match p.field {
-                595 => { self.ee_sub_170e00(0, arg(0) as i32); } // FUN_00170b40
-                596 => self.ee_sub_170e00(1, -1).f_8 = arg8(0), // FUN_00170b60
-                597 => self.ee_sub_170e00(2, -1).f_8 = arg8(0), // FUN_00170ba0
-                598 => { self.ee_sub_170e00(3, arg(0) as i32); } // FUN_00170be0
-                599 => { self.ee_sub_170e00(4, arg(0) as i32); } // FUN_00170c00
-                600 => self.ee_sub_170e00(5, -1).f_8[0] = arg(0), // FUN_00170c20
-                601 => {
-                    // FUN_00170c50(obj, a, b, c)
-                    let e = self.ee_sub_170e00(6, arg(0) as i32);
-                    e.f_8 = [arg(1), arg(2)];
-                }
-                602 => {
-                    // FUN_00170c90(b, obj, a, c)
-                    let (x, y, z) = (arg(0), arg(1), arg(2));
-                    let e = self.ee_sub_170e00(7, x as i32);
-                    e.f_10 = z;
-                    e.f_14 = y;
-                }
-                603 => { self.ee_sub_170e00(8, arg(0) as i32); } // FUN_00170cd0
-                604 => { self.ee_sub_170e00(9, arg(0) as i32); } // FUN_00170cf0
-                605 => { self.ee_sub_170e00(10, arg(0) as i32); } // FUN_00170d10
-                606 => self.ee_sub_170e00(0xd, arg(0) as i32).f_8[0] = arg(1), // FUN_00170d70
-                607 => { self.ee_sub_170e00(0xb, -1); } // FUN_00170d30
-                608 => { self.ee_sub_170e00(0xc, -1); } // FUN_00170d50
-                611 => self.ee_sub_170e00(0xe, arg(0) as i32).f_8[0] = arg(1), // FUN_00170da0
-                612 => self.ee_sub_170e00(0xf, arg(0) as i32).f_8[0] = arg(1), // FUN_00170dd0
-                _ => {} // 609 / 610: no handler
-            }
+            self.apply_field(p.field, arg, arg8);
         }
     }
 

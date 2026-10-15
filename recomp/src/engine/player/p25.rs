@@ -42,6 +42,9 @@ pub struct SpawnLists {
     pub recs: HashMap<usize, Vec<[i32; 4]>>,
     /// +0x124 / +0x128 {task oid, state}
     pub tasks: HashMap<usize, Vec<(i32, i32)>>,
+    /// WP-SCR10: warp-volume task entries (+0x164/+0x168) keyed by object index.
+    /// Set by Splice method thunk 0x10b850 -> FUN_002284e0. Max 4 per warp.
+    pub warp_tasks: HashMap<usize, Vec<[i32; 2]>>,
 }
 
 impl SpawnLists {

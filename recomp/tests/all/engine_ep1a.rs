@@ -50,8 +50,8 @@ impl Run {
         let mut r = Run { m: JobMgr::load(&w), lv, w, st, f: 0, started: Vec::new(), log: false, vars, em: Default::default(), data: Default::default(), al: Default::default(), rum: Vec::new(), cm: Cm::new() };
         {
             let base = GameSpliceHost { t: 0.0, cm: None, emitters: &mut r.em, vars: Some(&r.vars), data: &mut r.data };
-            let level = LevelSpliceHost { base, mission: -1, aliases: &mut r.al, rumble: &mut r.rum };
-            let mut h = PersistentHost { level, cm: Some(&mut r.cm), clk: Default::default(), world: Some(&r.w), table: Some(&r.lv.header.level_table), sched: &mut r.st.sched };
+            let level = LevelSpliceHost { base, mission: -1, aliases: &mut r.al, rumble: &mut r.rum , spawn_lists: &mut sly2_recomp::engine::player::p25::SpawnLists::default()};
+            let mut h = PersistentHost { level, live_q: None, cm: Some(&mut r.cm), clk: Default::default(), world: Some(&r.w), table: Some(&r.lv.header.level_table), sched: &mut r.st.sched };
             let (_, frames) = run_level_scripts_framed(&mut r.st.vm, &r.lv.data, &r.w, &mut h);
             r.st.frames = frames;
         }
@@ -109,8 +109,8 @@ impl Run {
             let r0 = self.st.sched.cls.recorded.len();
             let SpliceState { vm, sched, errors, frames, .. } = &mut self.st;
             let base = GameSpliceHost { t, cm: None, emitters: &mut self.em, vars: Some(&self.vars), data: &mut self.data };
-            let level = LevelSpliceHost { base, mission: -1, aliases: &mut self.al, rumble: &mut self.rum };
-            let mut h = PersistentHost { level, cm: Some(&mut self.cm), clk: Default::default(), world: Some(&*self.w), table: Some(&self.lv.header.level_table), sched };
+            let level = LevelSpliceHost { base, mission: -1, aliases: &mut self.al, rumble: &mut self.rum , spawn_lists: &mut sly2_recomp::engine::player::p25::SpawnLists::default()};
+            let mut h = PersistentHost { level, live_q: None, cm: Some(&mut self.cm), clk: Default::default(), world: Some(&*self.w), table: Some(&self.lv.header.level_table), sched };
             send_messages(vm, errors, frames, &mut h);
             tick_world_update(vm, errors, &mut h, t, 1.0 / 60.0);
             if self.log {

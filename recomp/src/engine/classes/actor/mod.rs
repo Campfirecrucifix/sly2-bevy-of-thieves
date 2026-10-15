@@ -69,6 +69,14 @@ impl ClassSet {
     }
     /// K5 per frame: core slot 15 (update + fade), slot 16 (UpdateAlo, E5), slot 18 (draw); class 98 slot 57
     /// (contact latch) after them (assumption: the physics contact pass runs after the update).
+    ///
+    /// WP-ARCH1 pass 5 (class 86 flip): class 86 (C2caf88) is now store-driven. The LiveQ store
+    /// runs its slot-15 ObjectUpdate (vtable 0x2caf88 target is a queue port in
+    /// `classes/q/c2caf88.rs`), so the shared ALO/SO slot targets execute on the guest image. The
+    /// hand per-frame tick is skipped for class 86 instances; `build_k5` + `post_load_k5` still
+    /// seed `Inst::C2caf88` state (filters, bit 34, +0x140) because downstream renderers and
+    /// K5 tests read those initial values. Class 98 keeps running through the hand path
+    /// (slot 57 contact latch is class-98-specific and not yet replayed through the store).
     pub(super) fn frame_k5(&mut self, h: &mut dyn ClassHost) {
         let mut peers: Vec<(u32, u32)> = Vec::new();
         let lists: Vec<(u32, Vec<(i32, u32)>)> = self
@@ -81,18 +89,14 @@ impl ClassSet {
             .collect();
         let peer = |o: u32| lists.iter().find(|x| x.0 == o).map(|x| x.1.clone());
         for (i, x) in &mut self.k5 {
-            let alo = match x {
-                Inst::C2caf88(c) => &mut c.alo,
-                Inst::C2d4b78(c) => &mut c.alo,
-                _ => continue,
-            };
+            // ARCH1: class 86 (Inst::C2caf88) is driven by the LiveQ store, not here.
+            let Inst::C2d4b78(c) = x else { continue };
+            let alo = &mut c.alo;
             alo.ee_sub_1f36e0(*i, self.g.dt, h);
             h.base(0x1f3980, *i);
             alo.so.ee_sub_1f3c70(*i, self.g.g_2ddf54, h);
-            if let Inst::C2d4b78(c) = x {
-                for p in c.ee_sub_1bb250(*i, &peer, h) {
-                    peers.push((p, *i as u32 + 1));
-                }
+            for p in c.ee_sub_1bb250(*i, &peer, h) {
+                peers.push((p, *i as u32 + 1));
             }
         }
         // FUN_001baed8(peer, obj, 0) on the touched class-98 peers

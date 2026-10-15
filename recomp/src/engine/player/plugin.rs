@@ -173,6 +173,9 @@ impl Plugin for PlayerPlugin {
         // WP-P20: between the classes' return from the scripts (J7) and their frame
         #[cfg(feature = "game")]
         app.add_systems(Update, po_link.after(tick_player).after(crate::engine::game::app::return_classes).before(crate::engine::classes::plugin::tick_classes));
+        // WIRE-B2: player-requested character switch (port addition) right before po_link follows it
+        #[cfg(feature = "game")]
+        app.add_systems(Update, switch_character.after(tick_player).before(po_link));
         #[cfg(not(feature = "game"))]
         app.add_systems(Update, po_link.after(tick_player).before(crate::engine::classes::plugin::tick_classes));
         // WP-P19: script SetJtJts requests (J12 `ClassLink::jt_states`), applied at the end of the frame
@@ -202,7 +205,6 @@ pub struct LootWorld {
 /// WP-K33: the DAT_003e1414 entry of a class 35 / 36 / 37 use point (C2d1ee8 base) for 0x194688: TARGET member
 /// +0xe0 = `Sub182c70` (member vt 0x2d1ea8: +0x14 = 0x182cc8 sub 0, +0x1c = 0x184208 position = FUN_001a62e8(obj)),
 /// +0x10 prio, +0x18 group, +0x1c mask; obj +0x10 (owner) != 0 -> radius test with obj +0x38.
-#[cfg(feature = "game")]
 pub fn use_point_cand(obj: usize, class: i32, b: &crate::engine::classes::k10::C2d1ee8, h: &mut dyn crate::engine::classes::ClassHost) -> Option<super::TargetCand> {
     let o = obj as u32 + 1;
     let pos = h.ee_sub_1a62e8(o);
@@ -260,7 +262,12 @@ pub fn loot_link(w: Option<Res<crate::engine::world::World>>, clk: Option<Res<Pl
             }
         }
     }
-    lw.sys.update(lw.t, &pos, &alive);
+    {
+        // FUN_001f36e0 (C2cbba0_v15's parent update) on each loot object through the class host
+        let dt = c.set.g.dt;
+        let mut parent = |a: &mut crate::engine::classes::actor::alo::Alo, i: usize| a.ee_sub_1f36e0(i, dt, &mut **host.borrow_mut());
+        lw.sys.update_with(lw.t, &pos, &alive, &mut parent);
+    }
     // WP-K33: timed-loot countdown HUD (FUN_001618f8 / FUN_00161958 of FUN_0013c560)
     for r in std::mem::take(&mut lw.sys.hud) {
         let n = host.borrow().hud_timer.0 + 1;
@@ -419,10 +426,11 @@ pub fn tick_player(
         pl.jt.p5w.cam_rows = cm.as_ref().map(|c| [0, 1, 2].map(|i| [c.mat[i][0], c.mat[i][1], c.mat[i][2]]));
         // WP-P24: DAT_002de3a0 stand-in (binocucom look yaw) = yaw of the CM forward row
         pl.jt.cam_yaw = cm.as_ref().map(|c| crate::engine::camera::math::FUN_0011bc88([c.mat[0][0], c.mat[0][1], c.mat[0][2]]).0);
+        pl.jt.cam_pos = cm.as_ref().map(|c| [c.mat[3][0], c.mat[3][1], c.mat[3][2]]);
         let cw = wd.cw.clone().unwrap_or_else(|| lvl.cw.clone());
         pl.jt.update(&cw, inp, dt, &mut *ev);
         if let Some(s) = script.as_ref().filter(|s| s.log > 0 && s.frame % s.log == 0) {
-            eprintln!("SLY2_PAD_LOG f{} pos {:?} v {:?} jts {} jtbs {}", s.frame, pl.jt.phys.pos, pl.jt.phys.v, pl.jt.jts, pl.jt.jtbs);
+            eprintln!("SLY2_PAD_LOG f{} pos {:?} v {:?} jts {} jtbs {} hp {} dmg {}", s.frame, pl.jt.phys.pos, pl.jt.phys.v, pl.jt.jts, pl.jt.jtbs, pl.jt.dmg.hp, pl.jt.dmg.state);
         }
         let now = clk_t.unwrap_or(pl.jt.t);
         super::p8_hazard::hazard_step(&mut pl.jt, &mut wd.hz, now, &mut *ev);
@@ -436,6 +444,29 @@ pub fn tick_player(
                 let id = es.new_emitter_1fbb90(snd as i32);
                 es.set_unpositioned_1fb2f8(id, 0);
             }
+        }
+    }
+}
+
+/// PLAN1: shared plain fn — update the player JT and drain slot50 into ClassSet::k10_use.
+/// Called by the Bevy `loot_link` system and by the headless `Run::step` test harness.
+pub fn player_step_drain_slot50(
+    jt: &mut super::Jt,
+    cw: &crate::engine::physics::CollisionWorld,
+    inp: super::JtInput,
+    dt: f32,
+    cands: Option<Vec<super::TargetCand>>,
+    set: &mut crate::engine::classes::ClassSet,
+    host: &mut dyn crate::engine::classes::ClassHost,
+) {
+    jt.cands = cands;
+    jt.update(cw, inp, dt, &mut ());
+    // Drain slot50 -> k10_use (same logic as loot_link's slot50 loop, class 35/36 path only)
+    for t in std::mem::take(&mut jt.slot50) {
+        let i = t.wrapping_sub(1);
+        // Skip class-37 pickpocket targets (k31); only class 35/36 use points
+        if !set.k31.iter().any(|x| x.0 == i) {
+            set.k10_use(i, crate::engine::classes::guard::PLAYER_HANDLE, 0x35, host);
         }
     }
 }
@@ -480,9 +511,14 @@ pub fn po_link(
     classes: Option<ResMut<crate::engine::classes::plugin::Classes>>,
 ) {
     let (Some(w), Some(mut c)) = (w, classes) else { return };
-    let Some(mut pl) = q.iter_mut().next() else { return };
     let c = &mut *c;
     let key = &*w as *const crate::engine::world::World as usize;
+    // WP-EP1f: the class set still holds the previous level (job-start load right after the hub load): its
+    // k18_active / instances index the old world -> no selection until the classes are rebuilt for this one
+    if !c.host.world.as_ref().is_some_and(|hw| hw.objects.len() == w.objects.len() && hw.end_offset == w.end_offset) {
+        *cur = super::p20::PoCurrent::default();
+        return;
+    }
     // WP-EP1c: `is_changed` = a same-level reload (same World address)
     if cur.world_key != key || w.is_changed() {
         *cur = super::p20::PoCurrent::default();
@@ -491,6 +527,9 @@ pub fn po_link(
             log::info!("P20 po: oidPoCurrent {} -> {:?} class {}", super::p20::oid_po_current(&jobs.0), cur.obj, cur.class);
         }
     }
+    // WP-EP1f: the selection is redone above even before the player exists (a job-start level load reached
+    // this with no Player yet and kept the previous world's po index -> drive_po out of bounds)
+    let Some(mut pl) = q.iter_mut().next() else { return };
     // WP-P22: mid-mission switches (slot 78 through the class set, e.g. K22 sequence action 7)
     if std::mem::take(&mut c.host.po_release) {
         super::p22::set_active_character(&w, &mut c.set, &mut c.host, None);
@@ -521,6 +560,49 @@ pub fn po_link(
             pl.jt.po_move = None;
         }
     }
+}
+
+/// WIRE-B2: the next character of the switch cycle Sly (None) -> Bentley -> Murray -> Sly over the class-55 / 54
+/// instances that exist in `set` (first of each in object order); `active` = `ClassSet::k18_active`.
+pub fn next_character(w: &crate::engine::world::World, set: &mut crate::engine::classes::ClassSet, active: Option<usize>) -> Option<usize> {
+    use super::p20::{CLASS_BENTLEY, CLASS_MURRAY};
+    let mut cycle = vec![None];
+    for class in [CLASS_BENTLEY, CLASS_MURRAY] {
+        let o = w.objects.iter().enumerate().position(|(i, x)| {
+            x.class == class && if class == CLASS_BENTLEY { set.k16_get(i).is_some() } else { set.k18_murray(i).is_some() }
+        });
+        cycle.extend(o.map(Some));
+    }
+    let i = cycle.iter().position(|c| *c == active).unwrap_or(0);
+    cycle[(i + 1) % cycle.len()]
+}
+
+/// WIRE-B2 (port addition: the PS2 game switches only through the safehouse / jobs / scripts): the rebindable
+/// `switch_character` action (input::bindings, KeyV / gamepad Mode by default) cycles the controlled character
+/// through the ported slot-78 path (`p22::set_active_character` -> `ClassSet::k18_set_active` -> FUN_001406e8 /
+/// FUN_001c3ed8 / FUN_001c4940); `po_link` then moves the body (`p22::follow_active`) and feeds the joystick, and
+/// the class frame runs the chosen Bentley / Murray (slot 15 / 69, `frame_k18_55` / `frame_k18_54`).
+#[cfg(feature = "game")]
+pub fn switch_character(
+    pad: Option<Res<crate::engine::input::backend::PadInput>>,
+    w: Option<Res<crate::engine::world::World>>,
+    cur: Res<super::p20::PoCurrent>,
+    classes: Option<ResMut<crate::engine::classes::plugin::Classes>>,
+    mut prev: Local<bool>,
+) {
+    let held = pad.is_some_and(|p| p.extra & crate::engine::input::bindings::EXTRA_SWITCH_CHARACTER != 0);
+    let edge = held && !*prev;
+    *prev = held;
+    let (true, Some(w), Some(mut c)) = (edge, w, classes) else { return };
+    // only once po_link has made its selection for this world (same class set / world check)
+    if cur.world_key != &*w as *const crate::engine::world::World as usize {
+        return;
+    }
+    let c = &mut *c;
+    let active = c.set.k18_active;
+    let next = next_character(&w, &mut c.set, active);
+    super::p22::set_active_character(&w, &mut c.set, &mut c.host, next);
+    log::info!("WIRE-B2 switch_character -> {:?}", c.set.k18_active);
 }
 
 /// WP-P11: Sly's cane hits on the class set's guards (`p11_cane::cane_hits_to_guards`; no-op without classes).
@@ -644,12 +726,7 @@ pub fn link_classes(
     use crate::engine::classes::guard::{slots::Contact, PLAYER_HANDLE};
     // slot 80 gifts
     for (hp, mp) in std::mem::take(&mut host.player_gifts) {
-        jt.calls.push((0x001c4228, 0xc));
-        let v = jt.dmg.hp + hp;
-        jt.dmg.FUN_00144188(v);
-        if mp != 0 {
-            jt.calls.push((0x001441c0, mp));
-        }
+        jt.FUN_00144268(hp, mp);
         hud.gifts += 1;
     }
     // K7 hits on Sly -> TakeDamage
@@ -670,6 +747,12 @@ pub fn link_classes(
     let pos = jt.phys.pos;
     host.player_rec = Some(crate::engine::classes::k8::PickRec { alive: (jt.dmg.state == -1) as i32, radius: JT_RADIUS, obj: PLAYER_HANDLE });
     host.player_pos = pos;
+    // WP-SCR2: FUN_00143ee0 pose requests on Sly, enqueued by `EngineHost::k22_pose_143ee0` (k22 action 0xa
+    // class-0x34 branch); FUN_00144038(Sly) back to the host for the k22 wait condition.
+    for req in std::mem::take(&mut host.player_pose) {
+        jt.ee_sub_143ee0(&req, host);
+    }
+    host.player_posing = jt.posing_144038();
     // body contacts with the guards (REPLACED solver)
     for (gi, _) in set.k6.iter() {
         let Some(g) = set.k6_guard(*gi) else { continue };
@@ -707,11 +790,10 @@ pub fn respawn_in_place(jt: &mut Jt, spawn: V3, lvl: Option<&super::p6::P6Level>
     let mut n = Jt::new([spawn[0], spawn[1], spawn[2] + JT_RADIUS + 5.0]);
     n.hull = jt.hull.take();
     n.gad = std::mem::take(&mut jt.gad);
-    n.gad.refill(false, jt.dmg.hp == 0);
     n.gad.slots.iter_mut().for_each(|s| s.state = 0);
     n.gad.time_scale = 1.0;
     n.dmg.hp = jt.dmg.hp;
-    n.dmg.FUN_001440d0(true);
+    n.FUN_001440d0(0);
     n.dmg_env = jt.dmg_env;
     n.is_player = jt.is_player;
     if let Some(l) = lvl {

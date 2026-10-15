@@ -223,6 +223,10 @@ pub struct JobMgr {
     /// WP-J15: messages 0x1657d0 sends to the task itself through its vtable +0x1c (0x16 before /
     /// 0x15 after a state change): (task index, message), delivered by `vm_state::job_messages`
     pub task_msgs: Vec<(usize, u32)>,
+    /// WP-EP1f: message 0x11 {event, argument} that 0x162bb8 / 0x165170 send to the job / task object
+    /// (vt+0x1c, nargs 2): (world object index, event, argument object handle = index + 1, 0 = none),
+    /// delivered by `vm_state::job_messages` (the job script's event handler, e.g. method 1069 = 0x162e38)
+    pub ev_msgs: Vec<(usize, i32, u32)>,
     /// world+0x3b10 (DAT_003e0fa0) current task (WP-P9)
     pub cur_task: Option<usize>,
     /// DAT_002deb28 0x164df0 re-entry guard
@@ -359,11 +363,12 @@ impl JobMgr {
     }
 
     /// 0x001619a0 (job half; 0x161a58 is p7 / the game, 0x154a90 unported).
+    /// `arg` = the event object handle (world index + 1, 0 = none).
     pub fn FUN_001619a0(&mut self, ev: i32, arg: i32) {
         self.calls.push((0x00154a90, ev));
         for t in 0..self.tasks.len() {
             if self.tasks[t].job == self.cur {
-                self.FUN_00165170(t, ev);
+                self.FUN_00165170(t, ev, arg);
             }
         }
         if let Some(j) = self.cur {
@@ -372,14 +377,15 @@ impl JobMgr {
     }
 
     /// 0x00165170
-    pub fn FUN_00165170(&mut self, t: usize, ev: i32) {
+    pub fn FUN_00165170(&mut self, t: usize, ev: i32, arg: i32) {
         if self.FUN_001637e8(t) {
             self.calls.push((0x00165170, ev)); // msg 0x11 {ev, arg} to the task
+            self.ev_msgs.push((self.tasks[t].obj, ev, arg as u32));
         }
     }
 
     /// 0x00162bb8
-    pub fn FUN_00162bb8(&mut self, j: usize, ev: i32, _arg: i32) {
+    pub fn FUN_00162bb8(&mut self, j: usize, ev: i32, arg: i32) {
         if !self.FUN_00162670(j) {
             if ev == EV_DIED && self.jobs[j].f_50 != 0 && !self.world_busy {
                 self.FUN_00162df8(j);
@@ -387,6 +393,7 @@ impl JobMgr {
             return;
         }
         self.calls.push((0x00162bb8, ev)); // msg 0x11 {ev, arg} to the job
+        self.ev_msgs.push((self.jobs[j].obj, ev, arg as u32));
         if self.jobs[j].fail_ev.contains(&ev) {
             self.FUN_00162dd0(j);
         }
@@ -397,7 +404,7 @@ impl JobMgr {
 
     /// 0x00162dd0: job failed -> event 0x1d.
     pub fn FUN_00162dd0(&mut self, j: usize) {
-        self.FUN_001619a0(EV_FAILED, j as i32);
+        self.FUN_001619a0(EV_FAILED, (self.jobs[j].obj + 1) as i32);
     }
 
     /// 0x00162df8: restart the job (pause menu 0x211d38, builtin 0x10ea98, death).
@@ -492,7 +499,7 @@ impl JobMgr {
         if self.FUN_00162670(j) {
             self.jobs[j].n_7c += 1;
             self.FUN_00163460(j);
-            self.FUN_001619a0(EV_STARTED, j as i32);
+            self.FUN_001619a0(EV_STARTED, (self.jobs[j].obj + 1) as i32);
             let (tg, an, f0) = (self.jobs[j].toggles.clone(), self.jobs[j].anims.clone(), self.jobs[j].state);
             self.FUN_001620b0(4, &tg);
             self.FUN_001623d0(4, &an, f0);
@@ -512,7 +519,7 @@ impl JobMgr {
             self.calls.push((0x00162a60, SPAWN_DEFAULT)); // DAT_003e1118 = 0x189, DAT_003e111c = -1
         }
         if self.FUN_00162670(j) {
-            self.FUN_001619a0(EV_STOPPED, j as i32);
+            self.FUN_001619a0(EV_STOPPED, (self.jobs[j].obj + 1) as i32);
             let (tg, an, f0) = (self.jobs[j].toggles.clone(), self.jobs[j].anims.clone(), self.jobs[j].state);
             self.FUN_001620b0(5, &tg);
             self.FUN_001623d0(5, &an, f0);
@@ -529,7 +536,7 @@ impl JobMgr {
         if let Some(c) = self.cur_task.filter(|&c| self.tasks[c].job == Some(j)) {
             self.FUN_00163ce0(c);
         }
-        self.FUN_001619a0(EV_ENDED, j as i32);
+        self.FUN_001619a0(EV_ENDED, (self.jobs[j].obj + 1) as i32);
         self.FUN_00162908(j);
     }
 
@@ -557,5 +564,31 @@ impl JobMgr {
             self.retries += 1;
             self.FUN_00162df8(c);
         }
+    }
+
+    /// WP-ARCH1 step 4: replay recorded script side-effect calls through the live guest-memory
+    /// store. Each `(addr, arg)` whose `addr` has a queue-port target is dispatched 1:1 via
+    /// `QMem::call`; others are left in `self.calls` for the next pass (so adding a new queue port
+    /// retroactively drains them). Returns the number dispatched this call.
+    ///
+    /// This is the ARCH1 bridge from "JobMgr records what the script wanted" to "JobMgr performs
+    /// what the script wanted": once JobMgr has access to the store, the EP2+ job-handler blockers
+    /// B1/B2/B3/B5 (user-property setup via `add-o`/`ensure-o`/`set-o`) can be driven by the real
+    /// splice BIFs instead of staying as recorded no-ops.
+    pub fn replay_calls_through(&mut self, mem: &mut crate::engine::classes::q::live::LiveMem) -> usize {
+        use crate::engine::classes::q::live::{is_queue, trivial};
+        use crate::engine::classes::q::q2mem::QMem;
+        let mut keep = Vec::with_capacity(self.calls.len());
+        let mut n = 0usize;
+        for (addr, arg) in std::mem::take(&mut self.calls) {
+            if is_queue(addr) || trivial(addr).is_some() {
+                let _ = mem.call(addr, &[arg as u32], &[]);
+                n += 1;
+            } else {
+                keep.push((addr, arg));
+            }
+        }
+        self.calls = keep;
+        n
     }
 }

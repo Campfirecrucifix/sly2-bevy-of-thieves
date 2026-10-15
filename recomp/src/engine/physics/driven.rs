@@ -12,14 +12,20 @@
 //! v = target velocity and 0x2303a0 (kind != 8, sub 1/2; kind 0xb only sub 2 for rotation), xf flag +0x40 & 0x10
 //! = frozen (no motion). 0x22fcc8 (v * R_from then * R_to^T, 0x11b340 transpose). 0x229798 (walk +0x138 list
 //! calling slot 70 +0x23c; default 0x2297f0 = no-op).
-//! APPROXIMATE (conf 0.6): kind 0xb acceleration clamp (0x2c461c 6.0 / 0x2c4620 0.02 per speed unit) and the
-//! not-reached velocity v = Tv + n (vel - vt) (register flow in the decompile is ambiguous).
-//! REPLACED: the hermite source (sub 1, FUN_00117120 on +0x80) is evaluated by the caller and passed through
-//! target / target_v; slot-70 attach 0x2297f8 (1384 B) by a rigid attachment `Attachment`.
+//! PART-3 (1:1 from the decompile): kind 0xb acceleration clamps (linear 0x2c461c 6.0 / 0x2c4620 0.02 per
+//! speed unit for dof 0xb/0xc; angular 0x2c45fc 0.06 with expmap 0x11b570 of (v + v') dt/2), not-reached
+//! velocity v = Tv + n (vel - vt), angular target velocity via 0x22cad0 (euler rate -> w; sub 5 = 0),
+//! sub 1 hermite 0x117120(+0x84 - +0x80, *(+0x88) - +0x80, *(+0x8c), +0xc0, +0xd0, +0xe0, +0xf0), the global
+//! generation counter DAT_003e11e8 and the 0x2303a0 argument (6 / 10 / 0xc) in `reach_k`.
+//! REPLACED: slot-70 attach 0x2297f8 (1384 B) by a rigid attachment `Attachment`.
 #![allow(non_snake_case)]
-use super::driver::{FUN_0011b500, M3, IDENT};
+use super::driver::{FUN_0011b500, FUN_0011b570, M3, IDENT};
 use super::dynamics::FUN_0011d018;
 use super::geom::{dot, V3};
+use crate::engine::anim::motion::ee_sub_22cad0;
+use crate::engine::player::p5_states::FUN_0011bc00;
+use crate::engine::player::p5_target::FUN_00117120;
+use std::sync::atomic::{AtomicU32, Ordering};
 use crate::engine::camera::math::{FUN_0011b628, FUN_0011bcf8, FUN_0011bff0, M4};
 
 fn add(a: V3, b: V3) -> V3 {
@@ -118,6 +124,23 @@ pub fn FUN_00229798(parent: (&M3, V3), list: &[Attachment], mut place: impl FnMu
 }
 
 // ---------------------------------------------------------------- driven xfs
+/// DAT_003e11e8: global xf generation counter (pre-incremented, stored to xf +0xa4).
+pub static DAT_003E11E8: AtomicU32 = AtomicU32::new(0);
+fn next_gen() -> u32 {
+    DAT_003E11E8.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+}
+
+// 0x2c45f0 / 0x2c4600 / 0x2c4610 trapezoid profiles and clamp constants (exact ELF bits)
+const C_ROT: [u32; 3] = [0x3c75c290, 0, 0x3f000000]; // 0.015, 0, 0.5
+const C_ROT_ACC: u32 = 0x3d75c290; // 0x2c45fc 0.06
+const C_LIN: [u32; 3] = [0x3fc00001, 0, 0x3f000000]; // 1.5000001, 0, 0.5
+const C_SHEAR: [u32; 3] = [0x3ba3d70b, 0, 0x3f000000]; // 0.005, 0, 0.5
+const C_LIN_ACC: u32 = 0x40c00001; // 0x2c461c 6.0000005
+const C_SHEAR_ACC: u32 = 0x3ca3d70b; // 0x2c4620 0.02
+fn fb(b: u32) -> f32 {
+    f32::from_bits(b)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrivenXf {
     pub rot: M3,
@@ -130,11 +153,18 @@ pub struct DrivenXf {
     pub sub: u16,
     /// +0xb0 (linear or angular velocity by dof)
     pub v: V3,
-    /// +0xc0 / +0xd0 (sub 1: the caller's FUN_00117120 value / velocity)
+    /// +0xc0 / +0xd0 (sub 1: hermite p0 / v0)
     pub target: V3,
     pub target_v: V3,
     /// sub 5: +0xc0..+0xef
     pub target_m: M3,
+    /// sub 1 hermite: +0xe0 p1, +0xf0 v1, +0x80 t0, +0x84 t1, *(+0x88) now, *(+0x8c) rate
+    pub herm_p1: V3,
+    pub herm_v1: V3,
+    pub herm_t0: f32,
+    pub herm_t1: f32,
+    pub herm_now: f32,
+    pub herm_k: f32,
     /// +0xa8 (kind 9)
     pub deadline: f32,
     /// +0xac
@@ -145,11 +175,17 @@ pub struct DrivenXf {
     pub xf_gen: u32,
     /// set when 0x2303a0 was called this frame (kind re-evaluation; caller decides the next kind)
     pub reached: bool,
+    /// the 0x2303a0 third argument of this frame (6 / 10 / 0xc; 0 = not called)
+    pub reach_k: u32,
 }
 
 impl Default for DrivenXf {
     fn default() -> Self {
-        Self { rot: IDENT, pos: [0.0; 3], dof: 1, kind: 7, sub: 3, v: [0.0; 3], target: [0.0; 3], target_v: [0.0; 3], target_m: IDENT, deadline: 0.0, speed: 0, frozen: false, xf_gen: 0, reached: false }
+        Self {
+            rot: IDENT, pos: [0.0; 3], dof: 1, kind: 7, sub: 3, v: [0.0; 3], target: [0.0; 3], target_v: [0.0; 3],
+            target_m: IDENT, herm_p1: [0.0; 3], herm_v1: [0.0; 3], herm_t0: 0.0, herm_t1: 1.0, herm_now: 0.0,
+            herm_k: 1.0, deadline: 0.0, speed: 0, frozen: false, xf_gen: 0, reached: false, reach_k: 0,
+        }
     }
 }
 
@@ -191,11 +227,26 @@ impl DrivenXf {
             _ => self.rot = IDENT,
         }
     }
-    /// target value / velocity by sub-kind (0 current, 1/3/4 +0xc0/+0xd0, 2 +0xc0 with no velocity, else 0).
+    /// sub 1: 0x117120(+0x84 - t0, *(+0x88) - t0, *(+0x8c), +0xc0, +0xd0, +0xe0, +0xf0) -> (value, velocity)
+    fn hermite(&self) -> (V3, V3) {
+        let (p, v, _) = FUN_00117120(
+            self.herm_t1 - self.herm_t0,
+            self.herm_now - self.herm_t0,
+            self.herm_k,
+            self.target,
+            self.target_v,
+            self.herm_p1,
+            self.herm_v1,
+        );
+        (p, v)
+    }
+    /// target value / velocity by sub-kind (0 current, 1 hermite, 3/4 +0xc0/+0xd0, 2 +0xc0 with no velocity,
+    /// 5 euler of the +0xc0 matrix (0x11bff0), else 0).
     fn source(&self) -> (V3, V3) {
         match self.sub {
             0 => (self.FUN_0022ca18(), [0.0; 3]),
-            1 | 3 | 4 => (self.target, self.target_v),
+            1 => self.hermite(),
+            3 | 4 => (self.target, self.target_v),
             2 => (self.target, [0.0; 3]),
             5 => (FUN_0011bff0(&m4(&self.target_m)), [0.0; 3]),
             _ => ([0.0; 3], [0.0; 3]),
@@ -207,6 +258,7 @@ impl DrivenXf {
 /// `dt` = DAT_002dded4, `mirror` = the kind-4 source xf (+0xa0 + 8) position and generation.
 pub fn FUN_0022de88_driven(x: &mut DrivenXf, now: f32, dt: f32, mirror: Option<(V3, u32)>) {
     x.reached = false;
+    x.reach_k = 0;
     match x.kind {
         4 => {
             if let Some((p, g)) = mirror {
@@ -221,18 +273,23 @@ pub fn FUN_0022de88_driven(x: &mut DrivenXf, now: f32, dt: f32, mirror: Option<(
                 let (t, _) = x.source();
                 x.FUN_0022c8c0(t);
             }
-            x.xf_gen += 1;
-            // +0x98 read as int == 0x20006 (kind 6, sub 2) -> 0x2303a0
+            x.xf_gen = next_gen();
+            // +0x98 read as int == 0x20006 (kind 6, sub 2) -> 0x2303a0(.., 10)
             if x.kind == 6 && x.sub == 2 {
-                x.reached = true;
+                reach(x, 10);
             }
         }
         7 | 8 | 9 | 0xb => {
             if is_rot(x.dof) { angular(x, now, dt) } else { linear(x, now, dt) }
-            x.xf_gen += 1;
+            x.xf_gen = next_gen();
         }
         _ => {}
     }
+}
+
+fn reach(x: &mut DrivenXf, k: u32) {
+    x.reached = true;
+    x.reach_k = k;
 }
 
 fn deadline_step(x: &DrivenXf, now: f32, dt: f32, l: f32, s: &mut f32, vel: &mut f32) {
@@ -255,18 +312,16 @@ fn linear(x: &mut DrivenXf, now: f32, dt: f32) {
     let l = dot(d, d).sqrt();
     let n = if 0.0001 < l { scale(d, 1.0 / l) } else { [0.0; 3] };
     let vt = dot(tv, n);
-    let c = if (0xb..0xd).contains(&x.dof) { [0.005, 0.0, 0.5] } else { [1.5, 0.0, 0.5] };
+    let c = if (0xb..0xd).contains(&x.dof) { C_SHEAR } else { C_LIN };
     let sp = x.speed as f32;
-    let p = [sp * c[0] + vt.abs(), sp * c[1] + vt.abs(), c[2]];
+    let p = [sp * fb(c[0]) + vt.abs(), sp * fb(c[1]) + vt.abs(), fb(c[2])];
     let mut s = l;
     let mut vel = 0.0;
     if !x.frozen {
         s = FUN_0011d018(0.0, l, dt, p, Some(&mut vel));
-        vel = vel.abs();
         deadline_step(x, now, dt, l, &mut s, &mut vel);
         if x.kind == 0xb {
-            // APPROXIMATE acceleration clamp (0x2c461c / 0x2c4620)
-            let lim = sp * if x.dof > 10 && x.dof < 0xd { 0.02 } else { 6.0 };
+            let lim = sp * fb(if x.dof > 10 && x.dof < 0xd { C_SHEAR_ACC } else { C_LIN_ACC });
             let vn = add(tv, scale(n, vel - vt));
             let dv = sub(vn, x.v);
             let a = dot(dv, dv).sqrt() / dt;
@@ -281,8 +336,12 @@ fn linear(x: &mut DrivenXf, now: f32, dt: f32) {
     }
     x.FUN_0022c8c0(add(cur, scale(n, s)));
     if l <= s {
-        if x.kind != 8 && matches!(x.sub, 1 | 2) {
-            x.reached = true;
+        if x.kind != 8 {
+            match x.sub {
+                1 => reach(x, 6),
+                2 => reach(x, 10),
+                _ => {}
+            }
         }
         x.v = tv;
     } else {
@@ -292,32 +351,57 @@ fn linear(x: &mut DrivenXf, now: f32, dt: f32) {
 
 fn angular(x: &mut DrivenXf, now: f32, dt: f32) {
     let old = x.rot;
-    let (t, tw) = x.source();
-    let tgt = if x.sub == 5 { x.target_m } else { m3(&FUN_0011b628(t)) };
-    // 0x11bc00: relative rotation old -> target (rows' = rows * rel); 0x11bcf8 -> (angle, axis)
-    let rel = mmul(&transpose(&old), &tgt);
+    // rows = 0x22c8c0(target euler) (sub 5: the +0xc0 matrix, w = 0); target w = 0x22cad0(euler, rate)
+    let (tgt, wt3) = if x.sub == 5 {
+        (x.target_m, [0.0; 3])
+    } else {
+        let (t, tr) = x.source();
+        (m3(&FUN_0011b628(t)), ee_sub_22cad0(t, tr))
+    };
+    // 0x11bc00: relative rotation old -> target; 0x11bcf8 -> (angle, axis)
+    let rel = FUN_0011bc00(&old, &tgt);
     let (ang, axis) = FUN_0011bcf8(&m4(&rel));
-    let wt = dot(tw, axis);
+    let wt = dot(wt3, axis);
     let sp = x.speed as f32;
     let k = if x.sub == 3 { 0.0 } else { wt.abs() };
-    let p = [sp * 0.015 + k, sp * 0.0 + k, 0.5];
+    let p = [sp * fb(C_ROT[0]) + k, sp * fb(C_ROT[1]) + k, fb(C_ROT[2])];
     let mut s = ang;
     let mut vel = 0.0;
     if !x.frozen {
         s = FUN_0011d018(0.0, ang, dt, p, Some(&mut vel));
-        vel = vel.abs();
         deadline_step(x, now, dt, ang, &mut s, &mut vel);
+        if x.kind == 0xb {
+            let v1 = add(wt3, scale(axis, vel - wt));
+            let dv = sub(v1, x.v);
+            let a = dot(dv, dv).sqrt() / dt;
+            let lim = sp * fb(C_ROT_ACC);
+            if lim < a {
+                let v1 = add(x.v, scale(dv, lim / a));
+                let m = FUN_0011b570(scale(add(x.v, v1), dt * 0.5));
+                x.rot = mmul(&old, &m);
+                super::driver::FUN_0011b3d0(&mut x.rot);
+                x.v = v1;
+                return;
+            }
+        }
     }
     if ang <= s {
-        let reach = if x.kind == 0xb { x.sub == 2 } else { matches!(x.sub, 1 | 2) };
-        if x.kind != 8 && reach {
-            x.reached = true;
+        if x.kind != 8 {
+            if x.kind == 0xb {
+                if x.sub == 2 {
+                    reach(x, 0xc);
+                }
+            } else if x.sub == 1 {
+                reach(x, 6);
+            } else if x.sub == 2 {
+                reach(x, 10);
+            }
         }
         x.rot = tgt;
-        x.v = tw;
+        x.v = wt3;
     } else {
         x.rot = mmul(&old, &FUN_0011b500(axis, s));
         super::driver::FUN_0011b3d0(&mut x.rot);
-        x.v = add(tw, scale(axis, vel - wt));
+        x.v = add(wt3, scale(axis, vel - wt));
     }
 }

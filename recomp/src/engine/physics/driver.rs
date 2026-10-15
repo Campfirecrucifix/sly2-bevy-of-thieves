@@ -219,6 +219,16 @@ pub fn FUN_0022de88(b: &mut AloPhys, dt: f32) {
     }
 }
 
+/// PART-3: full 0x0022de88 switch on xf +0x98: kinds 1/2 integrate the body (`FUN_0022de88`), kinds 4..0xb
+/// the driven xf (`driven::FUN_0022de88_driven`, 1:1), kind 3 (asleep) / others no-op.
+pub fn FUN_0022de88_all(b: &mut AloPhys, x: Option<&mut super::driven::DrivenXf>, now: f32, dt: f32, mirror: Option<(V3, u32)>) {
+    match (b.kind, x) {
+        (1 | 2, _) => FUN_0022de88(b, dt),
+        (_, Some(x)) if (4..=0xb).contains(&x.kind) => super::driven::FUN_0022de88_driven(x, now, dt, mirror),
+        _ => {}
+    }
+}
+
 /// 0x001f3980 (ALO slot16) physics part: remember previous velocities, zero accel (kinds 1..3), slot69, 0x22de88.
 pub fn FUN_001f3980(b: &mut AloPhys, dt: f32) {
     b.prev_v = b.v;

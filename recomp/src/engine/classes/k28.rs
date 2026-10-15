@@ -45,7 +45,7 @@ impl super::plugin::EngineHost {
     /// lock counters); 0xd..0x10: FUN_00210408 / 002104a0(world, on, +8 oid, +0xc, +0x18, ctx): the ALO (oid
     /// != -1: FUN_0015e938(4, oid, ctx), else +0x18) of class 0x30 -> FUN_001f6978 / 69f8 / 6ac8 / 6b48.
     /// REPLACED: FUN_00131968 (the ASEGA is still in 0x3e1218) is true for every dispatched ASEGA.
-    pub(super) fn k28_event(&mut self, h: u32, c: crate::engine::anim::events::EffectCall) {
+    pub fn k28_event(&mut self, h: u32, c: crate::engine::anim::events::EffectCall) {
         // 0x00131290 (cases 7..0x10)
         use crate::engine::anim::events::EffectCall as E;
         use super::ClassHost;
@@ -113,8 +113,16 @@ impl super::plugin::EngineHost {
             }
             // K30: 0x12 FUN_001618f8(+0x1c, world): +0x476c = now + t; 0x13 FUN_00161958(world): +0x476c = 0.
             // UNPORTED: the +0x3bc4 HUD timer object calls (vtable +0x18c(-1) with +0x8c = 0 / +0x194)
-            E::E12 { t } => self.k30_476c = self.k30_t + t,
-            E::E13 => self.k30_476c = 0.0,
+            E::E12 { t } => {
+                self.k30_476c = self.k30_t + t;
+                // PF2: world+0x3bc4 HUD slot 3 countdown start (ui/ drains hud_timer -> HudSlots::FUN_001618f8)
+                self.hud_timer = (self.hud_timer.0 + 1, t.max(0.0));
+            }
+            E::E13 => {
+                self.k30_476c = 0.0;
+                // PF2: HudSlots::FUN_00161958 (countdown stop)
+                self.hud_timer = (self.hud_timer.0 + 1, -1.0);
+            }
             _ => self.k28_events -= 1,
         }
     }

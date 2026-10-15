@@ -65,6 +65,8 @@ pub struct C2d3838 {
     /// +0x1cc wander / +0x1d0 charge speed
     pub f_1cc: f32,
     pub f_1d0: f32,
+    /// +0x1d4 part count (short from +0x5c vtable +0x98)
+    pub f_1d4: i32,
     /// +0x1d8 target yaw, +0x1e0 target rotation (FUN_0011b500 about z)
     pub f_1d8: f32,
     pub f_1e0: [V3; 3],
@@ -101,6 +103,7 @@ impl Default for C2d3838 {
             f_1c8: 0,
             f_1cc: 0.0,
             f_1d0: 0.0,
+            f_1d4: 0,
             f_1d8: 0.0,
             f_1e0: [[0.0; 3]; 3],
             f_210: [0.0; 3],
@@ -211,6 +214,15 @@ impl C2d3838 {
     pub fn ee_sub_1b0ca8(&mut self, obj: usize, h: &mut dyn ClassHost) {
         h.base(0x1f31e0, obj);
         h.ee_sub_2303a0_off(Self::me(obj), 0x58, 1);
+        // zero +0x58 part velocity (+0xf0..+0xf8)
+        let p58 = h.obj_i32(Self::me(obj), 0x58) as u32;
+        h.obj_set_u32(p58, 0xf0, 0);
+        h.obj_set_u32(p58, 0xf4, 0);
+        h.obj_set_u32(p58, 0xf8, 0);
+        // +0x1d4 = (short)(+0x5c vtable +0x98) part count
+        let p5c = h.obj_i32(Self::me(obj), 0x5c) as u32;
+        let vt5c = h.obj_i32(p5c, 0xc) as u32;
+        self.f_1d4 = h.obj_i32(vt5c, 0x98) as i16 as i32;
         self.ee_sub_1b1bf0(obj, h);
     }
 
@@ -468,6 +480,16 @@ impl C2d3838 {
     /// slot 16: FUN_001b1030 (turning states: vtable +0x234), then FUN_001f3980
     pub fn ee_sub_1b1030(&mut self, obj: usize, h: &mut dyn ClassHost) {
         if self.st < 4 && 1 < self.st {
+            // zero +0x58 part velocity (+0xf0..+0xf8)
+            let p58 = h.obj_i32(Self::me(obj), 0x58) as u32;
+            h.obj_set_u32(p58, 0xf0, 0);
+            h.obj_set_u32(p58, 0xf4, 0);
+            h.obj_set_u32(p58, 0xf8, 0);
+            // zero +0x5c part velocity (+0xf0..+0xf8)
+            let p5c = h.obj_i32(Self::me(obj), 0x5c) as u32;
+            h.obj_set_u32(p5c, 0xf0, 0);
+            h.obj_set_u32(p5c, 0xf4, 0);
+            h.obj_set_u32(p5c, 0xf8, 0);
             h.vcall(Self::me(obj), 0x234);
         }
         h.base(0x1f3980, obj);

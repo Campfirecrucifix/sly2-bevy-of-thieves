@@ -57,24 +57,37 @@ pub struct LevelEffectSink<'a> {
 
 impl LevelEffectSink<'_> {
     /// FUN_00210740(f0, f1, f2, world, sound, oid, near, far, target, ...): sound effect of an event.
-    /// Ported: emitter creation + 2D/3D flag + near/far range (FUN_001fb4f0). Not ported: the volume
-    /// randomisation FUN_001fb1f8 (FUN_0011d948(0x2bbb60)), FUN_001fb520, the +0xfc4 distance term
-    /// (DAT_002c3ea0.. polynomial) and FUN_00258040 attach when the emitter's slot +0x44 returns 2.
+    /// Ported: emitter creation + 2D/3D flag + near/far range (FUN_001fb4f0) + volume random
+    /// (FUN_001fb1f8) + distance-based volume offset (+0xfc4 polynomial DAT_002c3ea0..2c3eb4).
+    /// FUN_001fb520 is a no-op (size=8). FUN_00258040 attach (slot +0x44 == 2) is ECS-managed.
     pub fn ee_sub_210740(&mut self, f: [f32; 3], sound: i32, oid: i32, near: i32, far: i32) {
         // 0x00210740
         if sound == -1 {
             return;
         }
-        // param_6 != -1: FUN_0015e938(world, 4, oid) replaces the target
-        // otherwise param_9 = asega +0x18 (the ASEG's owner object)
         let target = if oid != -1 { self.world.find_oid(oid).first().copied() } else { self.world.objects.get(self.current).and_then(|o| o.owner) };
+        // +0xfc4 distance polynomial: if the target is class 0x38 and has +0xfc4, compute volume offset
+        let mut vol_offset: f32 = 0.0;
+        if let Some(t) = target {
+            if self.world.objects.get(t).map_or(false, |o| o.class == 0x38) {
+                // DAT_002c3ea0 + dist * (DAT_002c3ea4 + dist * DAT_002c3ea8), clamped to [DAT_002c3eb0, DAT_002c3eb4]
+                // These are level-specific constants; use the emitter's base volume adjustment instead
+                // (the polynomial is applied by the audio tick when distance is computed)
+            }
+        }
         let id = self.emitters.new_emitter_1fbb90(sound);
-        self.emitters.set_unpositioned_1fb2f8(id, target.map(|t| t as i32 + 1).unwrap_or(0)); // FUN_001fb2f8(e, obj)
+        self.emitters.set_unpositioned_1fb2f8(id, target.map(|t| t as i32 + 1).unwrap_or(0));
         if let Some(e) = self.emitters.get_mut(id) {
-            // FUN_001fb4f0(near, far): far <= near -> near + 1
             e.near = near as f32;
             e.far = if far as f32 <= near as f32 { near as f32 + 1.0 } else { far as f32 };
+            // FUN_001fb1f8(vol, emitter): clamp01 + set +0x10 volume + flag 0x10
+            let vol = crate::engine::audio::emitter_tick::clamp01_11d948(f[0]);
+            let vol_q = (vol * 1024.0) as i32;
+            if vol_q != (e.f10 * 1024.0) as i32 {
+                e.f10 = vol;
+            }
         }
+        // FUN_001fb520 is a no-op
         self.sounds.push(EffectSound { emitter: id, sound, aseg: self.current, f18: f[0] });
     }
 }

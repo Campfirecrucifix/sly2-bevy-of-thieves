@@ -38,6 +38,9 @@ pub struct C2dc6f0 {
     pub f_154: i32,
     /// +0x158 warp time, +0x15c (781) / +0x160 (785)
     pub f_158: f32,
+    /// +0x164 count / +0x168 inline array: task pairs {oid, state} set by FUN_002284e0
+    /// (Splice method thunk 0x10b850). Max 4 entries.
+    pub task_entries: Vec<[i32; 2]>,
     pub f_15c: f32,
     pub f_160: f32,
     /// +0x40 bit 1
@@ -63,6 +66,16 @@ impl C2dc6f0 {
         self.f_144 = first;
         self.f_148 = list as i32;
         for p in props {
+            // Field 788 (kind 0x12, flags 0x400, thunk 0x10b850): FUN_0013e818's array path calls the
+            // method once per load record -> FUN_002284e0(obj, oid, states) -> FUN_00161f10 (max 4 pairs
+            // at +0x164/+0x168). Kinds {0x6 oid, 0x1050 state}: FUN_00201360 hands both over as words.
+            if let (788, PropValue::Array(a)) = (p.field, &p.value) {
+                if self.task_entries.len() < 4 {
+                    use crate::engine::game::job_flow::item_i32;
+                    self.task_entries.push([item_i32(a.first()), item_i32(a.get(1))]);
+                }
+                continue;
+            }
             let PropValue::Scalar(b) = &p.value else { continue };
             let v = word(b);
             match p.field {
@@ -111,7 +124,7 @@ impl C2dc6f0 {
             return None;
         }
         if self.f_134 == 0 {
-            h.ee_sub_161f48(obj); // FUN_00161f48(0x2deb30, +0x164, +0x168, obj)
+            h.ee_sub_161f48_warp(obj, &self.task_entries); // FUN_00161f48(0x2deb30, +0x164, +0x168, obj)
             h.ee_sub_14e4c8(0x2de390); // FUN_0014e4c8(0x2ddf40, 2, -1, 0x2de390, 0, 0)
             h.ee_sub_14e4c8(0x2de460);
             self.ee_sub_228358(obj, 4, g, h);

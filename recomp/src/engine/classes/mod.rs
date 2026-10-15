@@ -248,6 +248,8 @@ pub trait ClassHost {
     fn ee_sub_1a5d98(&mut self, obj: usize) {}
     /// (vtable +0x1c)(obj + adj, a, b, 0, 0, 0): schedule / mark
     fn vcall_1c(&mut self, obj: usize, a: i32, b: i32) {}
+    /// WP-EP1f: FUN_00228170(warp): (player vt+0x134)(player, warp) + (warp vt+0x1c)(warp, 5) (handle)
+    fn ee_sub_228170(&mut self, warp: u32) {}
     /// *obj != 0 && FUN_00127db8(*obj, id, deep) != 0: the object's method table has handler `id`
     fn ee_sub_127db8(&mut self, obj: usize, id: i32, deep: i32) -> bool { false }
     /// FUN_0020e040(0x3dd490)
@@ -297,6 +299,13 @@ pub trait ClassHost {
     /// FUN_0022b490(0x3dd490, +0x144, level, -1, flags, a)
     fn ee_sub_20efc0(&mut self, k: i32) {}
     fn ee_sub_161f48(&mut self, obj: usize) {}
+    /// WP-SCR10: FUN_00161f48(0x2deb30, +0x164, +0x168, obj) for warp volumes — fire
+    /// FUN_00164640(task, state, obj) for each entry. // 0x002283d0
+    fn ee_sub_161f48_warp(&mut self, obj: usize, entries: &[[i32; 2]]) {
+        let _ = (obj, entries);
+    }
+    /// WP-SCR10: warp-volume task entries for object `obj` (FUN_002284e0, set by level scripts).
+    fn warp_task_entries(&self, obj: usize) -> Vec<[i32; 2]> { let _ = obj; Vec::new() }
     fn ee_sub_14e4c8(&mut self, desc: u32) {}
     fn ee_sub_2280d0(&mut self) -> u32 { 0 }
     fn ee_sub_1c4840(&mut self) -> u32 { 0 }
@@ -349,6 +358,30 @@ pub trait ClassHost {
     fn ee_sub_118fb0_at(&mut self, obj: usize, off: u32, pos: [f32; 3]) -> bool { false }
     /// FUN_00132b10(obj, class): first ancestor-or-self of class `class` (handle, 0 = none)
     fn ee_sub_132b10(&mut self, obj: u32, class: i32) -> u32 { 0 }
+    /// FUN_001cb2e0(obj): class-6 redirect (player char table +0xe0/+0xe8)
+    fn ee_sub_1cb2e0(&mut self, obj: u32) -> u32 { obj }
+    /// FUN_002121c8(vu_obj): returns true if alive
+    fn ee_sub_2121c8(&mut self, obj: u32) -> bool { false }
+    /// FUN_0011d948: clamp value from range descriptor at obj offset
+    fn ee_sub_11d948_clamp(&mut self, val: u32, obj: u32) -> f32 { f32::from_bits(val) }
+    /// FUN_001423a0(obj): grounded check
+    fn ee_sub_1423a0(&mut self, obj: u32) -> bool { true }
+    /// FUN_001424c0(obj): landed check
+    fn ee_sub_1424c0(&mut self, obj: u32) -> bool { true }
+    /// FUN_001424d0(obj): idle check
+    fn ee_sub_1424d0(&mut self, obj: u32) -> bool { true }
+    /// FUN_00142530(obj): stationary check
+    fn ee_sub_142530(&mut self, obj: u32) -> bool { true }
+    /// FUN_001e4d40: distance check between two objects
+    fn ee_sub_1e4d40_dist(&mut self, a: u32, b: u32, threshold: f32) -> bool { true }
+    /// FUN_00187d80(0x2dfc00, id): guard patrol done check
+    fn ee_sub_187d80(&mut self, id: u32) -> bool { true }
+    /// FUN_00187d80 with list iteration (rec[5] != -1)
+    fn ee_sub_187d80_list(&mut self, id: u32, count: u32) -> bool { true }
+    /// Read u32 field from object
+    fn obj_u32(&mut self, obj: u32, off: u32) -> u32 { self.obj_i32(obj, off) as u32 }
+    /// +0x68 sound handle node field
+    fn k22_node_f_68(&self, _n: u32) -> u32 { 0 }
     /// class 132: FUN_002121e8(seq, id) (sequence `id` of sequencer `seq` still running),
     /// FUN_00213b00(seq, id) (start it), (vtable +off)(obj + adj, a)
     fn ee_sub_2121e8(&mut self, seq: u32, id: i32) -> bool { false }
@@ -552,6 +585,11 @@ pub trait ClassHost {
     fn vcall_24(&mut self, obj: usize, a: i32, b: u32) {}
     /// FUN_0020ff70(0x3dd490, n, entries, obj, 1): FUN_0020fff0 per +0x11c entry (method-1075 arguments)
     fn ee_sub_20ff70(&mut self, obj: usize, entries: &[[u32; 3]]) {}
+    /// PLAN1: FUN_0020fff0 single entry for action 0xd. ctx = context oid handle, entry = [name, key, val, -1],
+    /// mode = 1 or 3, owner = sequence owner handle. Returns SMA handle (0 = none).
+    fn k22_sma_20fff0(&mut self, _ctx: u32, _entry: &[u32; 4], _mode: u32, _owner: u32) -> u32 { 0 }
+    /// PLAN1: FUN_001e5410 release owner's +0x58 SMA (slot 1), clear +0x5c.
+    fn k22_release_1e5410(&mut self, _owner: u32) {}
     /// FUN_00161f48(0x2deb30, n, entries, obj) over the +0x160 entries (method-1076 arguments)
     fn ee_sub_161f48_list(&mut self, obj: usize, entries: &[[u32; 2]]) {}
     /// FUN_001b7000(bentley, point): +0x13ec set -> +0x13f0 = point, FUN_001b6078(4), FUN_002046f0(point +0x180)
@@ -917,6 +955,13 @@ pub trait ClassHost {
     fn k22_title_active_1d9880(&mut self) -> bool { false }
     /// K22: an UNPORTED sequence action (owner handle, subject, the record)
     fn k22_seq_action(&mut self, owner: u32, subj: u32, rec: &[u32; 20]) {}
+    /// WP-SCR2: FUN_00143ee0(subj, oid, flags, idx) - slot-87 pose dispatch, routed by the subject's class
+    /// (every class 0x34-derived PLAYER-parent impl plays `oid` into subj +0x1030 anim / +0x1034 sm with
+    /// the slot-87 index). Default no-op: unported subjects record nothing.
+    fn k22_pose_143ee0(&mut self, subj: u32, oid: i32, flags: u32, idx: u32) {}
+    /// WP-SCR2: FUN_00144038(subj) - the slot-88 index is 5 or 6 (states 10 / 11): the pose is still active
+    /// and the k22 wait for action 0xa stays blocked. Default false (not posing: wait completes).
+    fn k22_posing_144038(&mut self, subj: u32) -> bool { false }
     /// K22 sequence action 7: (po vtable +0x27c)(po, 1) = slot 78, switch the controlled character
     fn k22_po_switch(&mut self, po: u32) {}
     /// K22: the action-7 switches of this frame (applied by `ClassSet::frame_k22` through `k18_set_active`)
@@ -952,10 +997,14 @@ pub trait ClassHost {
     fn k27_shake_14f750(&mut self, kind: i32) {}
     /// K27: FUN_00187e28(duration, g_pad, id) (rumble)
     fn k27_rumble_187e28(&mut self, duration: f32, id: i32) {}
-    /// K27: FUN_0020efc0(0x3dd490, flags) + FUN_0020f0c0 (world +0x3d78 / +0x3d7c counters up)
+    /// K27: FUN_0020efc0(0x3dd490, flags) (world +0x3d78 counter up; flags bit 0 / 1: +0x3d80 / +0x3d84 up)
     fn k27_world_20efc0(&mut self, flags: u32) {}
-    /// K27: FUN_0020f030(0x3dd490, flags) + FUN_0020f0f0 (counters down)
+    /// K27: FUN_0020f030(0x3dd490, flags) (counters down)
     fn k27_world_20f030(&mut self, flags: u32) {}
+    /// PF2: FUN_0020f0c0(0x3dd490): world +0x3d7c counter up (first: pad lock bit 4)
+    fn k27_world_20f0c0(&mut self) {}
+    /// PF2: FUN_0020f0f0(0x3dd490): world +0x3d7c counter down (at 0: clears pad lock bit 4)
+    fn k27_world_20f0f0(&mut self) {}
     /// K23: FUN_001c6fd8(0x3dd490, kind, pos, src, k) (1644 B, unported)
     fn k23_world_1c6fd8(&mut self, kind: i32, pos: [f32; 3], src: u32, k: i32) {}
     /// K23: FUN_0014d1d0(v, 0x2dded0, index): set a scale of the global clock (sequence action 0x10)
@@ -1246,6 +1295,18 @@ impl ClassSet {
         self.post_load_k26(h);
         self.post_load_k31(h);
     }
+    /// WP-SCR10: feed warp-volume task entries from SpawnLists into C2dc6f0 instances.
+    pub fn feed_warp_tasks(&mut self, wt: &std::collections::HashMap<usize, Vec<[i32; 2]>>) {
+        for (i, inst) in &mut self.more {
+            if let Inst::C2dc6f0(c) = inst {
+                for e in wt.get(i).into_iter().flatten() {
+                    if c.task_entries.len() < 4 && !c.task_entries.contains(e) {
+                        c.task_entries.push(*e);
+                    }
+                }
+            }
+        }
+    }
     /// One frame of the per-frame overrides (C2d9040 slot 16, C2d9978 slot 18).
     pub fn frame(&mut self, h: &mut dyn ClassHost) {
         // K25: live ASEGAs / SMAs (FUN_00130918 over 0x3e1218) before the class slots read them
@@ -1306,6 +1367,14 @@ impl ClassSet {
                     }
                     Inst::C2ceb78(c)
                 }
+                132 => {
+                    let mut c = c2cf378::C2cf378::default();
+                    c.ee_sub_162448(i, h);
+                    if let Some(B4Load::L1624a8 { props, .. }) = b4 {
+                        c.feed(i, props, h);
+                    }
+                    Inst::C2cf378(Box::new(c))
+                }
                 133 => {
                     let mut c = c2cf1e8::C2cf1e8::default();
                     c.ee_sub_1635a0(i, &mut self.g, h);
@@ -1352,6 +1421,12 @@ impl ClassSet {
                     if let Some(Payload::Loaded(LoadData::L2282b0 { solid, first, list })) = w.objects.get(src).map(|x| &x.payload) {
                         c.feed(first.is_some(), list.len(), &solid.props, &mut self.g, h, i);
                     }
+                    // WP-SCR10: script-added entries (FUN_002284e0 through the CMethod) append after the load records
+                    for e in h.warp_task_entries(i) {
+                        if c.task_entries.len() < 4 {
+                            c.task_entries.push(e);
+                        }
+                    }
                     Inst::C2dc6f0(c)
                 }
                 111 => {
@@ -1394,6 +1469,7 @@ impl ClassSet {
                     c.ee_sub_1a3518(i, &mut self.g.lights, h);
                 }
                 Inst::C2cf1e8(c) => c.ee_sub_1638f8(i, &self.g, h),
+                Inst::C2cf378(c) => c.ee_sub_162780(i, &self.g, h),
                 _ => {}
             }
             let Inst::C2ceb78(c) = &mut self.more[k].1 else { continue };
@@ -1447,6 +1523,7 @@ impl ClassSet {
                     ops.append(&mut c.k27_ops);
                     for f in c.k27_world.drain(..) {
                         h.k27_world_20f030(f);
+                        h.k27_world_20f0f0();
                     }
                 }
                 _ => {}

@@ -16,7 +16,7 @@
 //! Air R1 (0x197500 head): jt == DAT_002e1e40 && acquired(0x1b) && !FUN_00143d20(0.3) -> spend, consume 8,
 //! use(0x1b) = paraglider 0x195fb8(jmp, 0x13). Glide: 0x197f98 case 0x14 (stick turning 5 / 12 rad/s, speed
 //! targets jmp+0x1c0 / +0x1c4) + 0x196df8 case 0x14 force (`glide_force`).
-//! REPLACED: the scene / partner tests of can-use (FUN_0014fd50, jt+0x12f0, jt+0x2010 FUN_001cb2c0, carried
+//! REPLACED: the partner tests of can-use (jt+0x2010 FUN_001cb2c0, carried
 //! object 0x18d6f8 + 0x1cade0 / 0x224590, jmp+0x2c) = false; the clock rate 0x14d1d0 of gadgets 0x1d / 0x2a
 //! is stored in `Gadgets::time_scale` (DAT_002ddeec, the game clock owner must apply it); sounds are queued
 //! ids in `Gadgets::sfx`; event 0x3c on 0x2deb30 and the carry / throw bodies are recorded in `Jt::calls`.
@@ -140,6 +140,12 @@ pub struct Gadgets {
     pub sfx: Vec<u32>,
     /// gadgets used (vt+0x324), for diagnostics / tests
     pub used: Vec<i32>,
+    /// jt+0x12f0 (scene object of gadget 3, set by the host)
+    pub f_12f0: i32,
+    /// DAT_002dfbc0 (host global)
+    pub g_2dfbc0: u32,
+    /// FUN_0014fd50(0x2de2e0): DAT_002de254 == 0x2de2e0 (host global)
+    pub scene_2de2e0: bool,
 }
 
 impl Default for Gadgets {
@@ -157,11 +163,20 @@ impl Default for Gadgets {
             f_9bc: 0,
             sfx: vec![],
             used: vec![],
+            f_12f0: 0,
+            g_2dfbc0: 0,
+            scene_2de2e0: false,
         }
     }
 }
 
 impl Gadgets {
+    /// gadget 3 scene test shared by 0x18d760 / 0x194558 / 0x19c8d0 / 0x19eef0:
+    /// jt+0x12f0 != 0 && DAT_002dfbc0 & 2 && !FUN_0014fd50(0x2de2e0)
+    pub fn scene_gate(&self) -> bool {
+        self.f_12f0 != 0 && self.g_2dfbc0 & 2 != 0 && !self.scene_2de2e0
+    }
+
     /// 0x001441a0
     pub fn FUN_001441a0(&self) -> i32 {
         self.mp.unwrap_or(self.mp_max)
@@ -227,6 +242,24 @@ pub struct GadgetHud {
 }
 
 impl Jt {
+    /// 0x001440d0(jt, param_2): hp (hpCur) == 0 or param_2 != 0 -> hp = max (0x144188) and the power pool
+    /// = max (0x1441c0) with the fraction +0x1308 cleared. The hpCur / mpCur save-variable pointers
+    /// (+0xe00 / +0x12fc) are the `dmg.hp` / `gad.mp` values here.
+    pub fn FUN_001440d0(&mut self, param_2: i32) {
+        if self.dmg.hp == 0 || param_2 != 0 {
+            self.dmg.FUN_00144188(self.dmg.hp_max);
+            self.gad.FUN_001441c0(self.gad.mp_max);
+            self.gad.frac = 0.0;
+        }
+    }
+    /// 0x00144268 (JT slot 80): script msg 0xc (FUN_001c4228, recorded), hp = min(hp + gift, max),
+    /// mp = FUN_001441c0(FUN_001441a0 + gift).
+    pub fn FUN_00144268(&mut self, hp: i32, mp: i32) {
+        self.calls.push((0x001c4228, 0xc));
+        self.dmg.FUN_00144188(self.dmg.hp + hp);
+        let v = self.gad.FUN_001441a0() + mp;
+        self.gad.FUN_001441c0(v);
+    }
     pub fn gadget_hud(&self) -> GadgetHud {
         let gd = &self.gad;
         let ids = gd.slots.map(|s| s.id);
@@ -318,7 +351,7 @@ impl Jt {
             3 => g == 3,
             0 | 1 | 5 | 10 | 0xc => true,
             7 => self.FUN_00194558(g),
-            8 => false, // 0x19eef0: only g 3 with the REPLACED scene test
+            8 => g == 3 && self.gad.scene_gate(), // 0x19eef0
             _ => false, // jts 0x17 carry: REPLACED (no carried objects)
         };
         if !pre {
@@ -332,7 +365,8 @@ impl Jt {
                 // +0x1d30 / +0x10ec gates (+0x18d8 == -1 not tracked: REPLACED true)
                 self.p13.f_1d30 == 0 && self.p13.f_10ec != 4 && matches!(self.jts, 0 | 1 | 10 | 0xc)
             }
-            _ => false, // 3 / 0x17 / 0x1a / 0x25 / 0x26 / 0x29: REPLACED scene / partner tests
+            3 => self.gad.scene_gate(),
+            _ => false, // 0x17 / 0x1a / 0x25 / 0x26 / 0x29: REPLACED partner / carry tests
         }
     }
 
@@ -341,16 +375,19 @@ impl Jt {
         let b = self.jtbs;
         let test = b != 6 && !(9..=0x16).contains(&b);
         match g {
-            2 | 5 | 0x1b => test,
+            3 => b == 0x11 && self.gad.scene_gate(),
+            0xc => self.f_2c && test,
             0x16 if self.kind >= 0x11 => test,
-            _ => false, // 3 (jtbs 0x11 + scene test), 0xc / 0x16 (jmp+0x2c): REPLACED
+            0x16 => self.kind < 0xf && test,
+            2 | 5 | 0x1b => test,
+            _ => false,
         }
     }
 
     /// 0x00194558(attach, g)
     pub fn FUN_00194558(&self, g: i32) -> bool {
         if g == 3 {
-            return false; // REPLACED scene test
+            return matches!(self.attach.kind, 0 | 1 | 3 | 4 | 0xd) && self.gad.scene_gate();
         }
         match self.attach.kind {
             1 | 8 | 0xb | 0xc => false,

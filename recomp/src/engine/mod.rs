@@ -15,3 +15,5 @@ pub mod classes;
 pub mod playerdraw;
 pub mod npcdraw;
 pub mod ui;
+pub mod math;
+pub mod conv;

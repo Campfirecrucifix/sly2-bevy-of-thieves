@@ -77,7 +77,7 @@ pub enum Ref138 {
 /// opposite of FUN_0019de58 / FUN_001a0300).
 fn aseg_vel(w: &World, jt: usize, m: &std::collections::HashMap<u32, usize>, field: u32) -> Option<V3> {
     let a = crate::engine::playerdraw::aseg_of(w, *m.get(&field)?)?;
-    let c = super::p6::FUN_0012ff10(a, w.objects[jt].oid)?;
+    let c = super::p6::FUN_0012ff10(w, a, jt)?;
     let v = c.vec.as_ref()?;
     let (p0, p1) = (super::p6::slot2(v, 0.0), super::p6::slot2(v, a.length));
     (a.length > 0.0).then(|| [0, 1, 2].map(|k| (p1[k] - p0[k]) / a.length))
@@ -100,7 +100,7 @@ fn blend_init(w: &World, jt: usize, m: &std::collections::HashMap<u32, usize>, b
 /// FUN_0019de58 entry speed: (root(0).z - root(T).z) / T of the JT member ASEG `field`.
 fn aseg_speed(w: &World, jt: usize, m: &std::collections::HashMap<u32, usize>, field: u32) -> Option<(f32, f32)> {
     let a = crate::engine::playerdraw::aseg_of(w, *m.get(&field)?)?;
-    let c = super::p6::FUN_0012ff10(a, w.objects[jt].oid)?;
+    let c = super::p6::FUN_0012ff10(w, a, jt)?;
     let v = c.vec.as_ref()?;
     let (p0, p1) = (super::p6::slot2(v, 0.0), super::p6::slot2(v, a.length));
     Some(((p0[2] - p1[2]) / a.length, a.length))

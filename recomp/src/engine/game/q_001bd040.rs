@@ -483,9 +483,10 @@ pub fn ee_sub_1bee10<M: QMem + ?Sized>(m: &mut M, obj: u32, i: u32) -> u32 {
     if p == 0 {
         return u32::MAX;
     }
-    let k = (p.wrapping_sub(0x003e_1a78) as i32 / 0x28) as u32;
-    let t = m.r32(0x002c_0bf8 + k * 4);
-    m.r32(t + i * 4)
+    // asm: mult by 0xcccccccd (low word) then sra 3 = exact /0x28 for element pointers
+    let k = ((p.wrapping_sub(0x003e_1a78).wrapping_mul(0xcccc_cccd) as i32) >> 3) as u32;
+    let t = m.r32(0x002c_0bf8u32.wrapping_add(k.wrapping_mul(4)));
+    m.r32(t.wrapping_add(i.wrapping_mul(4)))
 }
 
 /// FUN_001beed8: movie-end event: 0x2ae / 0x2af go to the player (FUN_001c4840(0x3dd490); for 0x2ae

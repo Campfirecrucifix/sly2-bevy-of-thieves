@@ -55,6 +55,8 @@ pub struct Loot {
     pub parent: u32,
     /// pool record +8 (RECORDED_1cb488 / 1cb4b8)
     pub active: bool,
+    /// WP-PJ2b: ALO core state of the loot object for the parent update FUN_001f36e0 (fade +0x12c / +0x130)
+    pub alo: crate::engine::classes::actor::alo::Alo,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -320,10 +322,18 @@ impl LootSys {
         }
     }
 
-    /// 0x0013bf50 C2cbba0_v15 (per-frame update) for every loot, plus the REPLACED fx timers (message 8).
+    /// 0x0013bf50 C2cbba0_v15 without a class host (the parent update FUN_001f36e0 is skipped).
     pub fn update(&mut self, now: f32, pos: &dyn Fn(u32) -> [f32; 3], alive: &dyn Fn(u32) -> bool) {
+        self.update_with(now, pos, alive, &mut |_, _| {});
+    }
+
+    /// 0x0013bf50 C2cbba0_v15 (per-frame update) for every loot, plus the REPLACED fx timers (message 8).
+    /// `parent(alo, obj_index)` = FUN_001f36e0 (`Alo::ee_sub_1f36e0`) on the loot object, called first.
+    pub fn update_with(&mut self, now: f32, pos: &dyn Fn(u32) -> [f32; 3], alive: &dyn Fn(u32) -> bool, parent: &mut dyn FnMut(&mut crate::engine::classes::actor::alo::Alo, usize)) {
         self.now = now;
         for l in 0..self.loots.len() {
+            let obj = self.loots[l].obj as usize;
+            parent(&mut self.loots[l].alo, obj.wrapping_sub(1));
             let lo = &self.loots[l];
             if lo.fx != 0 && (lo.state == 2 || lo.state == 3) && now >= lo.fx_end {
                 let fx = lo.fx;

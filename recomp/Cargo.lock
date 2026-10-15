@@ -4585,6 +4585,8 @@ dependencies = [
  "log",
  "na_mpeg2_decoder",
  "png",
+ "serde",
+ "serde_json",
  "sha2",
  "sly2_db",
 ]

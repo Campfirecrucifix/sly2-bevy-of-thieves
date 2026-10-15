@@ -457,14 +457,14 @@ pub fn audio_monitor(mut mon: ResMut<AudioMonitor>, ga: Res<GameAudio>, time: Re
 /// After `activate_world`: evaluates every entry's FUN_001ff858 script block in the world frame
 /// (FUN_001ffa70) with `LevelSpliceHost`; rumble from BIF 130 goes to `RumbleQueue`. `t` = clock t
 /// (DAT_002dded0), passed by the caller (the clock lives in the binary's GameLoop).
-pub fn run_level_scripts(t: f32, g: &mut LevelGame, st: &mut super::vm_state::SpliceState, w: &World, cm: Option<&Cm>, emitters: &mut EmitterSystem, rumble: &mut RumbleQueue, mission: i16) {
+pub fn run_level_scripts(t: f32, g: &mut LevelGame, st: &mut super::vm_state::SpliceState, w: &World, cm: Option<&Cm>, emitters: &mut EmitterSystem, rumble: &mut RumbleQueue, mission: i16, spawn_lists: &mut crate::engine::player::p25::SpawnLists, live_q: Option<&mut crate::engine::classes::q::live::LiveQ>) {
     let Some(data) = g.level_data.take() else { return };
     // WP-J4: the world frame + callback list are rebuilt only for a new world, then persist (NonSend SpliceState)
     st.enter_level(g.loads);
     let LevelGame { vars, data: gd, aliases, table, .. } = g;
     let base = super::splice_host::GameSpliceHost { t, cm, emitters, vars: vars.as_ref(), data: gd };
-    let level = super::splice_host::LevelSpliceHost { base, mission: mission as i32, aliases, rumble: &mut rumble.0 };
-    let mut host = super::vm_state::PersistentHost { level, cm: None, clk: CmClock::default(), world: Some(w), table: table.as_ref(), sched: &mut st.sched };
+    let level = super::splice_host::LevelSpliceHost { base, mission: mission as i32, aliases, spawn_lists, rumble: &mut rumble.0 };
+    let mut host = super::vm_state::PersistentHost { level, cm: None, clk: CmClock::default(), world: Some(w), table: table.as_ref(), sched: &mut st.sched, live_q };
     let (rep, frames) = super::scripts::run_level_scripts_framed(&mut st.vm, &data, w, &mut host);
     st.frames = frames;
     info!("level scripts: {} entries, {}/{} expressions ok", rep.entries, rep.ok, rep.exprs);
@@ -477,15 +477,15 @@ pub fn run_level_scripts(t: f32, g: &mut LevelGame, st: &mut super::vm_state::Sp
 /// WP-J4: the script part of FUN_00226550 (world update) each frame: due callbacks of world+0x39f0.
 /// The camera methods get `&mut Cm`; camera BIFs read it through `PersistentHost` (WP-J5).
 #[allow(clippy::too_many_arguments)]
-pub fn tick_scripts(t: f32, dt: f32, clk: CmClock, g: &mut LevelGame, st: &mut super::vm_state::SpliceState, w: &World, cm: &mut Cm, emitters: &mut EmitterSystem, rumble: &mut RumbleQueue, mission: i16) {
+pub fn tick_scripts(t: f32, dt: f32, clk: CmClock, g: &mut LevelGame, st: &mut super::vm_state::SpliceState, w: &World, cm: &mut Cm, emitters: &mut EmitterSystem, rumble: &mut RumbleQueue, mission: i16, spawn_lists: &mut crate::engine::player::p25::SpawnLists, live_q: Option<&mut crate::engine::classes::q::live::LiveQ>) {
     if st.level != Some(g.loads) {
         return;
     }
     let LevelGame { vars, data: gd, aliases, table, .. } = g;
     let base = super::splice_host::GameSpliceHost { t, cm: None, emitters, vars: vars.as_ref(), data: gd };
-    let level = super::splice_host::LevelSpliceHost { base, mission: mission as i32, aliases, rumble: &mut rumble.0 };
+    let level = super::splice_host::LevelSpliceHost { base, mission: mission as i32, aliases, spawn_lists, rumble: &mut rumble.0 };
     let super::vm_state::SpliceState { vm, sched, ticks, errors, frames, .. } = st;
-    let mut host = super::vm_state::PersistentHost { level, cm: Some(cm), clk, world: Some(w), table: table.as_ref(), sched };
+    let mut host = super::vm_state::PersistentHost { level, cm: Some(cm), clk, world: Some(w), table: table.as_ref(), sched, live_q };
     // WP-J10: messages of the job code (task enter / leave, job start / stop) since the last tick
     super::vm_state::send_messages(vm, errors, frames, &mut host);
     super::vm_state::tick_world_update(vm, errors, &mut host, t, dt);
@@ -606,13 +606,15 @@ pub fn screenshot_driver(mut req: ResMut<ScreenshotRequest>, g: Res<LevelGame>, 
 
 /// Gives the class runtime lent to the scripts (`vm_state::Schedule::cls`) back to `Classes` before
 /// `classes::plugin::tick_classes` (which rebuilds / ticks it).
-pub fn return_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: Option<NonSendMut<super::vm_state::SpliceState>>) {
+pub fn return_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: Option<NonSendMut<super::vm_state::SpliceState>>, pad: Option<Res<PadInput>>) {
     let Some(mut st) = st else { return };
     let l = &mut st.sched.cls;
     if let Some(set) = l.set.take() {
         c.set = set;
         c.host = std::mem::take(&mut l.host);
     }
+    // PAD1: copy live pad state so ee_call(0x187d80/0x187de0) sees it during tick_classes
+    c.host.pad = pad.map(|p| p.pad);
 }
 
 /// Lends the class runtime to the scripts after `tick_classes`: the script tick (FUN_00226550 ->
@@ -710,6 +712,18 @@ pub fn job_level_loaded(w: Option<Res<World>>, mut jobs: ResMut<crate::engine::p
     }
     let saved: Vec<_> = (0..jobs.0.tasks.len()).map(|t| sv.map(|(v, d)| super::job_flow::saved_task(&jobs.0, t, v, d)).unwrap_or_default()).collect();
     super::job_flow::FUN_00161a58_case5(&mut jobs.0, &w, &mut js.slots, 0, &|t| saved.get(t).copied().unwrap_or_default());
+    // WP-EP1f (REPLACED debug, port addition): SLY2_JOB_TASK=<task oid> starts that task's job once, as the
+    // hub job start would (FUN_00165538: switch job, load its level at the task spawn); stands in for the
+    // Episode progression that unlocks the mission start on a fresh save
+    static JOB_TASK_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Some(oid) = std::env::var("SLY2_JOB_TASK").ok().and_then(|s| s.parse::<i32>().ok()) {
+        if let Some(t) = jobs.0.tasks.iter().position(|t| t.oid == oid) {
+            if !JOB_TASK_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                info!("SLY2_JOB_TASK {oid}: FUN_00165538");
+                jobs.0.FUN_00165538(Some(t));
+            }
+        }
+    }
     js.toggle_seen = 0;
     if let Some(mut st) = st {
         super::job_flow::apply_toggles(&jobs.0, &mut st.sched.objs, &w, &mut js.toggle_seen);

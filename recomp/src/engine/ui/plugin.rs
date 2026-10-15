@@ -112,6 +112,10 @@ pub struct UiGame {
     pub countdown_carry: Option<f32>,
     /// WP-K33: last seen `EngineHost::hud_timer` request count
     pub timer_feed: u32,
+    /// WP-UI4: vault / safe HUD object 0x2e1e60 (FUN_001a3078 / FUN_001a30d0) shown flag + last seen
+    /// `EngineHost::hud_vault` request count (class-78 vault +0x3d80 edges)
+    pub hud_vault: bool,
+    pub vault_feed: u32,
     /// A14: DAT_002f6334 (card slot chosen on the load menu, 1-based; 0 = none -> START = New Game)
     pub card_slot: i32,
     /// A14: port load menu over the title (REPLACES the card manager's slot choice)
@@ -160,6 +164,8 @@ impl Plugin for UiPlugin {
                 slot_feed: (0, 0),
                 countdown_carry: None,
                 timer_feed: 0,
+                hud_vault: false,
+                vault_feed: 0,
                 card_slot: 0,
                 load: Default::default(),
                 fresh_blob: None,
@@ -484,6 +490,9 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
         }
         game.slot_feed = classes.as_ref().map_or((0, 0), |c| (c.host.hud_coins, c.host.hud_bottles));
         game.timer_feed = classes.as_ref().map_or(0, |c| c.host.hud_timer.0);
+        // WP-UI4: FUN_001a3020 (level init) resets the vault HUD object to hidden; sync the request counter
+        game.hud_vault = false;
+        game.vault_feed = classes.as_ref().map_or(0, |c| c.host.hud_vault.0);
         // debug hook (port): SLY2_HUD_POP=1 pops the coin / bottle labels and a 30 s countdown
         if std::env::var("SLY2_HUD_POP").is_ok_and(|v| v == "1") {
             let now = time.elapsed_secs();
@@ -513,6 +522,12 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
             } else {
                 game.slots.FUN_00161958(now);
             }
+        }
+        // WP-UI4: vault / safe HUD object 0x2e1e60 (FUN_001a3078 show / FUN_001a30d0 hide) on the
+        // class-78 vault +0x3d80 edges
+        if c.host.hud_vault.0 != game.vault_feed {
+            game.vault_feed = c.host.hud_vault.0;
+            game.hud_vault = c.host.hud_vault.1;
         }
     }
     game.slots.meter_shown = game.meter.health_shown || game.meter.power_shown;
@@ -857,6 +872,8 @@ fn draw_ui(
         hud::slots(&mut ui.fonts, &game.bindings, &game.strings, &ctx, &game.slots, time.elapsed_secs(), &mut f);
         hud::meter(&game.meter, &mut f);
         hud::binoc(&game.binoc, &mut f);
+        // WP-UI4: vault / safe HUD object 0x2e1e60 (FUN_001a3078 / FUN_001a30d0)
+        hud::vault(game.hud_vault, &mut f);
     }
     if game.menu.depth > 0 {
         hud::menu(&mut ui.fonts, &game.bindings, &game.strings, &ctx, &mut f);

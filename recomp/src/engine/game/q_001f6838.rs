@@ -275,7 +275,7 @@ pub fn ee_sub_1f7530<M: QMem + ?Sized>(m: &mut M, mut o: u32, a1: u32) -> u32 {
     0
 }
 
-/// FUN_001f7950: re-arm the fade of `o` (physics record +0xec, after vtable +0x254 slot 70 when record +0x6c
+/// FUN_001f7950: re-arm the fade of `o` (physics record +0xec, after vtable +0x254 slot 73 when record +0x6c
 /// is set): fade kind = +0x148 bits 24..25; kind 0 -> nothing; FUN_001f7a68(o, 0), then a 0x60-byte request
 /// {+0 owner, +8 o, +0xc 0x20000, +0x10 (s8)+0x149, +0x20 FUN_001a62e8(o), +0x30 vtable +0x10c slot 32} to
 /// FUN_001f7598; kind 3 objects of class 0x38 use {DAT_002f7900, 0x40000, -50} instead.
@@ -285,7 +285,7 @@ pub fn ee_sub_1f7950<M: QMem + ?Sized>(m: &mut M, o: u32) {
     }
     let r = m.r32(o + 0xec);
     if m.r32(r + 0x6c) != 0 {
-        vslot(m, o, 70, &[], &[]);
+        vslot(m, o, 73, &[], &[]);
     }
     if m.r32(o + 0xec) == 0 {
         return;
@@ -432,9 +432,17 @@ fn each_attached<M: QMem + ?Sized>(m: &mut M, o: u32, cid: u32, f: u32, pre: &[u
     }
 }
 
-/// FUN_001f7fa0(a0, a1, o): FUN_001ee678(a0, a1, x) for every attached object (+0xa8, count +0xa4) of class 0x8f
-pub fn ee_sub_1f7fa0<M: QMem + ?Sized>(m: &mut M, a0: u32, a1: u32, o: u32) {
-    each_attached(m, o, 0x8f, 0x001e_e678, &[a0, a1]);
+/// FUN_001f7fa0(o, a, b): FUN_001ee678(x, a, b) for every attached object (+0xa8, count +0xa4) of class 0x8f
+/// VFIX: ABI per asm: o = a0, a = $f12, b = $f13 (kept in f21/f20 across the loop)
+pub fn ee_sub_1f7fa0<M: QMem + ?Sized>(m: &mut M, o: u32, a: f32, b: f32) {
+    let mut i = 0;
+    while i < m.r32(o + 0xa4) as i32 {
+        let x = r32p(m, o + 0xa8, 4 * i as u32);
+        if isa(m, x, 0x8f) {
+            m.call(0x001e_e678, &[x], &[[a, 0.0, 0.0, 0.0], [b, 0.0, 0.0, 0.0]]);
+        }
+        i += 1;
+    }
 }
 
 /// FUN_001f8038(a0, a1, o): as FUN_001f7fa0 with FUN_001edad8

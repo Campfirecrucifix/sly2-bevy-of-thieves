@@ -235,7 +235,7 @@ impl Shop {
             for g in 7..0x2b {
                 if FUN_001dae58(h, g) && !h.acquired(g) {
                     // 0x1dbdc0: the bound test is `0x40 < count` (36 gadgets / 0x40 loot kinds never reach it)
-                    if 0x40 <= self.count {
+                    if 0x40 < self.count {
                         break;
                     }
                     self.ent[self.count as usize][0] = g;
@@ -245,7 +245,7 @@ impl Shop {
         } else if self.page == 1 {
             for i in 0..0x40 {
                 if h.loot(i) != 0 {
-                    if 0x40 <= self.count {
+                    if 0x40 < self.count {
                         break;
                     }
                     self.ent[self.count as usize][0] = i;

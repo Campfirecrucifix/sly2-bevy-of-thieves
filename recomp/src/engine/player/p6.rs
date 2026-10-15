@@ -5,8 +5,6 @@
 //! ASEG), the FUN_0012ff10(aseg, jt, 1, 1) channel search it uses, the 0x2be990 member rows of the three JT
 //! blends (FUN_001a64e8 default branch = FUN_0015e938 mode 1 for flags 0x200 / 0x300), FUN_001e6180's
 //! polyline branch (arc length L of the world points).
-//! REPLACED: FUN_0012ff10's bone test (kind bone +0x94 == param_3) — the channel kind's bone is not resolved;
-//! the first flagged vector channel on the JT is taken (every blend ASEG of Sly has exactly one, kind 1).
 //! The curve's slot 2 (vtable +0x1c) = `KeyVB::eval` for Bez curves, `VecCurve::eval` otherwise. The blend
 //! ASEG FUN_00137a30(jt, 0x20, 8, ..) is not built (runtime class 0x6e, see Q findings): `present` = at least
 //! one entry ASEG, which is what the 0x1a0450 gate (param_3 != 0) needs. Path targets: category mask / range
@@ -50,10 +48,10 @@ pub fn FUN_00182c70_defaults(class: i32) -> Option<(u32, f32)> {
 pub const TARGET_MASK: u32 = 1;
 pub const TARGET_RANGE: f32 = 500.0;
 
-/// 0x0012ff10(aseg, obj, 1, flag 1): first channel with bit 30 set, target oid == obj oid, vector curve
-/// (bit 31 clear). Bone test REPLACED (module doc).
-pub fn FUN_0012ff10(a: &Aseg, oid: i32) -> Option<&Channel> {
-    a.channels.iter().find(|c| c.flag && (((c.oid << 12) as i32) >> 12) == oid && c.vec.is_some())
+/// 0x0012ff10(aseg, jt, 1, flag 1): first flagged vector channel on the JT whose bone (resolved by the ALO's
+/// +0x19c) is of kind (+0x94) 1 — the real search `anim::blends::ee_sub_12ff10`.
+pub fn FUN_0012ff10<'a>(w: &World, a: &'a Aseg, jt: usize) -> Option<&'a Channel> {
+    crate::engine::anim::blends::ee_sub_12ff10(w, a, jt, 1, true).map(|i| &a.channels[i])
 }
 
 /// curve vtable +0x1c (slot 2) at (t, rate 1.0).
@@ -68,11 +66,10 @@ pub fn slot2(c: &VecCurve, t: f32) -> V3 {
 /// (root(0) - root(T)) / T with T = aseg +0x74 (length). Returns (blend, out != 0).
 pub fn FUN_001a0300(w: &World, jt: usize, oids: &[i32; 8]) -> (Blend8, bool) {
     let mut b = Blend8::default();
-    let jt_oid = w.objects[jt].oid;
     for i in 0..8 {
         let Some(a) = ee_sub_15e938_below(w, jt, oids[i]).and_then(|o| aseg_of(w, o)) else { continue };
         b.en[i] = true;
-        if let Some(c) = FUN_0012ff10(a, jt_oid) {
+        if let Some(c) = FUN_0012ff10(w, a, jt) {
             let v = c.vec.as_ref().unwrap();
             let (p0, p1) = (slot2(v, 0.0), slot2(v, a.length));
             let q = 1.0 / a.length;
@@ -113,7 +110,7 @@ pub fn player_hull(w: &World, jt: usize) -> Option<JtHull> {
     jt_hull_from_parts(&alo_of(w, jt)?.parts, CLASS_JT as i32)
 }
 
-/// 0x001e6180 polyline branch: L[0] = 0, L[i] = L[i-1] + |W p_i - W p_(i-1)|.
+/// 0x001e6180 polyline branch (spline branch + full object: classes/shared/path10.rs ee_sub_1e6180): L[0] = 0, L[i] = L[i-1] + |W p_i - W p_(i-1)|.
 pub fn FUN_001e6180(p: &mut Path) {
     let wp = |q: V3| {
         let r = &p.rot;

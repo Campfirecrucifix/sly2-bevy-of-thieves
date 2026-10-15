@@ -210,6 +210,12 @@ pub struct ObjectFields {
     /// WP-C8: member writes on LIGHT (class 4) objects, (object, field, value); FUN_00200598 calls the
     /// LIGHT setter (0x1a35b0.., ends with FUN_001a3968). Drained by `gfx::screen::drain_light_writes`.
     pub light_writes: Vec<(u32, u16, Ref)>,
+    /// WP-EP2F: gadget slot state (jt+0x1180) of level JT objects (class 53), keyed by object index; absent =
+    /// constructor state (all slots -1). Read by getter 0x0010b490 (FUN_00141e78).
+    pub gad: HashMap<u32, crate::engine::player::p18_gadget::Gadgets>,
+    /// WP-EP2F: class-0x8f element words +0x60 / +0x64 (raw f32 bits) set by FUN_001ee678 through method
+    /// 0x00101218 (FUN_001f7fa0), keyed (ALO object, index in `MeshSet::descs`)
+    pub desc_60: HashMap<(u32, usize), (u32, u32)>,
 }
 
 /// WP-J9: Basic payloads of `ObjectFields::rt` records (bit 29; emitters use bit 30, objects are indices).
@@ -288,18 +294,21 @@ pub struct G3da0c0 {
     /// +0x20 / +0x24: queued request id / value
     pub next: i32,
     pub next_value: f32,
+    /// +0x28: actor handle (0 = none)
+    pub actor: u32,
 }
 
 impl Default for G3da0c0 {
     /// FUN_001da320 (level reset): +0x20 = +0x18 = -1, +0x28 = 0, state 0.
     fn default() -> Self {
-        G3da0c0 { state: 0, t: 0.0, id: -1, value: 0.0, next: -1, next_value: 0.0 }
+        G3da0c0 { state: 0, t: 0.0, id: -1, value: 0.0, next: -1, next_value: 0.0, actor: 0 }
     }
 }
 
 impl G3da0c0 {
-    /// FUN_001da5c8(this, state) with +0x28 == 0; `t` = DAT_002dded0.
-    pub fn ee_sub_1da5c8(&mut self, mut p: i32, t: f32) {
+    /// FUN_001da5c8(this, state) with actor +0x28 branches; `t` = DAT_002dded0.
+    /// `h` is None when called from VM dispatch (actor calls are skipped).
+    pub fn ee_sub_1da5c8(&mut self, mut p: i32, t: f32, h: Option<&mut dyn crate::engine::classes::ClassHost>) {
         // 0x001da5c8
         if p == self.state {
             return;
@@ -316,6 +325,29 @@ impl G3da0c0 {
         }
         if p == 0 {
             self.id = -1;
+        }
+        // +0x28 actor branches
+        if self.actor != 0 {
+            if let Some(h) = h {
+            if self.state == 4 && p == 2 {
+                // FUN_00213830(actor, 0x310)
+                h.ee_call(0x213830, &[self.actor, 0x310]);
+            }
+            if p == 3 {
+                // vtable +0x194 on actor (via offset +0x190)
+                h.vcall(self.actor, 0x194);
+                self.state = 3;
+                self.t = t;
+                return;
+            }
+            if p == 4 {
+                // FUN_00213830(actor, 0x312)
+                h.ee_call(0x213830, &[self.actor, 0x312]);
+            } else if p == 1 {
+                // FUN_00212880(actor, 1, &id)
+                h.ee_call(0x212880, &[self.actor, 1, self.id as u32]);
+            }
+            } // if let Some(h)
         }
         self.state = p;
         self.t = t;
@@ -335,7 +367,7 @@ impl G3da0c0 {
     }
 
     /// FUN_001da4b8(value, this, id): request `id`.
-    pub fn ee_sub_1da4b8(&mut self, value: f32, id: i32, t: f32) {
+    pub fn ee_sub_1da4b8(&mut self, value: f32, id: i32, t: f32, h: Option<&mut dyn crate::engine::classes::ClassHost>) {
         // 0x001da4b8
         if id == -1 {
             return self.ee_sub_1da578(-1);
@@ -343,11 +375,11 @@ impl G3da0c0 {
         match self.state {
             0 | 1 | 3 => {
                 if self.state == 1 {
-                    self.ee_sub_1da5c8(-1, t);
+                    self.ee_sub_1da5c8(-1, t, None);
                 }
                 self.id = id;
                 self.value = value;
-                return self.ee_sub_1da5c8(1, t);
+                return self.ee_sub_1da5c8(1, t, h);
             }
             2 => {
                 if self.id == id {

@@ -897,3 +897,8 @@ pub fn ee_sub_1c2ef0<M: QMem + ?Sized>(m: &mut M, o: u32, n: i32) -> u32 {
     ee_sub_1c2db8(m, o);
     first
 }
+
+/// FUN_001c4840(world_ptr): return *(world_ptr + 0x3efc)  — the current player object
+pub fn ee_sub_1c4840<M: QMem + ?Sized>(m: &mut M, p: u32) -> u32 {
+    m.r32(p + 0x3efc)
+}

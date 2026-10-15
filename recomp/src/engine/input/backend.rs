@@ -26,6 +26,26 @@ pub struct PadInput {
     pub bindings: Bindings,
     /// last actuator command [small, big] sent to the device
     pub actuator: [u8; 2],
+    /// WIRE-B2: port-only action bits held this frame (`bindings::EXTRA_*`)
+    pub extra: u32,
+}
+
+impl PadInput {
+    /// Pad state after FUN_00187030 opened `pad` (vibration mode 2, nothing locked).
+    pub fn new(pad: PadState, bindings: Bindings) -> Self {
+        PadInput {
+            pad,
+            lock: InputLock::default(),
+            cheats: CheatDetector::default(),
+            rumble_ctx: RumbleCtx { vibration_mode: 2, no_vibration: false },
+            dpad_override_suppressed: false,
+            t_activity_msg: 0.0,
+            activity_msg: false,
+            bindings,
+            actuator: [0; 2],
+            extra: 0,
+        }
+    }
 }
 
 pub struct PadPlugin;
@@ -45,17 +65,7 @@ impl Plugin for PadPlugin {
         let mut pad = PadState::new();
         // FUN_00187030: open port 0 slot 0
         pad::FUN_00187150(&mut pad, 0, 0, Clock { t: 0.0, dt: 1.0 / 60.0 }, &mut |_| {});
-        app.insert_resource(PadInput {
-            pad,
-            lock: InputLock::default(),
-            cheats: CheatDetector::default(),
-            rumble_ctx: RumbleCtx { vibration_mode: 2, no_vibration: false },
-            dpad_override_suppressed: false,
-            t_activity_msg: 0.0,
-            activity_msg: false,
-            bindings,
-            actuator: [0; 2],
-        })
+        app.insert_resource(PadInput::new(pad, bindings))
         .add_systems(PreUpdate, (device_script, pad_update).chain().after(bevy::input::InputSystems));
         if let Some(g) = std::env::var("SLY2_PAD_SCRIPT").ok().map(|s| GlobalPadScript::parse(&s)).filter(|g| !g.steps.is_empty()) {
             app.insert_resource(g);
@@ -142,12 +152,13 @@ impl DeviceScript {
 }
 
 fn device_script(
-    mut s: ResMut<DeviceScript>,
+    s: Option<ResMut<DeviceScript>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut pads: Query<&mut Gamepad>,
     mut commands: Commands,
 ) {
+    let Some(mut s) = s else { return };
     let s = &mut *s;
     let f = s.frame;
     s.frame += 1;
@@ -271,6 +282,11 @@ fn apply(v: &mut VirtualPad, action: Action, value: f32) {
             v.analog[i] = v.analog[i].max(value.min(1.0));
         }
         Action::Stick(s, a, sign) => v.sticks[s as usize][a as usize] += value * sign as f32,
+        Action::Extra(bit) => {
+            if value >= 0.5 {
+                v.extra |= bit;
+            }
+        }
     }
 }
 
@@ -363,6 +379,7 @@ fn pad_update(
         log.2 = v;
     }
     let input = &mut *input;
+    input.extra = v.extra;
     let mut sent: Option<[u8; 2]> = None;
     let r = pad::FUN_001871c0(
         &mut input.pad,

@@ -171,6 +171,8 @@ pub fn fade_alpha(t_end: f32, secs: f32, t: f32) -> f32 {
 
 /// C2d9500_v15 (0x001ef8c8): the sky position for camera `cam` (both in PS2 world space) given
 /// its own position `own` and field +0x150 (`follow_z`).
+/// The C code calls super FUN_001f36e0 first; in the port the base ALO update runs for all actors
+/// in actor/mod.rs slot 15, and the sky-follow position override runs in `update_sky_follow` after.
 pub fn C2d9500_v15(cam: [f32; 3], own: [f32; 3], follow_z: bool) -> [f32; 3] {
     if follow_z { cam } else { [cam[0], cam[1], own[2]] }
 }

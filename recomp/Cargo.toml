@@ -29,5 +29,7 @@ path = "src/bin/game.rs"
 required-features = ["game"]
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # WP-J3: decode captured screenshots in tests (already in the lock via bevy)
 png = "0.18"

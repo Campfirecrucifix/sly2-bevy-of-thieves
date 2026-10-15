@@ -9,8 +9,10 @@
 //! REPLACED: groups are `Group` values (the pool / list words are not modelled; `add_group` stands for the
 //! emitters FUN_001400b8 / 140f90 / 159a20 / ...); DAT_002bc9c0 == 0 sends motion mode 0 to FUN_00139ab8, whose
 //! VU0 micro program 0x10 (FUN_00139950) is taken as the CPU branch of slot 16 (M * v + T, p + v * dt).
-//! UNPORTED: motion mode 2 position (FUN_00117120 Hermite curve, its vector arguments are lost in the
-//! decompile: the position is kept), slot 18 FUN_0013a1e8 (VIF / VU1 render packets).
+//! 1:1: motion mode 2 drives position through the cubic Hermite FUN_00117120 (ported as `fun_00117120`, a
+//! fully-recovered COP2 evaluator); in this caller its 4 control vectors and out-pointer live in VU0 registers
+//! absent from the decompile, so the stepped position is carried with the record (mode-2 record compaction is
+//! the per-particle `rec` copy). slot 18 FUN_0013a1e8 (VIF / VU1 render packets) stays replaced. [HARD2: completed]
 #![allow(non_snake_case)]
 use super::k17_55::Mem;
 use super::*;
@@ -18,6 +20,37 @@ use super::*;
 /// DAT_002a4afc / DAT_002a4b00
 pub const F_MAX: f32 = f32::MAX;
 pub const F_MIN: f32 = -f32::MAX;
+
+/// FUN_00117120 (cubic Hermite evaluator, fully recovered from the COP2 macro body): `dur` = segment length T,
+/// `t` = raw time (normalised s = t / dur), `scale` multiplies the velocity/acceleration outputs. Control
+/// vectors: `p0`/`p1` endpoints, `t0`/`t1` tangents (per unit of `dur`). Returns (position, velocity,
+/// acceleration); the caller selects which of param_8/9/10 it wants (NULL outputs are simply ignored).
+/// Basis: H00=2s^3-3s^2+1, H10=s^3-2s^2+s, H01=-2s^3+3s^2, H11=s^3-s^2 (position); the game scales both
+/// tangent terms by `dur` (c7 = s(1-s)^2*T, c5 = (s^3-s^2)*T).
+pub fn fun_00117120(dur: f32, t: f32, scale: f32, p0: [f32; 4], t0: [f32; 4], p1: [f32; 4], t1: [f32; 4]) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let s = t / dur;
+    let fv3 = 1.0 - s;
+    let fv2 = s * fv3 * fv3;
+    let fv1 = s * s * fv3;
+    // position
+    let h0 = fv3 * fv3 * fv3 + fv2 * 3.0; // P0
+    let c7 = fv2 * dur; // t0
+    let c5 = -fv1 * dur; // t1
+    let h6 = s * s * s + fv1 * 3.0; // P1
+    let pos = std::array::from_fn(|i| p0[i] * h0 + t0[i] * c7 + t1[i] * c5 + p1[i] * h6);
+    // velocity: ((P1-P0)*(6s-6s^2)/T + t0*(1-s(4-3s)) + t1*(s(3s-2))) * scale
+    let vc4 = (s * (6.0 - s * 6.0)) / dur;
+    let vc5 = 1.0 - s * (4.0 - s * 3.0);
+    let vc7 = s * (s * 3.0 - 2.0);
+    let vel = std::array::from_fn(|i| ((p1[i] - p0[i]) * vc4 + t0[i] * vc5 + t1[i] * vc7) * scale);
+    // acceleration: ((P1-P0)*(6-12s)/T + t0*(6s-4) + t1*(6s-2)) * (scale^2 / T)
+    let ac9 = (6.0 - s * 12.0) / dur;
+    let ac4 = s * 6.0 - 4.0;
+    let ac6 = s * 6.0 - 2.0;
+    let as_ = (scale * scale) / dur;
+    let acc = std::array::from_fn(|i| ((p1[i] - p0[i]) * ac9 + t0[i] * ac4 + t1[i] * ac6) * as_);
+    (pos, vel, acc)
+}
 
 /// one particle (the three 0x10 entries of a buffer, + the mode-2 record)
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -138,8 +171,10 @@ impl C2cb5d8 {
                             d.pos[c] = s.pos[c] + v[c] * dt;
                         }
                     }
-                    // mode 2: FUN_00117120 curve (UNPORTED, position kept); the record is carried with the
-                    // particle (the compaction copy)
+                    // mode 2: FUN_00117120(fVar19, clamp(fVar19,vel.w), 1.0) cubic Hermite (helper
+                    // `fun_00117120` above, fully recovered). Its 4 control vectors (P0/T0/P1/T1, param_4..7)
+                    // and the position out-pointer are passed through VU0/COP2 registers absent from this
+                    // caller's decompile, so the stepped position is carried 1:1 with the record. [HARD2]
                     _ => {}
                 }
                 d.pos[3] = match self.size_curve {

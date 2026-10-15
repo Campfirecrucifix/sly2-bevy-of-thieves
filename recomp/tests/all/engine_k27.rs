@@ -104,8 +104,8 @@ mod scr {
         let mut cm = Cm::new();
         {
             let base = GameSpliceHost { t: 0.0, cm: None, emitters: &mut em, vars: Some(&vars), data: &mut data };
-            let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum };
-            let mut h = PersistentHost { level, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: Some(&lv.header.level_table), sched: &mut st.sched };
+            let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum , spawn_lists: &mut sly2_recomp::engine::player::p25::SpawnLists::default()};
+            let mut h = PersistentHost { level, live_q: None, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: Some(&lv.header.level_table), sched: &mut st.sched };
             let (_, frames) = run_level_scripts_framed(&mut st.vm, &lv.data, &w, &mut h);
             st.frames = frames;
         }
@@ -118,8 +118,8 @@ mod scr {
                 job_messages(&mut st.sched, &jobs);
                 let SpliceState { vm, sched, errors, frames, .. } = &mut st;
                 let base = GameSpliceHost { t: 0.0, cm: None, emitters: &mut em, vars: Some(&vars), data: &mut data };
-                let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum };
-                let mut h = PersistentHost { level, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: Some(&lv.header.level_table), sched };
+                let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum , spawn_lists: &mut sly2_recomp::engine::player::p25::SpawnLists::default()};
+                let mut h = PersistentHost { level, live_q: None, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: Some(&lv.header.level_table), sched };
                 send_messages(vm, errors, frames, &mut h);
             }
         }

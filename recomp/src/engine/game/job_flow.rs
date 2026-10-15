@@ -139,7 +139,7 @@ pub fn FUN_001638f8(m: &mut JobMgr, w: &World) {
     }
 }
 
-fn item_i32(it: Option<&ArrayItem>) -> i32 {
+pub(crate) fn item_i32(it: Option<&ArrayItem>) -> i32 {
     match it {
         Some(ArrayItem::One(_, b)) => match b.len() {
             0 => 0,
@@ -297,7 +297,7 @@ pub fn FUN_00164270(m: &mut JobMgr, t: usize, saved: SavedTask) {
 
 /// 0x001657a8: event 0x1e for the task's job.
 pub fn FUN_001657a8(m: &mut JobMgr, t: usize) {
-    let j = m.tasks[t].job.map(|j| j as i32).unwrap_or(-1);
+    let j = m.tasks[t].job.map(|j| m.jobs[j].obj as i32 + 1).unwrap_or(0); // the job object (handle)
     m.FUN_001619a0(0x1e, j);
 }
 

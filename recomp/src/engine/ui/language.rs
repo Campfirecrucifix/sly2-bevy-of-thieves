@@ -2,7 +2,8 @@
 //!
 //! Boot FUN_001613a8: FUN_001a2c20(0) (region 0 = the US image), then FUN_001a2da0(sceScfGetLanguage())
 //! picks the system language if the region offers it. The language menu (title triangle, only with > 1
-//! languages) on-select FUN_001dd8e0 sets the language and reloads the level. FUN_001d8ff8 applies the stored
+//! languages) on-select FUN_001dd8e0 sets the language and posts a FUN_0022b490 level-reload request
+//! (null descriptor = the current level, spawn oid 0x189, parent -1, flags 1). FUN_001d8ff8 applies the stored
 //! `flags lang` only with > 1 languages, so on the US image the language is always 0 (English).
 #![allow(non_snake_case)]
 
@@ -82,9 +83,19 @@ impl Language {
     }
 
     /// FUN_001dd8e0(item): language menu on-select = FUN_001a2bd0(item +8), then
-    /// FUN_0022b490(0x3dd490, 0, 0x189, -1, 1, -1) (level reload request; returned for the caller to send).
+    /// FUN_0022b490(0x3dd490, 0, 0x189, -1, 1, -1) (level reload request). The post is also returned so
+    /// callers / tests can inspect it (the C function is void).
     pub fn FUN_001dd8e0(&mut self, item_lang: i32) -> LanguageReload {
         self.FUN_001a2bd0(item_lang);
+        let post = crate::engine::game::flow::Post {
+            dest: crate::engine::game::flow::Dest::Current,
+            spawn: 0x189,
+            spawn_parent: -1,
+            flags: 1,
+            a: -1,
+            slots: None,
+        };
+        crate::engine::game::flow::FUN_0022b490(post);
         LanguageReload { msg: 0x189 }
     }
 }

@@ -8,30 +8,11 @@
 //! std::fmt (`format!`) at the Rust call sites (e.g. ui::bind).
 use crate::engine::classes::q::q2mem::QMem;
 
-/// counters DAT_002dd2e0..002dd2f4 and the FUN_0011cca8(pool, size, count, align) arguments
-pub const POOLS: [(u32, u32, u32, u32, u32); 6] = [
-    (0x002d_d2e0, 0x0045_20a8, 0x14, 0x2000, 0x10),
-    (0x002d_d2e4, 0x0045_20d0, 0x18, 0x800, 0x10),
-    (0x002d_d2e8, 0x0045_20f8, 0x28, 0x200, 0x10),
-    (0x002d_d2ec, 0x0045_2120, 0x1c, 0x800, 0x10),
-    (0x002d_d2f0, 0x0045_2148, 0xc, 200, 0x10),
-    (0x002d_d2f4, 0x0045_2170, 0x14, 0x100, 0x10),
-];
-
 /// FUN_0021c6c8 / FUN_0021d120 / FUN_0021d4e0 / FUN_0021ee78 / FUN_0021f188 (identical bodies, one per
 /// TU): `(init, prio)`: when prio == 0xffff and init != 0 each counter is bumped and the first bump
 /// registers its pool.
 pub fn ee_sub_21c6c8<M: QMem + ?Sized>(m: &mut M, init: u32, prio: u32) {
-    if prio != 0xffff || init == 0 {
-        return;
-    }
-    for (ctr, pool, size, n, align) in POOLS {
-        let c = m.r32(ctr).wrapping_add(1);
-        m.w32(ctr, c);
-        if c == 1 {
-            m.call(0x0011_cca8, &[pool, size, n, align], &[]);
-        }
-    }
+    crate::engine::game::q_001e9090::ee_sub_1ea410(m, init, prio);
 }
 
 /// FUN_0021c800 / FUN_0021d258 / FUN_0021d618 / FUN_0021efb0 / FUN_0021f2c0: `static_init(1, 0xffff)`
@@ -93,10 +74,11 @@ pub fn ee_sub_21eda0<M: QMem + ?Sized>(m: &mut M, dst: u32, src: u32) -> u32 {
 }
 
 /// FUN_0021edf8: strchr (the terminator itself is not matched unless c == 0)
-pub fn ee_sub_21edf8<M: QMem + ?Sized>(m: &mut M, mut p: u32, c: u8) -> u32 {
+/// VFIX: `c` is compared as the full register (beq lbu, a1): c > 0xff never matches
+pub fn ee_sub_21edf8<M: QMem + ?Sized>(m: &mut M, mut p: u32, c: u32) -> u32 {
     loop {
         let b = m.r8(p);
-        if b == c {
+        if b as u32 == c {
             return p;
         }
         p += 1;

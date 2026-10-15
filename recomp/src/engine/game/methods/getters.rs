@@ -18,6 +18,16 @@
 //!    to 0x3e148c. Replaced: record only (vector, DAT_003e11f8 serial, vtable +0x1c / +0x14 not run).
 //!  - WP-J11: 0x00110738 -> FUN_001d3fa8(obj, key): entry of method 0x001105b8 (FUN_001d4b90) by key.
 //!  - WP-J11: 0x001008d8 -> FUN_001a6290(lo, oid): lo or a direct child has oid `oid`. 1:1.
+//!  - WP-SCR4: 0x001014e8 -> FUN_001f8510(obj, sub, id): first +0x54 element (stride 0x100,
+//!    count +0x50) with +0x94 == id and (sub == -1 or +0x9c == sub). The port does not model the
+//!    +0x50/+0x54 element table on world objects (populated by the big object-stream base in the
+//!    original, e.g. FUN_001f6068, for ALO-rooted scene objects). The receiver of this getter in the
+//!    frame-0 load-script of Episode 1 is the sequence itself (class 114, `C2d8c48`), whose +0x50 is a
+//!    sequence-record count and +0x54 is a 0x50-byte-stride record table (NOT the 0x100-stride element
+//!    table the thunk expects): on the original the walk reads a +0x94 word out of record payload and
+//!    almost always returns 0 (no match). Returning Basic(0) here is 1:1 for the common
+//!    no-element-table case. REPLACED: receivers that genuinely own a C2ca2c0 element table (object
+//!    streams relocated by `q::hard5::ee_sub_1f6068`) are not covered here (see SCR4 remaining).
 
 use super::{GetterDesc, GetterRet, MArg};
 use crate::engine::game::fields::RtRecord;
@@ -30,6 +40,7 @@ use crate::engine::splice::value::Ref;
 pub const IMPLEMENTED: &[u32] = &[
     0x0010_0228, 0x0010_08d8, 0x0010_1368, 0x0010_13e8, 0x0010_1468, 0x0010_1588, 0x0010_1910, 0x0010_1a88, 0x0010_2038, 0x0010_2150,
     0x0010_2430, 0x0010_3ab8, 0x0010_4840, 0x0010_6910, 0x0010_d840, 0x0010_e2b8, 0x0010_e328, 0x0010_f7b0, 0x0011_0738,
+    0x0010_14e8, 0x0010_b490,
 ];
 
 pub fn wrap(ret: GetterRet, v: u32) -> Ref {
@@ -146,6 +157,14 @@ pub fn call(h: &mut PersistentHost<'_>, g: &GetterDesc, obj: u32, a: &[MArg]) ->
                 None => objs.rt_push(RtRecord { class: 134, owner: obj, alo, f: f1, arg: int(a, 4) }),
             }
         }
+        // WP-EP2F: 0x0010b490 -> FUN_00141e78(jt = obj, gadget id): slot holding it or -1 (1:1, `Gadgets`)
+        0x0010_b490 => objs.gad.get(&obj).map_or(-1, |g| g.FUN_00141e78(int(a, 0))) as u32,
+        // WP-SCR4: 0x001014e8 -> FUN_001f8510(obj, sub, id): the port does not model the +0x50/+0x54
+        // element table on world objects; see the file-level comment. Returns Basic(0) (no entry).
+        0x0010_14e8 => {
+            let _ = (int(a, 0), int(a, 1));
+            0
+        }
         // WP-J11: 0x001008d8 -> FUN_001a6290(lo = obj, oid): +0x18 oid == oid, else the first-level
         // children (+0x3c list while the entry's owner is `lo`) by oid. 1:1 on `World` owner / children.
         0x0010_08d8 => {
@@ -186,6 +205,14 @@ pub fn call(h: &mut PersistentHost<'_>, g: &GetterDesc, obj: u32, a: &[MArg]) ->
                 l.iter().min_by(|x, y| x.t[0].total_cmp(&y.t[0])).map(|x| x.pos[0])
             };
             return Ok(Ref::Vector(super::aim::ee_sub_155fb0(o, p0, [1.0, 0.0], [0.0; 3], 0.0, &mut cast)));
+        }
+        // WP-TR1: bridge to QMem-ported getter callees via LiveQ store
+        _ if h.live_q.is_some() && g.m.callee != 0 => {
+            let lq = h.live_q.as_mut().unwrap();
+            match super::super::live_bridge::try_getter(lq, g.m.callee, obj, a, g.ret) {
+                Some(Ok(r)) => return Ok(r),
+                _ => return Err(SpliceError::HostUnimplemented(format!("getter {:#x} -> FUN_{:08x}", g.m.thunk, g.m.callee))),
+            }
         }
         _ => return Err(SpliceError::HostUnimplemented(format!("getter {:#x} -> FUN_{:08x}", g.m.thunk, g.m.callee))),
     };

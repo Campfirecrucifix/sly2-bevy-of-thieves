@@ -13,6 +13,25 @@ use std::sync::Arc;
 #[derive(Resource, Default, Clone)]
 pub struct ClassesLevel(pub Option<Arc<World>>);
 
+/// WP-SCR2: one branch outcome of FUN_00143ee0 for Sly, enqueued by `EngineHost::k22_pose_143ee0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPoseReq {
+    /// slot-87 index (FUN_00143ee0 param_4; `Clear` always restores idx 0 through FUN_00143ff8)
+    pub idx: u32,
+    /// the oid that resolved (0 for `Clear`, oid -1 branch), the resolved object (anim or sm), and the
+    /// FUN_001305b8 / FUN_001f1448 flags (rec[6] | 1)
+    pub kind: PlayerPoseKind,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlayerPoseKind {
+    /// oid == -1: FUN_00143ff8 (restore slot-87 idx 0 when the current pose is still 5 / 6 state 10 / 11)
+    Clear,
+    /// (vt+0x2c4)(subj, idx) then FUN_00130658(subj + 0x1030) + FUN_001f1448(sm, subj, -1, flags, &subj + 0x1034)
+    Sm { obj: u32, flags: u32 },
+    /// (vt+0x2c4)(subj, idx) then FUN_001f15b8(subj + 0x1034) + FUN_001305b8(0, 1.0, anim, subj, flags, &subj + 0x1030)
+    Anim { obj: u32, flags: u32 },
+}
+
 /// Host recording the hook calls that have no engine port yet.
 #[derive(Default, Clone)]
 pub struct EngineHost {
@@ -26,6 +45,9 @@ pub struct EngineHost {
     pub found: usize,
     pub deferred: usize,
     pub tpl_pushes: usize,
+    /// WP-SCR10: warp-volume task entries (FUN_002284e0) keyed by world object index,
+    /// fed from SpawnLists::warp_tasks after level scripts run.
+    pub warp_tasks: std::collections::HashMap<usize, Vec<[i32; 2]>>,
     /// K3: virtual calls on objects outside the set
     pub vcalls: usize,
     /// K7: world +0x3d84 no-detection counter (FUN_0020f1b8), vision blockers (class 23 list DAT_003e1480),
@@ -66,9 +88,21 @@ pub struct EngineHost {
     /// WP-K33: last FUN_001618f8 / FUN_00161958 countdown request of the loot system (request count, seconds;
     /// < 0 = stop), read by ui/ (world+0x3bc4 label)
     pub hud_timer: (u32, f32),
+    /// WP-UI4: FUN_001a3078 (on) / FUN_001a30d0 (off) of the HUD object 0x2e1e60 (screen element 0x373, the
+    /// vault / safe indicator shown while world +0x3d80 > 0; class-78 Vault state 2 edges), read by ui/
+    /// (request count, shown)
+    pub hud_vault: (u32, bool),
     pub k22_title_active: bool,
     pub k22_seq_actions: Vec<(u32, u32, [u32; 20])>,
     pub k22_po_switches: Vec<u32>,
+    /// WP-SCR2: FUN_00143ee0 (slot-87 pose) requests for Sly, written by `k22_pose_143ee0` for subjects
+    /// that resolve to PLAYER_HANDLE and drained by player::plugin::link_classes. Each entry is the ELF
+    /// decomp branch outcome (oid resolved to object, is-a 0x6d anim / 0x6f sm, else `Clear` for oid -1).
+    pub player_pose: Vec<PlayerPoseReq>,
+    /// WP-SCR2: FUN_00144038(Sly) (slot-88 index is 5 / 6 = states 10 / 11, the pose is active). Written
+    /// by the player layer each frame, read by the k22 wait condition case 0xa to keep the sequence node
+    /// blocked while the pose plays.
+    pub player_posing: bool,
     /// K22: the DAT_003dd4bc object set (FUN_0011a220 add / FUN_0011a2e8 remove / FUN_0011a380 member), handles
     pub set_3dd4bc: Vec<u32>,
     /// K11: engine calls reached with no ported callee (explicit Unported errors)
@@ -146,8 +180,10 @@ pub struct EngineHost {
     /// K27: FUN_001331f8 script messages (object + 1, msg, argument words) for the game layer (K28: delivered
     /// with FUN_00200da0 argument CRefs by game::vm_state::send_messages, classes/k28.rs)
     pub k27_script_msgs: Vec<(u32, u32, Vec<u32>)>,
-    pub k27_cine: [i32; 2],
+    pub k27_cine: [i32; 4],
     pub k27_pad_lock: u32,
+    /// PAD1: live pad state for ee_call(0x187d80/0x187de0) — written by game app or test harness each frame
+    pub pad: Option<crate::engine::input::pad::PadState>,
     pub k27_fades: usize,
     /// K27: anim event kind 5 seeks applied (FUN_00130d30 on class-run ASEGAs)
     pub k27_seeks: usize,
@@ -264,6 +300,11 @@ impl ClassHost for EngineHost {
     fn ee_sub_1618b0(&mut self) {
         self.hud_bottles = self.hud_bottles.wrapping_add(1);
     }
+    /// WP-UI4: FUN_001a3078(0x2e1e60, on) / FUN_001a30d0: show / hide the vault HUD object (screen element
+    /// 0x373), driven by the class-78 Vault +0x3d80 counter edges -> ui::hud::vault
+    fn ee_sub_1a3078(&mut self, on: bool) {
+        self.hud_vault = (self.hud_vault.0.wrapping_add(1), on);
+    }
     /// A14: FUN_001b3a48(0x2f66b0, +0x14c[k]) of the class-26 warp object (list of LoadData::L2282b0)
     fn ee_sub_1b3a48(&mut self, obj: usize, k: i32) {
         use crate::engine::world::objects::{LoadData, Payload};
@@ -315,9 +356,53 @@ impl ClassHost for EngineHost {
         v
     }
     fn k22_seq_action(&mut self, owner: u32, subj: u32, rec: &[u32; 20]) {
+        // WIRE-A: FUN_001e1e30 case 0xb: s = FUN_001e1db8(node, rec[4]); s is-a 0x72 (sequence) ->
+        // FUN_001dfd58(s, subject). The node +0x50 = s wait (rec[1] == 0) is not modelled (outer timing only).
+        if rec[0] == 0xb {
+            let s = self.ee_sub_15e938(1, rec[4] as i32, subj);
+            if s != 0 && self.ee_sub_132b10(s, 0x72) != 0 {
+                self.ee_sub_1dfd58(s, subj);
+                return;
+            }
+        }
         if self.k22_seq_actions.len() < 4096 {
             self.k22_seq_actions.push((owner, subj, *rec));
         }
+    }
+    /// WP-SCR2: FUN_00143ee0 for Sly (class 53 / PLAYER_HANDLE); other 0x34-derived subjects (Bentley 55,
+    /// Murray 54) are UNPORTED here and recorded through `k22_seq_action` via the fallback below. The oid
+    /// -> object resolve and is-a 0x6d / 0x6f test are the FUN_0015e938 / FUN_00132b10 engine calls.
+    fn k22_pose_143ee0(&mut self, subj: u32, oid: i32, flags: u32, idx: u32) {
+        if subj != super::guard::PLAYER_HANDLE {
+            // record for debugging; actual pose on Bentley / Murray is UNPORTED
+            if self.k22_seq_actions.len() < 4096 {
+                let mut rec = [0u32; 20];
+                rec[0] = 0xa;
+                rec[4] = oid as u32;
+                rec[5] = subj;
+                rec[6] = flags;
+                self.k22_seq_actions.push((0, subj, rec));
+            }
+            return;
+        }
+        if oid == -1 {
+            self.player_pose.push(PlayerPoseReq { idx: 0, kind: PlayerPoseKind::Clear });
+            return;
+        }
+        let o = self.ee_sub_15e938(1, oid, subj);
+        if o == 0 {
+            return;
+        }
+        if self.ee_sub_132b10(o, 0x6d) == 0 {
+            if self.ee_sub_132b10(o, 0x6f) != 0 {
+                self.player_pose.push(PlayerPoseReq { idx, kind: PlayerPoseKind::Sm { obj: o, flags } });
+            }
+        } else {
+            self.player_pose.push(PlayerPoseReq { idx, kind: PlayerPoseKind::Anim { obj: o, flags } });
+        }
+    }
+    fn k22_posing_144038(&mut self, subj: u32) -> bool {
+        subj == super::guard::PLAYER_HANDLE && self.player_posing
     }
     /// P20: embedded JT-layout component calls of the controlled Bentley / Murray (player::p20::PoHost)
     /// P23: slot 78 (+0x27c) calls -> player::p23::apply_switches
@@ -363,6 +448,20 @@ impl ClassHost for EngineHost {
             self.sm_states.push((k, e[1], e[2] as i32));
         }
     }
+    fn k22_sma_20fff0(&mut self, _ctx: u32, entry: &[u32; 4], _mode: u32, _owner: u32) -> u32 {
+        // Same as ee_sub_20ff70 but for a single [name, key, val, -1] entry: resolve the SMA
+        // object and queue a state change. Returns 0 (no live handle in the native recomp).
+        let Some(w) = self.world.clone() else { return 0 };
+        let Some(&k) = w.find_oid(entry[0] as i32).first() else { return 0 };
+        if !crate::engine::world::class::ee_sub_15e988(w.objects[k].class, 0x30) || entry[2] as i32 == -1 {
+            return 0;
+        }
+        self.sm_states.push((k, entry[1], entry[2] as i32));
+        0
+    }
+    fn k22_release_1e5410(&mut self, _owner: u32) {
+        // In the native recomp the SMA handle is not a live QMem resource; release is a no-op.
+    }
     fn ee_sub_161f48_list(&mut self, _obj: usize, entries: &[[u32; 2]]) {
         let Some(w) = self.world.clone() else { return };
         for e in entries {
@@ -372,6 +471,23 @@ impl ClassHost for EngineHost {
                 self.k28_task_calls.push((0x164640, k as u32 + 1, e[1] as i32, _obj as u32 + 1));
             }
         }
+    }
+    /// WP-SCR10: FUN_00161f48(0x2deb30, +0x164, +0x168, obj) for warp volumes.
+    /// Same as ee_sub_161f48_list but takes i32 pairs from C2dc6f0::task_entries. // 0x002283d0
+    fn ee_sub_161f48_warp(&mut self, obj: usize, entries: &[[i32; 2]]) {
+        let Some(w) = self.world.clone() else { return };
+        let ctx = obj as u32 + 1;
+        for e in entries {
+            if let Some(&k) = w.find_oid(e[0]).first() {
+                self.signals.push((k, e[1] as u32));
+                // K28: FUN_00164640(task, e[1], ctx)
+                self.k28_task_calls.push((0x164640, k as u32 + 1, e[1], ctx));
+            }
+        }
+    }
+    /// WP-SCR10: warp-volume task entries.
+    fn warp_task_entries(&self, obj: usize) -> Vec<[i32; 2]> {
+        self.warp_tasks.get(&obj).cloned().unwrap_or_default()
     }
     /// K28: FUN_00164640 / FUN_00164df0 / FUN_001619a0 -> the job manager (`k28_task_calls`)
     fn ee_sub_164640(&mut self, obj: u32, k: i32) {
@@ -385,6 +501,10 @@ impl ClassHost for EngineHost {
     }
     fn ee_sub_1619a0(&mut self, k: i32, obj: u32) {
         self.k28_task_calls.push((0x1619a0, obj, k, 0));
+    }
+    fn ee_sub_1dffd8(&mut self, seq: u32) -> bool {
+        // 0x001dffd8: return *(seq + 0x74) — sequence running field
+        self.obj_i32(seq, 0x74) != 0
     }
     fn ee_sub_1dfd58(&mut self, seq: u32, player: u32) {
         self.seq_starts.push((seq, player));
@@ -444,6 +564,30 @@ impl ClassHost for EngineHost {
             self.k27_script_msgs.push((obj, msg, args.to_vec()));
         }
     }
+    /// WP-EP1f: (vtable +0x1c)(obj, msg, ..) = FUN_001a61e0 (slot 2 of the LO-derived classes, C2c94e0): the
+    /// object's level-script message (C2c94a0_v2 -> FUN_001331f8, posted) and, for messages 5 / 6, the job
+    /// manager event 0x1a / 0x1b with the object (FUN_001619a0). REPLACED: classes overriding slot 2 are not
+    /// distinguished; only messages 5 / 6 are routed (the other vt+0x1c messages of the class code stay
+    /// unsent as before).
+    fn vcall_1c(&mut self, obj: usize, a: i32, _b: i32) {
+        // 0x001a61e0
+        let ev = match a {
+            5 => 0x1a,
+            6 => 0x1b,
+            _ => return,
+        };
+        self.k27_script_msg(obj as u32 + 1, a as u32, &[]);
+        self.ee_sub_1619a0(ev, obj as u32 + 1);
+    }
+    /// WP-EP1f: FUN_00228170(warp): FUN_001c4840 player != 0 -> (player vt+0x134)(player, warp) (slot 37
+    /// C2cd748_v37 = place the player at the warp; REPLACED: not modelled, the job's reload follows) and
+    /// (warp vt+0x1c)(warp, 5, 0, 0, 0, 0) -> event 0x1a.
+    fn ee_sub_228170(&mut self, warp: u32) {
+        // 0x00228170
+        if let Some(o) = (warp as usize).checked_sub(1) {
+            self.vcall_1c(o, 5, 0);
+        }
+    }
     fn k27_shake_14f750(&mut self, kind: i32) {
         self.k27_shake = Some(kind);
     }
@@ -482,24 +626,50 @@ impl ClassHost for EngineHost {
     fn k27_rumble_187e28(&mut self, duration: f32, id: i32) {
         self.k26.rumble.push(crate::engine::game::splice_host::RumbleRequest { pattern: id as usize, duration });
     }
-    /// FUN_0020efc0 + FUN_0020f0c0: world +0x3d78 / +0x3d7c up; the first sets pad lock bits 2 / 4 (FUN_00187078)
-    fn k27_world_20efc0(&mut self, _flags: u32) {
+    /// FUN_0020efc0: world +0x3d78 up; the first sets pad lock bit 2 (FUN_00187078); flags bit 0 / 1 raise the
+    /// +0x3d80 / +0x3d84 counters. WP-UI4: +0x3d80 == 1 makes the FUN_001a3078 vault HUD object call (FUN_0020f128).
+    fn k27_world_20efc0(&mut self, flags: u32) {
         self.k27_cine[0] += 1;
-        self.k27_cine[1] += 1;
         if self.k27_cine[0] == 1 {
             self.k27_pad_lock |= 2;
         }
+        if flags & 1 != 0 {
+            self.k27_cine[2] += 1;
+            if self.k27_cine[2] == 1 {
+                self.ee_sub_1a3078(true);
+            }
+        }
+        if flags & 2 != 0 {
+            self.k27_cine[3] += 1;
+        }
+    }
+    /// FUN_0020f030: +0x3d78 down; at 0 the lock bit 2 clears (FUN_001870a0); flags bit 0 / 1 lower +0x3d80 / +0x3d84.
+    /// WP-UI4: +0x3d80 == 0 makes the FUN_001a30d0 vault HUD hide call (FUN_0020f160).
+    fn k27_world_20f030(&mut self, flags: u32) {
+        self.k27_cine[0] -= 1;
+        if self.k27_cine[0] == 0 {
+            self.k27_pad_lock &= !2;
+        }
+        if flags & 1 != 0 {
+            self.k27_cine[2] -= 1;
+            if self.k27_cine[2] == 0 {
+                self.ee_sub_1a3078(false);
+            }
+        }
+        if flags & 2 != 0 {
+            self.k27_cine[3] -= 1;
+        }
+    }
+    /// FUN_0020f0c0: +0x3d7c up; the first sets pad lock bit 4 (FUN_00187078)
+    fn k27_world_20f0c0(&mut self) {
+        self.k27_cine[1] += 1;
         if self.k27_cine[1] == 1 {
             self.k27_pad_lock |= 4;
         }
     }
-    /// FUN_0020f030 + FUN_0020f0f0: counters down; at 0 the lock bits clear (FUN_001870a0)
-    fn k27_world_20f030(&mut self, _flags: u32) {
-        self.k27_cine[0] -= 1;
+    /// FUN_0020f0f0: +0x3d7c down; at 0 the lock bit 4 clears (FUN_001870a0)
+    fn k27_world_20f0f0(&mut self) {
         self.k27_cine[1] -= 1;
-        if self.k27_cine[0] == 0 {
-            self.k27_pad_lock &= !2;
-        }
         if self.k27_cine[1] == 0 {
             self.k27_pad_lock &= !4;
         }
@@ -780,6 +950,19 @@ impl ClassHost for EngineHost {
                 self.obj_set_u32(o, 0x12c, 1f32.to_bits());
                 0
             }
+            // PAD1: FUN_00187d80(pad_addr, mask) — test-and-consume pressed buttons
+            (0x187d80, &[_, mask, ..]) => {
+                if let Some(pad) = self.pad.as_mut() {
+                    crate::engine::input::pad::FUN_00187d80(pad, mask) as i64
+                } else { 0 }
+            }
+            // PAD1: FUN_00187de0(pad_addr, mask) — consume pressed, latch held
+            (0x187de0, &[_, mask, ..]) => {
+                if let Some(pad) = self.pad.as_mut() {
+                    crate::engine::input::pad::FUN_00187de0(pad, mask);
+                }
+                0
+            }
             _ => 0,
         }
     }
@@ -908,6 +1091,26 @@ impl ClassHost for EngineHost {
     fn ee_sub_1a6f00_to_world(&mut self, obj: usize, p: [f32; 3]) -> [f32; 3] {
         let Some(m) = self.k24_world_xf(obj as u32 + 1) else { return p };
         [0, 1, 2].map(|k| p[0] * m[0][k] + p[1] * m[1][k] + p[2] * m[2][k] + m[3][k])
+    }
+    /// WP-PC2: FUN_001a6f00(a, b, 0): origin of a's local frame expressed in b's local frame.
+    /// Composition: a != 0 lifts p = (0,0,0) through world_xf(a) (which equals the translation column
+    /// of a's world matrix), then b != 0 brings the result into b's local frame via inverse(world_xf(b)).
+    /// Either operand may be 0, matching the two branches of the Ghidra body.
+    fn ee_sub_1a6f00_of(&mut self, a: u32, b: u32) -> [f32; 3] {
+        use crate::engine::gfx::scene::invert;
+        let mut p = [0.0f32; 3];
+        if a != 0 {
+            if let Some(m) = self.k24_world_xf(a) {
+                p = [m[3][0], m[3][1], m[3][2]];
+            }
+        }
+        if b != 0 {
+            if let Some(mb) = self.k24_world_xf(b) {
+                let mi = invert(&mb);
+                p = [0, 1, 2].map(|k| p[0] * mi[0][k] + p[1] * mi[1][k] + p[2] * mi[2][k] + mi[3][k]);
+            }
+        }
+        p
     }
     /// K24: obj +0x10 = the owning LO (FUN_0013fb40 param_1; world `Lo::owner`)
     fn parent_10(&mut self, obj: u32) -> u32 {
@@ -1215,6 +1418,8 @@ pub fn feed_music_block(res: Option<Res<crate::engine::disc::LevelLoadResult>>, 
 impl Plugin for ClassesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ClassesLevel>().init_resource::<Classes>().add_systems(Update, tick_classes);
+        // WIRE1: queue ports over the live guest image (classes/q/live.rs)
+        app.add_plugins(super::q::live::LiveQPlugin);
         #[cfg(feature = "game")]
         app.add_systems(Update, play_class_sounds.after(tick_classes));
         #[cfg(feature = "game")]

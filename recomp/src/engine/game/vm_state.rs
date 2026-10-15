@@ -15,6 +15,7 @@ use super::splice_host::{LevelSpliceHost, BASIC_137_GLOBAL, BASIC_EMITTER, BASIC
 use crate::engine::camera::cm::{CmClock, FUN_0014d8c0, FUN_0014f750};
 use crate::engine::camera::sound::{CmEmitter, FUN_001fb018, FUN_001fb060, FUN_001fb098};
 use crate::engine::camera::Cm;
+use crate::engine::classes::ClassHost;
 use crate::engine::disc::descriptor::LevelTable;
 use crate::engine::splice::eval::Vm;
 use crate::engine::splice::frame::FrameRef;
@@ -64,6 +65,12 @@ pub struct Schedule {
     pub job_seen: usize,
     /// WP-J15: `JobMgr::task_msgs` already delivered
     pub task_msg_seen: usize,
+    /// WP-EP1f: `JobMgr::ev_msgs` already queued
+    pub ev_msg_seen: usize,
+    /// WP-EP1f: script messages with arguments (object, message, args) waiting for the script tick
+    pub arg_msgs: Vec<(u32, u32, Vec<Ref>)>,
+    /// WP-EP1f: the post-load script message 0 (FUN_001a5c48) was delivered for the current world
+    pub post_load_sent: bool,
     pub job_prev: (Option<u32>, Option<u32>),
 }
 
@@ -102,6 +109,7 @@ impl JobView {
 /// WP-J15: the job manager method rows of the last script ticks (`ClassLink::job_calls`): method 1258
 /// FUN_00162660(job, aseg, b0, b4) and method 1284 FUN_00165118(task, arg) on the job / task of the object;
 /// WP-EP1b: method 1239 FUN_00162df8(job) (restart the job at its start task or the +0x3b14 override).
+/// WP-EP1f: method 1069 FUN_00162e38(job) (job complete -> hub).
 pub fn apply_job_calls(sched: &mut Schedule, m: &mut crate::engine::jobs::JobMgr) {
     for (callee, obj, a) in std::mem::take(&mut sched.cls.job_calls) {
         let arg = |i: usize| a.get(i).copied().unwrap_or(0);
@@ -120,6 +128,13 @@ pub fn apply_job_calls(sched: &mut Schedule, m: &mut crate::engine::jobs::JobMgr
             0x0016_2df8 => {
                 if let Some(j) = m.jobs.iter().position(|j| j.obj == obj as usize) {
                     m.FUN_00162df8(j);
+                }
+            }
+            // WP-EP1f: method 1069 (method row 333, thunk 0x10eb10) FUN_00162e38 job complete (the job
+            // script's event handler on event 0x1a with a warp volume leaving the mission)
+            0x0016_2e38 => {
+                if let Some(j) = m.jobs.iter().position(|j| j.obj == obj as usize) {
+                    m.FUN_00162e38(j);
                 }
             }
             _ => {}
@@ -155,9 +170,13 @@ pub fn job_messages(sched: &mut Schedule, m: &crate::engine::jobs::JobMgr) {
         sched.job_seen = 0; // new world: JobMgr::load
         sched.job_prev = (None, None);
         sched.task_msg_seen = 0;
+        sched.ev_msg_seen = 0;
     }
     if m.task_msgs.len() < sched.task_msg_seen {
         sched.task_msg_seen = 0;
+    }
+    if m.ev_msgs.len() < sched.ev_msg_seen {
+        sched.ev_msg_seen = 0;
     }
     let v = JobView::of(m);
     let (pj, pt) = sched.job_prev;
@@ -185,6 +204,13 @@ pub fn job_messages(sched: &mut Schedule, m: &crate::engine::jobs::JobMgr) {
         }
     }
     sched.task_msg_seen = m.task_msgs.len();
+    // WP-EP1f: message 0x11 {event, object} of FUN_00162bb8 / FUN_00165170 (handler symbol 17, e.g. the
+    // job's event 0x1a -> method 1069 = FUN_00162e38 when the object is a warp volume)
+    for &(o, ev, h) in &m.ev_msgs[sched.ev_msg_seen.min(m.ev_msgs.len())..] {
+        let arg = h.checked_sub(1).map_or(Ref::Nil, Ref::Basic);
+        sched.arg_msgs.push((o as u32, 0x11, vec![Ref::S32(ev), arg]));
+    }
+    sched.ev_msg_seen = m.ev_msgs.len();
     sched.job_prev = (v.job, v.task);
 }
 
@@ -261,6 +287,8 @@ impl SpliceState {
             f.borrow_mut().bindings.clear();
         }
         self.sched.msgs.clear();
+        self.sched.arg_msgs.clear();
+        self.sched.post_load_sent = false;
         true
     }
 
@@ -294,10 +322,26 @@ pub fn ee_sub_149c80(vm: &mut Vm, errors: &mut Vec<SpliceError>, host: &mut Pers
 /// (LO vt+0x1c FUN_001a61e0). When the object's frame binds the handler symbol `msg` (FUN_00127db8,
 /// through the parents) the call list `(msg self args..)` (FUN_00132ed8) is evaluated in the object frame
 /// (FUN_00133000). Returns the handler's value (None: no frame / no handler).
+/// WP-SCR6 d2 diagnostic hook: appends `(obj, msg)` for every `ee_sub_1331f8` call where the
+/// handler lookup resolved to `Some(Ref::Nil)` (= the `NotCallable(-1)` case). Zero cost unless a
+/// Nil dispatch actually fires (populated only on an existing error path).
+pub static DISPATCH_NIL_LOG: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// FUN_001331f8(object, msg, schedule = 0, nargs, args, out): the script side of an object message
+/// (LO vt+0x1c FUN_001a61e0). When the object's frame binds the handler symbol `msg` (FUN_00127db8,
+/// through the parents) the call list `(msg self args..)` (FUN_00132ed8) is evaluated in the object frame
+/// (FUN_00133000). Returns the handler's value (None: no frame / no handler).
 pub fn ee_sub_1331f8(vm: &mut Vm, host: &mut PersistentHost, frame: &FrameRef, obj: u32, msg: u32, args: &[Ref]) -> Result<Option<Ref>, SpliceError> {
     // 0x001331f8
-    if crate::engine::splice::frame::lookup(frame, msg, true).is_none() {
+    let found = crate::engine::splice::frame::lookup(frame, msg, true);
+    if found.is_none() {
         return Ok(None);
+    }
+    // WP-SCR6 d2 diagnostic: record Nil dispatches (handler would be NotCallable(-1)).
+    if matches!(found, Some(Ref::Nil)) {
+        if let Ok(mut g) = DISPATCH_NIL_LOG.lock() {
+            g.push((obj, msg));
+        }
     }
     let mut call = vec![Ref::Symid(msg), Ref::Basic(obj)];
     call.extend_from_slice(args);
@@ -319,10 +363,40 @@ pub fn object_frame(frames: &[Vec<FrameRef>], w: &World, obj: u32) -> Option<Fra
 pub fn send_messages(vm: &mut Vm, errors: &mut Vec<SpliceError>, frames: &[Vec<FrameRef>], host: &mut PersistentHost) {
     let msgs = std::mem::take(&mut host.sched.msgs);
     let Some(w) = host.world else { return };
+    // WP-EP1f: FUN_001a5c48 (LO post-load, C2c94e0 slot 14): (vt+0x1c)(obj, 0, schedule = 1) = script
+    // message 0 of every object (e.g. task 1757 binds its method 1326 there). REPLACED: the scheduled call
+    // (FUN_00133040) is evaluated at the first script tick after the level's frames exist, in object order.
+    if !host.sched.post_load_sent && !frames.is_empty() {
+        host.sched.post_load_sent = true;
+        for obj in 0..w.objects.len() as u32 {
+            if let Some(fr) = object_frame(frames, w, obj) {
+                if let Err(e) = ee_sub_1331f8(vm, host, &fr, obj, 0, &[]) {
+                    errors.push(e);
+                }
+            }
+        }
+    }
     for (obj, msg) in msgs {
         if let Some(fr) = object_frame(frames, w, obj) {
             if let Err(e) = ee_sub_1331f8(vm, host, &fr, obj, msg, &[]) {
                 errors.push(e);
+            }
+        }
+    }
+    for (obj, msg, args) in std::mem::take(&mut host.sched.arg_msgs) {
+        if let Some(fr) = object_frame(frames, w, obj) {
+            match ee_sub_1331f8(vm, host, &fr, obj, msg, &args) {
+                Ok(r) => {
+                    if obj == 917 && msg == 0x11 {
+                        eprintln!("[PAD1] obj 917 msg 0x11 result: {r:?}");
+                    }
+                }
+                Err(e) => {
+                    if obj == 917 {
+                        eprintln!("[PAD1] obj 917 script error: {e:?}");
+                    }
+                    errors.push(e);
+                }
             }
         }
     }
@@ -369,6 +443,8 @@ pub struct PersistentHost<'a> {
     /// FUN_0020f318 table of the loaded level (DAT_003e1c44 / DAT_003e1c48)
     pub table: Option<&'a LevelTable>,
     pub sched: &'a mut Schedule,
+    /// WP-TR1: optional bridge to the QMem store for method callees ported as `q` functions.
+    pub live_q: Option<&'a mut crate::engine::classes::q::live::LiveQ>,
 }
 
 impl PersistentHost<'_> {
@@ -557,6 +633,26 @@ impl SpliceHost for PersistentHost<'_> {
                 };
                 self.sched.objs.ee_sub_1f7918(m.object, w(0), w(1) as u8);
             }
+            // WP-EP2F: 0x00101218 -> FUN_001f7fa0(alo, a0 (kind 1), a1 (kind 1)): FUN_001ee678(a0, a1, x) (x+0x60 = a0,
+            // x+0x64 = a1) for every attached element (`MeshSet::descs`, the +0xa8 list) of class 0x8f. 1:1 on
+            // `ObjectFields::desc_60` (the port has no element instances).
+            0x0010_1218 => {
+                let f = |i: usize| match a.get(i) {
+                    Some(MArg::F32(f)) => f.to_bits(),
+                    _ => 0,
+                };
+                let (a0, a1) = (f(0), f(1));
+                let hits: Vec<usize> = self
+                    .world
+                    .and_then(|w| crate::engine::gfx::attach::alo_of(w, m.object as usize))
+                    .map(|al| {
+                        al.mesh.descs.iter().enumerate().filter(|(_, d)| d.as_ref().is_some_and(|d| crate::engine::player::p4::FUN_00132b10(d.0 as i32, 0x8f))).map(|(i, _)| i).collect()
+                    })
+                    .unwrap_or_default();
+                for i in hits {
+                    self.sched.objs.desc_60.insert((m.object, i), (a0, a1));
+                }
+            }
             // WP-J8: 0x001024b0 -> FUN_001fe310(0x3dd040, id (kind 0x13)); returns Void
             0x0010_24b0 => {
                 let id = match a.first() {
@@ -585,7 +681,7 @@ impl SpliceHost for PersistentHost<'_> {
                         Some(MArg::F32(f)) => *f,
                         _ => 0.0,
                     };
-                    g.ee_sub_1da4b8(v, int(0), t);
+                    g.ee_sub_1da4b8(v, int(0), t, None);
                 } else {
                     g.ee_sub_1da578(int(0));
                 }
@@ -596,6 +692,15 @@ impl SpliceHost for PersistentHost<'_> {
             id if self.sched.cls.call(id, desc.map(|d| d.callee).unwrap_or(0), m.object, args, a.clone()) => {}
             // spawn alias methods and anything else: J3 host
             _ if methods::IMPLEMENTED.contains(&m.method_id) => return self.level.call_method(m, args),
+            // WP-TR1: bridge to QMem-ported callees via LiveQ store
+            id if self.live_q.is_some() && desc.map(|d| d.callee).unwrap_or(0) != 0 => {
+                let callee = desc.unwrap().callee;
+                let lq = self.live_q.as_mut().unwrap();
+                match super::live_bridge::try_method(lq, callee, m.object, &a) {
+                    Some(Ok(r)) => return Ok(r),
+                    _ => return Err(SpliceError::HostUnimplemented(format!("method {id:#x} -> FUN_{callee:08x}"))),
+                }
+            }
             id => {
                 let callee = desc.map(|d| d.callee).unwrap_or(0);
                 return Err(SpliceError::HostUnimplemented(format!("method {id:#x} -> FUN_{callee:08x}")));
@@ -792,6 +897,30 @@ impl SpliceHost for PersistentHost<'_> {
             _ => false,
         };
         Ok(Ref::Bool(on))
+    }
+
+    fn ref_op_emit_smoke_cloud(&mut self, a: &[Ref]) -> Result<Ref, SpliceError> {
+        // 0x00125738 RefOpEmitSmokeCloud (BIF 139): SetTag(out, 0x24); FUN_001daf38(argv[0]+4, argv[1]+4);
+        // returns Void. FUN_001daf38(a, b) builds a splice smoke particle (type 0x17) at object `a`
+        // (FUN_001d8b20 / FUN_00129658 -> the particle request, NOT modelled: the recomp has no particle
+        // subsystem) and, when b != 0, sets DAT_002deb3c = a and sends the camera activity message 0x3b
+        // (FollowWorld_activity(0x2deb30, 0x3b, 0)); the obj is the activity subject (= DAT_002deb3c).
+        // 1:1 port of the observable contract: the particle visual is unmodelled, the activity 0x3b hint
+        // is routed through the class host (ee_sub_1619a0, obj = index+1 handle, matching q12_d::ee_sub_1daf38).
+        // PAD1: FUN_001daf38 also writes the save variable ("powerUps", "mppukfAcquired", "%d" a) = {0x17, 1}
+        // via FUN_001d8b20; this is what the task system listens on to advance task 1754.
+        let obj = a.first().map(|r| r.payload()).unwrap_or(0);
+        let b = a.get(1).map(|r| r.payload()).unwrap_or(0);
+        if b != 0 {
+            // PAD1: write save variable ("powerUps", "mppukfAcquired", obj) = Bool(true)
+            // mirrors FUN_001daf38 -> FUN_001d8b20({0x17, 1}, 0x2a79a8, 0x2a79b8, sprintf("%d", a), 0)
+            if let Some(vars) = self.level.base.vars {
+                let p = save_path(vars, &["powerUps", "mppukfAcquired", &obj.to_string()]);
+                vars.ee_sub_1d80c8(&p, super::save::SaveValue::Bool(true), self.level.base.data);
+            }
+            self.sched.cls.host.ee_sub_1619a0(0x3b, obj);
+        }
+        Ok(Ref::Void)
     }
 
     fn ref_op_convert_object_position(&mut self, a: &[Ref]) -> Result<Ref, SpliceError> {

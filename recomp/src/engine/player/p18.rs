@@ -129,7 +129,7 @@ impl Jt {
         }
     }
 
-    /// 0x0018f688 (no caller found; ported for completeness).
+    /// 0x0018f688: caller FUN_0018c250 entry case jts 9 (after FUN_0018e540(-1)), wired in p5_states::FUN_0018c250_p5.
     pub fn FUN_0018f688(&mut self) {
         let yaw = if 0.5 < self.joy.mag { self.joy.angle } else { self.yaw };
         let (tg, d) = self.aim(yaw, 0.25, 1.0, 8, OFF_18F688);

@@ -15,7 +15,7 @@ use super::pad::*;
 use std::collections::BTreeMap;
 
 /// Bindable actions: the 16 buttons (bit = game button bit) and 8 stick half-axes.
-pub const ACTIONS: [(&str, Action); 24] = [
+pub const ACTIONS: [(&str, Action); 25] = [
     ("l2", Action::Button(BTN_L2)),
     ("r2", Action::Button(BTN_R2)),
     ("l1", Action::Button(BTN_L1)),
@@ -40,7 +40,12 @@ pub const ACTIONS: [(&str, Action); 24] = [
     ("right_stick_down", Action::Stick(1, 1, -1)),
     ("right_stick_left", Action::Stick(1, 0, -1)),
     ("right_stick_right", Action::Stick(1, 0, 1)),
+    ("switch_character", Action::Extra(EXTRA_SWITCH_CHARACTER)),
 ];
+
+/// WIRE-B2 (port addition, no PS2 button): switch the controlled character Sly -> Bentley -> Murray -> Sly
+/// (`VirtualPad::extra` / `PadInput::extra` bit; handled by player::plugin::switch_character).
+pub const EXTRA_SWITCH_CHARACTER: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -48,6 +53,8 @@ pub enum Action {
     Button(u32),
     /// (stick 0 = left / 1 = right, axis 0 = x / 1 = y, sign; y up positive)
     Stick(u8, u8, i8),
+    /// port-only action bit (`EXTRA_*`), outside the libpad report
+    Extra(u32),
 }
 
 pub fn action_by_name(name: &str) -> Option<Action> {
@@ -98,6 +105,7 @@ impl Default for Bindings {
                 ("right_stick_down", &["KeyK"]),
                 ("right_stick_left", &["KeyJ"]),
                 ("right_stick_right", &["KeyL"]),
+                ("switch_character", &["KeyV"]),
             ]),
             gamepad: map(&[
                 ("cross", &["South"]),
@@ -124,6 +132,7 @@ impl Default for Bindings {
                 ("right_stick_down", &["RightStickY-"]),
                 ("right_stick_left", &["RightStickX-"]),
                 ("right_stick_right", &["RightStickX+"]),
+                ("switch_character", &["Mode"]),
             ]),
             mouse_right_stick: true,
             mouse_sensitivity: 0.02,
@@ -221,6 +230,8 @@ pub struct VirtualPad {
     pub sticks: [[f32; 2]; 2],
     /// pressure per button bit index 0..15 (0..1); digital sources give 1.0
     pub analog: [f32; 16],
+    /// port-only action bits held (`EXTRA_*`)
+    pub extra: u32,
 }
 
 fn stick_byte(v: f32) -> u8 {

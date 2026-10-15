@@ -725,6 +725,11 @@ pub fn FUN_0018c250_enter(jt: &mut Jt, st: &mut P5, w: &P5World, _old: i32, new:
             jt.FUN_001375d0(side, anim);
         }
         8 => FUN_0019eab0(jt, st, w, 0),
+        // WP-EP1f: 9 enter = FUN_0018e540(jt, -1) + FUN_0018f688(jt) (aim pick within 0.25 / 1.0, mask 8, face it)
+        9 => {
+            jt.FUN_0018e540(-1, anim);
+            jt.FUN_0018f688();
+        }
         10 => {
             anim.play_aseg(0x1bc0, 10, -1); // mode 9, start = jt+0x1a0 * dur
             st.side_1038 = -1;
@@ -1524,6 +1529,30 @@ pub fn FUN_0019a098(jt: &Jt, t_entered: f32, rate: Option<&mut f32>, normals: &[
     r[2] > STUCK_RZ
 }
 
+/// WP-EP1f: 0x0019feb0(list jt+0x9e0, obj, p) 1:1 over `safe_points` (index 0 = list +0x10, at most 0x20
+/// entries): an older entry (index >= 1) of the same object within 50 of `p` moves to index 1 (index 1 itself
+/// stays), else every entry shifts down one; index 0 becomes `p`. REPLACED: the entry's object (+8, +0 its
+/// +4 word, SO +0x10 bit 51) and time (+0xc = DAT_002dded0) are not kept (`obj_class` = the object stand-in).
+pub fn FUN_0019feb0(list: &mut Vec<SafePoint>, obj: Option<i32>, p: V3) {
+    let new = SafePoint { pos: p, obj_class: obj, member: false };
+    let hit = (1..list.len()).find(|&k| list[k].obj_class == obj && vlen(vsub(p, list[k].pos)) < 50.0);
+    match hit {
+        Some(k) => {
+            if k > 1 {
+                let e = list.remove(k);
+                list.insert(1, e);
+            }
+            list[0] = new;
+        }
+        None => {
+            list.insert(0, new);
+            list.truncate(0x20);
+        }
+    }
+}
+
+/// WP-EP1f: HOFS jt+0x240 = `jt.att.grab` ((0, 0, -75) from P6Level::apply; `P5::hofs_240`, which the
+/// 0x19b110 pick reads, stays zero: setting it moves the p14 / p21 edge attaches - open).
 /// 0x0019faf8 REPLACED: best safe point = nearest entry of jt+0x9e0 (0x19f7d0 scores with world queries);
 /// none -> pos + HOFS with no object.
 pub fn FUN_0019faf8(jt: &Jt, st: &P5) -> SafePoint {
@@ -1532,7 +1561,7 @@ pub fn FUN_0019faf8(jt: &Jt, st: &P5) -> SafePoint {
         .iter()
         .copied()
         .min_by(|a, b| vlen(vsub(a.pos, p)).total_cmp(&vlen(vsub(b.pos, p))))
-        .unwrap_or(SafePoint { pos: vadd(p, st.hofs_240), obj_class: None, member: false })
+        .unwrap_or(SafePoint { pos: vadd(p, jt.att.grab), obj_class: None, member: false })
 }
 
 /// What 0x19f590 did.
@@ -1556,7 +1585,7 @@ pub fn FUN_0019f590(jt: &mut Jt, st: &mut P5, _w: &P5World, dest: Option<SafePoi
         let dz = vsub(p, jt.phys.pos);
         let tm = FUN_00196928(1000.0, -1000.0, 1.0, -1.0, dz, jt.phys.gravity);
         if tm > DAT_002BF940 {
-            jt.phys.pos = vsub(d.pos, st.hofs_240); // vt+0xec set position
+            jt.phys.pos = vsub(d.pos, jt.att.grab); // vt+0xec set position
             rec(jt, 0x002046b0, 0);
             jt.phys.rot = FUN_0011b500(UP, jt.yaw); // vt+0xf4(jt, jt+0x1b0)
             rec(jt, 0x0014d8c0, 0); // camera cut

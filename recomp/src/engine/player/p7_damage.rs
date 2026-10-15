@@ -23,11 +23,11 @@
 //! REPLACED: difficulty object 0x2de578 (+0x14 -> +0x20 / +0x24 lerp, factor 0x154c90 from the save data)
 //! -> `DmgEnv::diff`; the state ASEGs DMG[0x28 + state] / +0xa0 / +0xc0 (loaded with the level, loader not
 //! traced) -> `Dmg::aseg` oids, played through `JtAnim` with field 0xe90 + 4 * state; the source object's
-//! is-a tests / +0xfbc / +0x148 / position -> `HitSrc`; 0x1a0b40 case 8 normal jt+0x1b0 -> world up;
-//! FUN_00204740 / FUN_00204660 yaw sync and 0x2046b0 face-camera recorded in `Jt::calls`.
+//! is-a tests / +0xfbc / +0x148 / position -> `HitSrc`; 0x1a0b40 case 8 normal jt+0x1b0 = facing row (0x204660);
+//! FUN_00204740 / FUN_00204660 yaw sync, 0x2046b0 face-camera (`Jt::cam_pos`), +0x19b8 / +0x19bc pose offsets live.
 //! UNPORTED (recorded in `Jt::calls` / `DmgEv`): 0x143380, 0x1fbb90 / 0x1fb2f8 sounds, 0x156698 hit fx,
 //! 0x1f4bf8, 0x1f80d0, job restart 0x162bb8 -> 0x165538 (jobs are not ported), 0x1a2460 / 0x1a2788 (jt+0x108c
-//! hazard volume sampling that builds hits), +0x19b8 / +0x19bc pose offsets (class 0x35 sub objects).
+//! hazard volume sampling that builds hits).
 #![allow(non_snake_case)]
 use super::{Jt, JtAnim};
 use crate::engine::camera::math::FUN_0011d2d0;
@@ -71,6 +71,8 @@ pub struct HitSrc {
     pub isa: Vec<i32>,
     /// FUN_001a62e8 position
     pub pos: V3,
+    /// FUN_001a6318 rotation rows of the source (None = identity; the 0x36 knockback frame of 0x1a16c8)
+    pub rot: Option<[V3; 3]>,
     /// class 0x51: vt+0xfc direction
     pub dir_fc: Option<V3>,
     /// +0xfbc state (class 0x38: 8 / 0xd halve the damage)
@@ -359,7 +361,10 @@ pub fn FUN_001a2230(jt: &Jt, env: &DmgEnv, kind: i32) -> bool {
 pub fn FUN_001a21a0(jt: &Jt, env: &DmgEnv, kind: i32) -> bool {
     match jt.jts {
         3 | 8 | 0x15 | 0x16 if kind == 0x4000 => return true,
-        // jts 7: FUN_00194640(attach, kind) UNPORTED (no attach immunity data): falls through
+        // 0x194640(jt+0x4c0): attach kind 8 sub 9/10 or kind 0xc -> immune.
+        7 if crate::engine::classes::k16_55::ee_sub_194640(jt.attach.kind, jt.attach.sub) => {
+            return true
+        }
         _ => {}
     }
     // 0x140ed8 (+0x2dc = JMP jtbs)
@@ -384,6 +389,30 @@ pub fn FUN_0011e9f8(m: f32, v: V3) -> V3 {
     }
 }
 
+/// FUN_00204660(yaw, jt) on the JT (jt+0x1a8 / jt+0x1b0 rows).
+fn face_yaw(jt: &mut Jt, yaw: f32) {
+    let mut x = std::mem::take(&mut jt.att);
+    super::p5_attach::FUN_00204660(jt, &mut x, yaw);
+    jt.att = x;
+}
+
+/// FUN_00204660(FUN_00204740(jt), jt); (jt+0x150)+0x18 = jt+0x1a8.
+fn sync_yaw(jt: &mut Jt) {
+    face_yaw(jt, super::p22::body_yaw(&jt.phys));
+    jt.joy.angle = jt.yaw;
+}
+
+/// FUN_002046b0(jt, DAT_002ddfd0 - FUN_001a62e8(jt)): face the camera (prot3w + FUN_002458f0 -> 0x204660).
+fn face_camera(jt: &mut Jt) {
+    match jt.cam_pos {
+        Some(c) => {
+            let p = jt.phys.pos;
+            face_yaw(jt, (c[1] - p[1]).atan2(c[0] - p[0]));
+        }
+        None => jt.calls.push((0x002046b0, 0)),
+    }
+}
+
 /// 0x001a0b40 SetDmgState.
 pub fn FUN_001a0b40(jt: &mut Jt, mut s: i32, anim: &mut dyn JtAnim) {
     let old = jt.dmg.state;
@@ -391,8 +420,13 @@ pub fn FUN_001a0b40(jt: &mut Jt, mut s: i32, anim: &mut dyn JtAnim) {
         return;
     }
     let now = jt.t;
-    if old == -1 {
-        // +0x19b8 / +0x19bc offsets (0,0,-750) (class 0x35 sub objects, recorded), vt+0x2dc = 0x18d548
+    if old == 3 || old == 10 {
+        // class 0x35 (the JT): pose offset +0x19b8 -> (0, 0, 0)
+        jt.pose_19b8[..3].fill(0.0);
+    } else if old == -1 {
+        // pose offsets +0x19b8 / +0x19bc = DAT_002bfa00 (0, 0, -750, 0), vt+0x2dc = 0x18d548 (recorded)
+        jt.pose_19b8 = [0.0, 0.0, -750.0, 0.0];
+        jt.pose_19bc = [0.0, 0.0, -750.0, 0.0];
         jt.calls.push((0x0018e540, -1));
         jt.v_target = [0.0; 3]; // +0x190..+0x198
         jt.dmg.f_15c = false;
@@ -404,18 +438,18 @@ pub fn FUN_001a0b40(jt: &mut Jt, mut s: i32, anim: &mut dyn JtAnim) {
     match s {
         0 | 6 | 7 => {}
         1 | 2 => {
-            jt.calls.push((0x00204740, s)); // yaw = FUN_00204740(jt); FUN_00204660; +0x150+0x18 = yaw
+            sync_yaw(jt);
             flags = 0;
         }
         4 | 0xc => {
             jt.calls.push((0x001f4488, 0)); // vt+0x124
-            jt.calls.push((0x00204740, s));
+            sync_yaw(jt);
             if s == 0xc {
                 flags = 0x21;
             }
         }
         5 | 0xb => {
-            jt.calls.push((0x002046b0, s)); // face DAT_002ddfd0 (camera)
+            face_camera(jt);
             if s == 0xb {
                 flags = 0x21;
             }
@@ -423,14 +457,16 @@ pub fn FUN_001a0b40(jt: &mut Jt, mut s: i32, anim: &mut dyn JtAnim) {
         8 | 9 => {
             if s == 8 {
                 let v = jt.velocity_pub();
-                // jt+0x1b0 . v (REPLACED: world up)
-                if -250.0 < v[2] {
+                // jt+0x1b0 . v (the facing row written by FUN_00204660)
+                let n = jt.att.rows[0];
+                if -250.0 < v[0] * n[0] + v[1] * n[1] + v[2] * n[2] {
                     s = 9;
                 } else {
                     let sp = (v[0] * v[0] + v[1] * v[1]).sqrt();
                     let k = (-1.0 + sp * (0.004 + sp * 0.0)).clamp(0.0, 1.0);
                     let d = super::p5_attach::FUN_0011cf60(v[1].atan2(v[0]) + std::f32::consts::PI - jt.yaw);
-                    jt.yaw += d * k;
+                    face_yaw(jt, jt.yaw + d * k);
+                    // FUN_00204ca8: REPLACED, the JT body turns instantly to jt+0x1a8 (see Jt::update)
                     jt.calls.push((0x00204ca8, 0));
                 }
             }
@@ -439,11 +475,13 @@ pub fn FUN_001a0b40(jt: &mut Jt, mut s: i32, anim: &mut dyn JtAnim) {
         10 | 3 => {
             if s == 10 {
                 flags = 0x21;
-                jt.calls.push((0x002046b0, s));
+                face_camera(jt);
             }
-            // class 0x35: +0x19b8 offset (0,0,500)
+            jt.pose_19b8 = [0.0, 0.0, 500.0, 0.0]; // DAT_002bfa10
         }
         -1 => {
+            jt.pose_19b8[..3].fill(0.0);
+            jt.pose_19bc[..3].fill(0.0);
             jt.dmg.f_15c = true;
             jt.dmg.t_fade = now;
             has = false;
@@ -487,8 +525,19 @@ pub fn FUN_001a16c8(jt: &mut Jt, anim: &mut dyn JtAnim) {
             v = [n[0] * 600.0, n[1] * 600.0, 800.0];
         }
         0x40 if has && src.is(0x36) => {
-            // REPLACED: rotation of the hit vector into the source frame (0x1a6fc0 / prot3w) not ported
-            jt.calls.push((0x001a6fc0, 0));
+            // v = jt pos - (src pos + R.row0 * -150); FUN_001a6fc0(0, src, v) (x, y of R v, z kept), prot3w,
+            // FUN_001a6fc0(src, 0, ..) (full R^T... rows combined as p * R)
+            let r = src.rot.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+            let p = jt.phys.pos;
+            let k = r[0];
+            let d = [
+                p[0] - (src.pos[0] - 150.0 * k[0]),
+                p[1] - (src.pos[1] - 150.0 * k[1]),
+                p[2] - (src.pos[2] - 150.0 * k[2]),
+            ];
+            let l = [dot(r[0], d), dot(r[1], d), d[2]];
+            let q = [l[1], l[2], l[0]]; // PROT3W
+            v = [0, 1, 2].map(|j| q[0] * r[0][j] + q[1] * r[1][j] + q[2] * r[2][j]);
         }
         0x200 | 0x8000 if has && src.is(0x33) => {
             v = FUN_0011e9f8(1200.0, [v[0] * 1.25, v[1] * 1.25, v[2] * 1.25]);
@@ -662,9 +711,9 @@ pub fn FUN_001a2388(jt: &mut Jt, env: &DmgEnv) {
     jt.calls.push((0x001f80d0, 1));
     jt.dmg.ev.push(DmgEv::Die);
     jt.dmg.ev.push(DmgEv::Event(0x10));
-    if env.job {
-        jt.calls.push((0x00162bb8, 0x10)); // job restart 0x165538 (jobs unported)
-    } else {
+    // job current (DAT_003e0f9c != 0): 0x161a58 does nothing, the job half (0x162bb8 -> 0x165538) runs from the
+    // Event(0x10) in `p8_hazard::job_events`; else 0x161a58 case 0x10 reloads the level
+    if !env.job {
         let r = Respawn { level: 0, spawn: env.spawn.0, spawn_parent: env.spawn.1, flags: if env.flag_12c8 { 0x20 } else { 0 }, a: 0x30a };
         jt.dmg.ev.push(DmgEv::Respawn(r));
         jt.respawn = Some(r);

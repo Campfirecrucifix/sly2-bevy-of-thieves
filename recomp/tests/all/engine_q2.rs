@@ -48,7 +48,7 @@ fn phase_table_1380f0() {
 
 #[test]
 fn select_and_length_1384c0() {
-    let mut b = JtBlend { entries: vec![entry(1.0, 2.0, vec![]), entry(0.0, 4.0, vec![])], tables: vec![], length: 2.0, select: -1, channels: vec![] };
+    let mut b = JtBlend { entries: vec![entry(1.0, 2.0, vec![]), entry(0.0, 4.0, vec![])], tables: vec![], length: 2.0, select: -1, channels: vec![], events: vec![], ev_ref: None };
     let mut t = [1.0f32];
     b.ee_sub_1384c0(&mut t);
     assert_eq!((b.select, b.length, t[0]), (0, 2.0, 1.0));
@@ -68,7 +68,7 @@ fn select_and_length_1384c0() {
 
 #[test]
 fn jump_weights_190520() {
-    let mut b = JtBlend { entries: (0..3).map(|_| entry(0.0, 1.0, vec![])).collect(), tables: vec![], length: 1.0, select: -1, channels: vec![] };
+    let mut b = JtBlend { entries: (0..3).map(|_| entry(0.0, 1.0, vec![])).collect(), tables: vec![], length: 1.0, select: -1, channels: vec![], events: vec![], ev_ref: None };
     let mut jw = JumpWeights::default();
     let mut t = 0.5;
     // jtbs 0: targets (1, 1) -> entry 0 alone; time steered to L/2

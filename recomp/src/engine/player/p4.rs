@@ -369,9 +369,9 @@ impl Jt {
         2 <= n
     }
 
-    /// 0x00144068: JT busy (+0x270 > 0 or +0x1084 != 0): carrying / gadget; never set in the port.
-    fn FUN_00144068(&self) -> bool {
-        false
+    /// 0x00144068 1:1: JT busy = +0x270 > 0 || +0x1084 != 0 (writers: 0x143de8 / list push, other rows).
+    pub fn FUN_00144068(&self) -> bool {
+        0 < self.n_270 || self.held_1084.is_some()
     }
 
     /// 0x00199d48(jmp, &side, &dir): best ledge among the JT contacts.
@@ -581,6 +581,9 @@ impl Jt {
             0 | 0xd => 5,
             1 => {
                 self.calls.push((0x00192a28, 1));
+                // WP-PJ4: PJA1 adapter dispatches the ee_sub_192a28 queue port (empty DAT_003e1444 chain
+                // in the shadow image => safe no-op on Jt; still exercises the registered QMem port).
+                super::pj_adapt::call_q_jtptr(self, 0x0019_2a28);
                 0
             }
             5 | 9 => {
@@ -597,6 +600,7 @@ impl Jt {
             }
             8 => {
                 self.calls.push((0x00192a28, 8));
+                super::pj_adapt::call_q_jtptr(self, 0x0019_2a28);
                 7
             }
             0xb | 0xc => {

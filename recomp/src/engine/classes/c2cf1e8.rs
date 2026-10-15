@@ -41,9 +41,11 @@ pub struct C2cf1e8 {
     pub f_c0: i32,
     /// +0xc4 object reference (field 1278)
     pub f_c4: u32,
-    /// +0xc8 / +0xd0: save-variable paths (kind 0x16 u16 lists, fields 1295 / 1296)
+    /// +0xc8 / +0xd0 / +0xd8: save-variable paths (kind 0x16 u16 lists, fields 1295 / 1296 / 1297)
     pub f_c8: Vec<u16>,
     pub f_d0: Vec<u16>,
+    /// +0xd8 save-variable path (field 1297); read by FUN_00164030 when +0x54 == -1
+    pub f_d8: Vec<u16>,
     pub f_f0: i32,
     pub f_f4: i32,
 }
@@ -79,9 +81,13 @@ impl C2cf1e8 {
                 1278 => self.f_c4 = fix(word(v) as i32),
                 1279 => self.f_80 = fix(word(v) as i32),
                 1285 => self.f_78 = f32::from_bits(word(v)),
-                1295 | 1296 => {
+                1295 | 1296 | 1297 => {
                     let l: Vec<u16> = v.get(2..).unwrap_or(&[]).chunks_exact(2).map(|x| u16::from_le_bytes([x[0], x[1]])).collect();
-                    if p.field == 1295 { self.f_c8 = l } else { self.f_d0 = l }
+                    match p.field {
+                        1295 => self.f_c8 = l,
+                        1296 => self.f_d0 = l,
+                        _ => self.f_d8 = l, // 1297
+                    }
                 }
                 _ => {}
             }

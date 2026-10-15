@@ -221,9 +221,11 @@ pub struct Xp {
     pub zap: u8,
 }
 
-/// 0x001f7598 with the JT as target (0x1a5bf0: JT is-a ALO -> itself; no owner above it).
+/// 0x001f7598 with the JT as target. The owner-chain walk starts at `0x1a5bf0(target)`; for a JT
+/// (class 0x35 is-a ALO class 0x30) that is the JT itself, and the chain never finds a non-JT taker.
 /// Returns true when the JT took the hit (the original returns the object).
 pub fn FUN_001f7598(jt: &mut Jt, hz: &mut Hazards, xp: &mut Xp, now: f32, anim: &mut dyn JtAnim) -> bool {
+    // 0x3e15c0 dedupe (REPLACED: Vec<HitRec> in place of the ActPool linked list; same identity keys).
     if hz.hits.iter().any(|r| r.src == xp.src && r.w4 == xp.w4 && r.kind == xp.kind && r.obj == 0) {
         return false;
     }
@@ -236,13 +238,18 @@ pub fn FUN_001f7598(jt: &mut Jt, hz: &mut Hazards, xp: &mut Xp, now: f32, anim: 
         vec: xp.vel,
     };
     let env = jt.dmg_env;
-    // slot 74 0x140f50 -> 0x1a19a0
+    // slot 74 (0x140f50) -> 0x1a19a0 (ported, in p7_damage).
     if !super::p7_damage::FUN_001a19a0(jt, &hit, &env, anim) {
         return false;
     }
     hz.hits.push(HitRec { src: xp.src, w4: xp.w4, kind: xp.kind, obj: 0, t: now });
     if xp.zap & 0xf8 != 0 {
-        hz.calls.push((0x001f7598, 0xb)); // msgs 0xb / vt+0x1c 10 / 0xb
+        // vt+0x24 msg 0xb to the target JT, vt+0x24 msg 0xb to the source water,
+        // vt+0x1c activity 10 on the source (FollowWorld, replaced), vt+0x1c activity 0xb on the target.
+        hz.calls.push((0x24, 0xb));              // msg 0xb -> target (JT)
+        hz.calls.push((0x001f7598, 0xb));        // msg 0xb -> source (water)
+        hz.calls.push((0x1c, 10));               // activity 10 on source (FollowWorld, replaced)
+        hz.calls.push((0x1c, 0xb));              // activity 0xb on target
     }
     true
 }

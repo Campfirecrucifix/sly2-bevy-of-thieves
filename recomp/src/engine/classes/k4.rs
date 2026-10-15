@@ -210,7 +210,7 @@ impl ClassSet {
 pub fn c133_view(more: &[(usize, Inst)], o: u32) -> Option<c2cf378::C133View> {
     let i = (o as usize).checked_sub(1)?;
     more.iter().find(|x| x.0 == i).and_then(|(_, x)| match x {
-        Inst::C2cf1e8(c) => Some(c2cf378::C133View { f_54: c.f_54, f_c4: c.f_c4, f_98: c.f_98.clone(), f_a4: c.f_a4.clone(), f_d8: Vec::new() }),
+        Inst::C2cf1e8(c) => Some(c2cf378::C133View { f_54: c.f_54, f_c4: c.f_c4, f_98: c.f_98.clone(), f_a4: c.f_a4.clone(), f_d8: c.f_d8.clone() }),
         _ => None,
     })
 }

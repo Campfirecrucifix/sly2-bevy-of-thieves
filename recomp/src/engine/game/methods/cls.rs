@@ -88,21 +88,28 @@ pub struct GuardOids {
 /// WP-J10 adds: 0x001cb488 / 0x001cb4b8 (class 6 +0xe0 attachment record +8 = 1 / 0, FUN_001cb410; the
 /// ClassHost hook is not modelled), 0x0013b5c8 (classes 79-82 +0x154 = min(+0x154, now + arg)),
 /// 0x00207bc8 (guards 57 / 63 / 64: FUN_00207b10 / FUN_00209c18 / FUN_00207b70 / FUN_00209130),
-/// 0x001d7780 (class 70 +0x220/+0x224 + FUN_001d77d0), 0x001f7bf8 (class 48 +0x130 / +0x12c rate with
+/// 0x001f7bf8 (class 48 +0x130 / +0x12c rate with
 /// vtable +0x44 / +0x4c; `C2d9978` has no +0x130), and the inline thunks 0x0010fc80 (classes 72 / 73
 /// vtable +0x29c) / 0x00104e80 (class 82 vtable +0x274 with a vector out-arg).
-pub const RECORDED: &[u32] = &[
-    0x0014_2540, 0x0021_3b00, 0x0015_c198, 0x001c_8af0, 0x001f_6ac8, 0x001b_9ca0, 0x001a_58d0, 0x0020_6820, 0x0021_2e40, 0x001f_6b48, 0x001f_6bc8, 0x0013_b860,
-    0x001c_b488, 0x001c_b4b8, 0x0020_7bc8, 0x001d_7780, 0x001f_7bf8,
-];
+/// WP-EP1f adds 0x00195608 (player method 861: drop the +0x4680 0x30-byte interaction record of the object
+/// from the player's +0x4744 prompt list; the prompt list is not modelled).
+/// WP-TR3b: removed 11 callees now routed through live_bridge (TABLE) / s1_call / CLASS_CALLEES:
+/// 0x142540, 0x213b00, 0x1b9ca0, 0x212e40, 0x1cb488, 0x1cb4b8, 0x207bc8, 0x1d7780, 0x195608 (TABLE),
+/// 0x1c8af0 (s1_call), 0x13b860 + 0x1a58d0 (moved to CLASS_CALLEES with run() arms).
+pub const RECORDED: &[u32] = &[];
 pub const RECORDED_INLINE: &[u32] = &[0x0010_0a00, 0x0010_daf0, 0x0010_db78, 0x0010_fc80, 0x0010_4e80];
 
 /// Callees executed against the class runtime.
 /// WP-J10 adds FUN_00133340 (message 5), FUN_001baed8 / FUN_001baf18 (class 98, `C2d4b78`),
 /// FUN_001dffe0 / FUN_001e0760 (class 114, `C2d8c48`).
 /// WP-EP1b adds FUN_0013b5c8 (method 389, classes 79 / 80 / 82 fuse, `k15_79::Proj::ee_sub_13b5c8`).
+/// WP-EP1f adds FUN_00228170 (thunk 0x10b760, field 778: the warp's "go", `ClassHost::ee_sub_228170`).
 pub const CLASS_CALLEES: &[u32] =
-    &[0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8, 0x0013_3380];
+    &[0x0022_8170, 0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8, 0x0013_3380, 0x001f_6ac8, 0x001f_6b48, 0x001f_6bc8, 0x001f_7c68, 0x0017_1d58, 0x0017_1da8, 0x0015_41d8,
+    // WP-TR1 batch
+    0x001e_0120, 0x001f_0598, 0x001f_0730, 0x001f_03a8, 0x001f_82b8, 0x001b_2020, 0x001b_2048, 0x0012_91a8, 0x0012_f990, 0x001f_78d8, 0x001f_b4f0, 0x001f_e3f8, 0x001f_e9f8, 0x001f_ea60, 0x0022_7c90, 0x001e_1970, 0x001e_1ad0, 0x001e_1b10,
+    // WP-TR3b: explode projectile + SetParent
+    0x0013_b860, 0x001a_58d0];
 
 /// WP-J11: guard oid-list callees run on `ClassLink::guard_oids` (no class instance needed):
 /// FUN_0020aa78 (method 0x00102988), FUN_0020ab58.
@@ -118,9 +125,9 @@ pub const GUARD_OID_CALLEES: &[u32] = &[0x0020_aa78, 0x0020_ab58, 0x0020_8920, 0
 /// +0x3a8 / +0x3c0 are not modelled by `guard::c56::Guard`.
 /// FUN_00208920 / FUN_00208948 (methods 0x001037a8 / 0x00103830, add / remove a class on the +0x3a8 list, cap 5)
 /// and FUN_00208a68 / FUN_00208a90 (methods 0x00103930 / 0x001039b8, +0x3c0 list, cap 2): same reason.
-/// WP-J12: the +0x3a8 / +0x3c0 rows moved to `GUARD_OID_CALLEES`; FUN_0014b468 stays recorded (it posts
-/// a brain substate through FUN_00205458(guard, 0x9c) / FUN_00176750, owned by classes::guard).
-pub const RECORDED_J11: &[u32] = &[0x0014_b468];
+/// WP-J12: the +0x3a8 / +0x3c0 rows moved to `GUARD_OID_CALLEES`; FUN_0014b468 was recorded.
+/// WP-TR3b: removed 0x14b468 — callee is in live_dispatch TABLE, routed through live_bridge.
+pub const RECORDED_J11: &[u32] = &[];
 
 /// Script object arg (kind 0x2002 Basic payload = object index) -> class runtime handle (index + 1, 0 = null).
 pub fn handle_of(r: Option<&Ref>) -> u32 {
@@ -265,7 +272,44 @@ impl ClassLink {
             self.ee_sub_10b028(obj, &args);
             return true;
         }
-        if callee == 0x0016_2660 || callee == 0x0016_5118 || callee == 0x0016_2df8 {
+        // WP-EP2F: methods of fields 595-612 (FUN_00170b40..FUN_00170dd0): entry appended to the class-113 +0x50
+        // list (`C2cf880::apply_field`); the resolved level routine gets the matching world-free command
+        // (`K6Level::build`: 5 wait, 9 label, 10 jump, other kinds `Other`). Rail / object entries (fields
+        // 601 / 602) need the world and the 8-byte vector kinds (596 / 597) the Value payload: recorded.
+        if let Some(field) = crate::engine::classes::c2cf880::C2cf880::field_of_callee(callee).filter(|f| !matches!(f, 596 | 597 | 601 | 602)) {
+            let word = |i: usize| match args.get(i) {
+                Some(MArg::I32(n)) => *n as u32,
+                Some(MArg::Word(w)) => *w,
+                Some(MArg::F32(f)) => f.to_bits(),
+                _ => 0,
+            };
+            let kind = self.set.as_mut().and_then(|set| match find(set, obj as usize) {
+                Some(Inst::C2cf880(c)) => {
+                    c.apply_field(field, word, |_| [0, 0]);
+                    c.f_50.last().map(|e| (e.kind, e.id, e.f_8[0]))
+                }
+                _ => None,
+            });
+            if let Some((kind, id, f8)) = kind {
+                use crate::engine::classes::guard::patrol::Cmd;
+                let cmd = match kind {
+                    5 => Cmd::Wait(f32::from_bits(f8)),
+                    9 => Cmd::Label(id),
+                    10 => Cmd::Jump(id),
+                    k => Cmd::Other(k),
+                };
+                if let Some(set) = self.set.as_mut() {
+                    if let Some(k) = set.k6l.routines.iter().position(|x| x.0 == obj as usize) {
+                        set.k6l.routines[k].1.push(cmd.clone());
+                        set.k6l.cmds[k].push(cmd);
+                    }
+                }
+            } else {
+                self.recorded.push(Recorded { thunk, callee, obj, args });
+            }
+            return true;
+        }
+        if matches!(callee, 0x0016_2660 | 0x0016_5118 | 0x0016_2df8 | 0x0016_2e38) {
             let ints = args.iter().map(|a| match a {
                 MArg::I32(n) => *n,
                 MArg::Word(w) => *w as i32,
@@ -431,6 +475,8 @@ impl ClassLink {
             0x0013_3340 => h.vcall_1c(i, 5, 0),
             // WP-Q3: FUN_00133380(obj): (vtable +0x1c)(obj + adj, 6, 0, 0, 0, 0)
             0x0013_3380 => h.vcall_1c(i, 6, 0),
+            // WP-EP1f: FUN_00228170(warp) (thunk 0x10b760)
+            0x0022_8170 => h.ee_sub_228170(obj + 1),
             // FUN_00164640(obj, k, ctx): class 133, ClassHost hook (ctx = the +0xf8 word restored on exit)
             0x0016_4640 => {
                 let k = match args.first() {
@@ -476,6 +522,21 @@ impl ClassLink {
                 let t = set.g.t;
                 let Some(c) = set.k15_79_get(i) else { return false };
                 c.p.ee_sub_13b5c8(d, t);
+            }
+            // WP-TR3b: FUN_0013b860 (method 390, classes 79-82): explode projectile
+            0x0013_b860 => {
+                let Some(c) = set.k15_79_get(i) else { return false };
+                c.p.ee_sub_13b860(i, h);
+            }
+            // WP-TR3b: FUN_001a58d0 (vtable +0x54 SetParent): reparent object
+            0x001a_58d0 => {
+                let a = int_arg(args);
+                let b = match args.get(1) {
+                    Some(MArg::I32(n)) => *n,
+                    Some(MArg::Word(w)) => *w as i32,
+                    _ => 0,
+                };
+                h.ee_sub_1a58d0(i, a, b);
             }
             // WP-J11: FUN_001d6b00(launcher = obj, projectile (kind 0x2030)) (method 0x001058f0, field 468):
             // the K14 port `ClassSet::k14_fire` (class-112 launcher, class-81 projectile)
@@ -531,6 +592,113 @@ impl ClassLink {
                     }
                 }
             }
+            // WP-TR1: FUN_001f6ac8(obj, id) = so_part_link(obj, id, true)
+            0x001f_6ac8 => host.so_part_link(i, int_arg(args) as i32, true),
+            // WP-TR1: FUN_001f6b48(obj, id) = so_part_link(obj, id, false)
+            0x001f_6b48 => host.so_part_link(i, int_arg(args) as i32, false),
+            // WP-TR1: FUN_001f6bc8(obj, id, v) = so part +0x18 setter
+            0x001f_6bc8 => {
+                let id = int_arg(args);
+                let v = if args.len() > 1 { int_arg(&args[1..]) as u32 } else { 0 };
+                host.ee_sub_1f6bc8(i, id, v);
+            }
+            // WP-TR1: FUN_001f7c68 = EngineHost::ee_call(addr, args) — generic callee dispatch
+            0x001f_7c68 => {
+                let addr = int_arg(args) as u32;
+                let rest: Vec<u32> = args[1..].iter().map(|a| int_arg(std::slice::from_ref(a)) as u32).collect();
+                host.ee_call(addr, &rest);
+            }
+            // WP-TR1: FUN_00171d58 = k22_seq::ee_sub_171d58(c, guard_id) — stop guard op
+            0x0017_1d58 => match (callee, find(set, i)) {
+                (0x0017_1d58, Some(Inst::C2d8c48(c))) => {
+                    crate::engine::classes::k22_seq::ee_sub_171d58(c, int_arg(args) as u32);
+                }
+                _ => return false,
+            },
+            // WP-TR1: FUN_00171da8 = k22_seq::ee_sub_171da8(c, guard_id, running) — query running
+            0x0017_1da8 => match (callee, find(set, i)) {
+                (0x0017_1da8, Some(Inst::C2d8c48(c))) => {
+                    let _running = crate::engine::classes::k22_seq::ee_sub_171da8(c, int_arg(args) as u32, if args.len() > 1 { int_arg(&args[1..]) as u32 } else { 0 });
+                }
+                _ => return false,
+            },
+            // WP-TR1b: Sensor::ee_sub_1541d8 — needs See + ClassHost not in ClassLink::run; partial
+            0x0015_41d8 => return false,
+            // WP-TR1: FUN_001e0120(obj) — ClassHost trait: k24 sequence start
+            0x001e_0120 => h.ee_sub_1e0120(obj),
+            // WP-TR1: FUN_001f0598(obj) — ClassHost trait: link off
+            0x001f_0598 => h.ee_sub_1f0598(i),
+            // WP-TR1: FUN_001f0730(snd, id) — ClassHost trait: sound dispatch
+            0x001f_0730 => h.ee_sub_1f0730(obj, int_arg(args) as i32),
+            // WP-TR1: FUN_001f03a8(sm, obj, label, flags, mask) — ClassHost trait: link setup
+            0x001f_03a8 => { let _ = h.ee_sub_1f03a8_link(obj, int_arg(args) as u32, if args.len() > 1 { int_arg(&args[1..]) } else { 0 } as i32, if args.len() > 2 { int_arg(&args[2..]) as u32 } else { 0 }, if args.len() > 3 { int_arg(&args[3..]) } else { 0 } as i32); }
+            // WP-TR1: FUN_001f82b8(obj, v) — ClassHost trait: alert/trigger
+            0x001f_82b8 => h.ee_sub_1f82b8(i, int_arg(args)),
+            // WP-TR1b: FUN_001b2020(obj, v) — k15_79 Proj::f_23c push (cap 4)
+            0x001b_2020 => {
+                let v = int_arg(args) as i32;
+                if let Some(c) = set.k15_79_get(i) {
+                    if c.p.f_23c.len() < 4 { c.p.f_23c.push(v); }
+                }
+            }
+            // WP-TR1b: FUN_001b2048(obj, v) — k15_79 Proj::f_250 push (cap 4)
+            0x001b_2048 => {
+                let v = int_arg(args) as i32;
+                if let Some(c) = set.k15_79_get(i) {
+                    if c.p.f_250.len() < 4 { c.p.f_250.push(v); }
+                }
+            }
+            // WP-TR1: FUN_001291a8 = thunk result copy (inline); already handled by method_table
+            0x0012_91a8 => { /* noop: result already captured by ee_sub_201110 */ }
+            // WP-TR1b: these callees are ported (sensor.rs, jtblend.rs, p8_hazard.rs, k25.rs,
+            // music_mgr.rs) but need subsystems (Aseg, MusicMgr, K25, target+0x110) not available
+            // in ClassLink::run. Stub → recorded; the subsystem owners execute them.
+            0x0012_f990 => return false, // jtblend::ee_sub_12f990 (Aseg)
+            0x001f_78d8 => return false, // p8_hazard::FUN_001f78d8 (target +0x110)
+            0x001f_b4f0 => return false, // K25::ee_sub_1fb4f0 (fog; K25 SoundRt)
+            0x001f_e3f8 => return false, // MusicMgr::ee_sub_1fe3f8 (getter)
+            0x001f_e9f8 => return false, // MusicMgr::ee_sub_1fe9f8
+            0x001f_ea60 => return false, // MusicMgr::ee_sub_1fea60
+            0x0022_7c90 => return false, // sensor::ee_sub_227c90 (Vol + pos)
+            // WP-TR1b: FUN_001e1970(arg1, obj, arg0) — C2d8c48 record {0x53}: [5]=arg1, [4]=arg0
+            0x001e_1970 => match find(set, i) {
+                Some(Inst::C2d8c48(c)) => {
+                    let a0 = int_arg(args) as u32;
+                    let a1 = if args.len() > 1 { int_arg(&args[1..]) as u32 } else { 0 };
+                    if let Some(k) = c.ee_sub_1e01f8(0x53, 0) {
+                        c.f_54[k][5] = a1; // +0x14
+                        c.f_54[k][4] = a0; // +0x10
+                    }
+                }
+                _ => return false,
+            },
+            // WP-TR1b: FUN_001e1ad0(obj, arg0, arg1, arg2) — C2d8c48 record {0x59, arg2}: [5]=arg1, [4]=arg0
+            0x001e_1ad0 => match find(set, i) {
+                Some(Inst::C2d8c48(c)) => {
+                    let a0 = int_arg(args) as u32;
+                    let a1 = if args.len() > 1 { int_arg(&args[1..]) as u32 } else { 0 };
+                    let a2 = if args.len() > 2 { int_arg(&args[2..]) as u32 } else { 0 };
+                    if let Some(k) = c.ee_sub_1e01f8(0x59, a2) {
+                        c.f_54[k][5] = a1; // +0x14
+                        c.f_54[k][4] = a0; // +0x10
+                    }
+                }
+                _ => return false,
+            },
+            // WP-TR1b: FUN_001e1b10(obj, arg0, arg1, arg2) — C2d8c48 record {0x5a, arg2}: [4]=arg0, [5]=arg1, [6]=0
+            0x001e_1b10 => match find(set, i) {
+                Some(Inst::C2d8c48(c)) => {
+                    let a0 = int_arg(args) as u32;
+                    let a1 = if args.len() > 1 { int_arg(&args[1..]) as u32 } else { 0 };
+                    let a2 = if args.len() > 2 { int_arg(&args[2..]) as u32 } else { 0 };
+                    if let Some(k) = c.ee_sub_1e01f8(0x5a, a2) {
+                        c.f_54[k][4] = a0; // +0x10
+                        c.f_54[k][5] = a1; // +0x14
+                        c.f_54[k][6] = 0;  // +0x18
+                    }
+                }
+                _ => return false,
+            },
             _ => match (callee, find(set, i)) {
                 // FUN_0015a150: +0x148 = DAT_002a514c (FLT_MAX)
                 (0x0015_a150, Some(Inst::C2ceb78(c))) => c.f_148 = f32::MAX,
@@ -556,6 +724,7 @@ impl ClassLink {
                         c.f_54[k][4] = int_arg(args) as u32;
                     }
                 }
+                // WP-TR1: FUN_001e0120(obj) = ClassHost ee_sub_1e0120 — handled as top-level arm below
                 // WP-J10: FUN_001baed8(obj, 0, 0) (thunk 0x0010d158) / FUN_001baf18(obj, target)
                 (0x001b_aed8, Some(Inst::C2d4b78(c))) => c.ee_sub_1baed8(i, 0, 0, h),
                 (0x001b_af18, Some(Inst::C2d4b78(c))) => c.ee_sub_1baf18(i, int_arg(args), h),
@@ -568,7 +737,7 @@ impl ClassLink {
     /// A world+0x3ca8 node (FUN_00149c80 deferred phase): direct-fn PMFs (vindex -1) whose fn is one
     /// of the class callees above run with no args; false = not handled (caller records it).
     pub fn call_deferred(&mut self, obj: u32, vindex: i16, fnw: u32) -> bool {
-        if vindex != -1 || !CLASS_CALLEES.contains(&fnw) || matches!(fnw, 0x001d_fd58 | 0x0016_4640 | 0x0017_1cf8 | 0x0017_0e68 | 0x001e_0760 | 0x001b_af18 | 0x001b_aed8 | 0x001d_6b00 | 0x0020_8700 | 0x0020_8728) {
+        if vindex != -1 || !CLASS_CALLEES.contains(&fnw) || matches!(fnw, 0x001d_fd58 | 0x0016_4640 | 0x0017_1cf8 | 0x0017_0e68 | 0x001e_0760 | 0x001b_af18 | 0x001b_aed8 | 0x001d_6b00 | 0x0020_8700 | 0x0020_8728 | 0x001f_6ac8 | 0x001f_6b48 | 0x001f_6bc8 | 0x001f_7c68 | 0x0017_1d58 | 0x0017_1da8 | 0x0015_41d8 | 0x001e_0120 | 0x001f_0598 | 0x001f_0730 | 0x001f_03a8 | 0x001f_82b8 | 0x001b_2020 | 0x001b_2048 | 0x0012_91a8 | 0x0012_f990 | 0x001f_78d8 | 0x001f_b4f0 | 0x001f_e3f8 | 0x001f_e9f8 | 0x001f_ea60 | 0x0022_7c90 | 0x001e_1970 | 0x001e_1ad0 | 0x001e_1b10) {
             return false;
         }
         let Some(set) = self.set.as_mut() else { return false };

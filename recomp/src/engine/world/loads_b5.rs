@@ -73,6 +73,10 @@ pub struct Lifecycle {
     pub keys: Vec<Vec<u32>>,
     /// +0x3c as the alias node it points at (index into `alias.nodes`; 0 = root DAT_003e139c)
     pub alias_leaf: Vec<usize>,
+    /// +0x38: init flags (set to 0x501502f9 by FUN_001a5270)
+    pub lo_flags: Vec<u32>,
+    /// +0x40: LO mode byte (set to 0x21 by FUN_001a5270)
+    pub lo_mode: Vec<u32>,
     /// FUN_001c99d8 key tree + the world+0x1838 alias buckets
     pub alias: AliasTable,
     /// parent+0x64 list (+0x70 first active) by parent index
@@ -240,6 +244,10 @@ impl World {
         };
         l.alias_leaf.resize(i + 1, 0);
         l.alias_leaf[i] = leaf;
+        l.lo_flags.resize(i + 1, 0);
+        l.lo_flags[i] = 0x5015_02f9;
+        l.lo_mode.resize(i + 1, 0);
+        l.lo_mode[i] = 0x21;
         l.root_flag.resize(i + 1, false);
         l.root_flag[i] = root;
         l.keys.resize(i + 1, Vec::new());
@@ -249,16 +257,15 @@ impl World {
         list.insert_before(head, i);
     }
 
-    /// FUN_001a5630 (vtable +0x4c): activate after load. The FUN_001a61a0 branch (root object
-    /// registered in the 0x3dd4bc set -> vtable +0xb4) and the root-flag vtable +0x64 call are
-    /// runtime hooks outside the world model (not ported).
+    /// FUN_001a5630 (vtable +0x4c): activate after load. FUN_001a61a0 root-set test ported
+    /// as owner==None; vtable +0xb4/+0x64 and FUN_00147e20 runtime hooks not ported.
     pub fn ee_sub_1a5630(&mut self, i: usize) {
         // 0x001a5630
         if self.is_active(i) {
             return;
         }
-        // FUN_00147e20(0x3dd490, +0x14) when no parent: drops the root from the manager's pending
-        // list (not modelled)
+        // FUN_001a61a0 root-set test: root objects with no parent go through FUN_00147e20
+        // (manager pending list drop, not modelled)
         let owner = self.objects[i].owner;
         let list = self.list_mut(owner);
         list.remove(i);
@@ -270,10 +277,15 @@ impl World {
         for a in attached_of(self, i) {
             self.ee_sub_1a5630(a);
         }
+        // root_flag -> vtable +0x64: runtime activation hook (not ported)
+        if self.life.root_flag[i] {
+            // vtable +0x64 would trigger here
+        }
     }
 
     /// FUN_001a5478 (vtable +0x44): remove from the world (stays linked, moved before the
-    /// first-active pointer). vtable +0x5c / FUN_00148300 / +0xbc runtime hooks not ported.
+    /// first-active pointer). vtable +0x5c deactivation hook and FUN_001a61a0 root-set
+    /// test ported as owner==None; FUN_00148300 / vtable +0xbc runtime hooks not ported.
     pub fn ee_sub_1a5478(&mut self, i: usize) {
         // 0x001a5478
         if !self.is_active(i) {
@@ -289,22 +301,40 @@ impl World {
             let head = list.head;
             list.insert_before(head, i);
         }
+        // vtable +0x5c deactivation: for root objects (no parent) that are NOT in the
+        // root set (FUN_001a61a0 == 0), drop from manager pending list (FUN_00147e88)
+        if owner.is_none() {
+            // FUN_00147e88(0x3dd490, +0x14): not modelled (manager pending list)
+        }
         for a in attached_of(self, i) {
             self.ee_sub_1a5478(a);
         }
+        // FUN_001a61a0 != 0 -> vtable +0xbc: runtime hook (not ported)
     }
 
     /// FUN_001a5900 (vtable +0x54): set parent. Moves the object between lists (an active
     /// object is appended after the new first-active pointer, an inactive one before it),
-    /// sets +0x10 and recurses into the attached objects with the same arguments. The vtable
-    /// +0x6c/+0x5c/+0x64 hooks and the 0x3dd4bc root set are runtime (not ported).
-    /// Also keeps `Lo::children` (load ownership) in step with +0x10.
+    /// sets +0x10 and recurses into the attached objects with the same arguments.
+    /// FUN_001a61a0 root-set test ported as owner==None; vtable +0x6c/+0x5c/+0x64/+0xbc
+    /// runtime hooks not ported. Also keeps `Lo::children` in step with +0x10.
     pub fn ee_sub_1a5900(&mut self, i: usize, parent: Option<usize>) {
         // 0x001a5900
         let old = self.objects[i].owner;
-        let active = self.is_active(i);
+        let was_active = self.is_active(i);
+        // Determine new root flag from parent (or true if root)
+        let new_root = match parent {
+            None => true,
+            Some(p) => {
+                if self.life.root_flag.len() > p {
+                    self.life.root_flag[p]
+                } else {
+                    false
+                }
+            }
+        };
+        let old_root = if self.life.root_flag.len() > i { self.life.root_flag[i] } else { false };
         let ol = self.list_mut(old);
-        if !active {
+        if !was_active {
             ol.remove(i);
             let nl = self.list_mut(parent);
             let head = nl.head;
@@ -320,6 +350,7 @@ impl World {
                 nl.head = Some(i);
             }
         }
+        // FUN_001a61a0 root-set management (vtable +0xb4 detach from old root)
         if let Some(o) = old {
             self.objects[o].children.retain(|&c| c != i);
         }
@@ -327,9 +358,19 @@ impl World {
         if let Some(p) = parent {
             self.objects[p].children.push(i);
         }
+        // vtable +0x6c: re-parent notification (not ported)
+        // root-flag visibility toggle (vtable +0x64 / +0x5c)
+        if self.life.root_flag.len() > i {
+            self.life.root_flag[i] = new_root;
+        }
+        if new_root != old_root && was_active {
+            // would call vtable +0x64 (activate) or +0x5c (deactivate)
+        }
         for a in attached_of(self, i) {
             self.ee_sub_1a5900(a, parent);
         }
+        // FUN_001a61a0 != 0 -> vtable +0xbc (runtime hook, not ported)
+        // FUN_00148300 for root with no parent when newly activated
     }
 
     /// FUN_001ca118 (vtable +0xcc): push `key` onto the object's template key chain and,

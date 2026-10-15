@@ -63,9 +63,9 @@ fn get_o_round_trip_on_real_objects() {
     let mut rum = Vec::new();
     let mut sched = Schedule::default();
     let base = GameSpliceHost { t: 2.0, cm: None, emitters: &mut em, vars: None, data: &mut data };
-    let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum };
+    let level = LevelSpliceHost { base, mission: -1, aliases: &mut al, rumble: &mut rum , spawn_lists: Box::leak(Box::new(sly2_recomp::engine::player::p25::SpawnLists::default()))};
     let mut cm = Cm::new();
-    let mut h = PersistentHost { level, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: None, sched: &mut sched };
+    let mut h = PersistentHost { level, live_q: None, cm: Some(&mut cm), clk: Default::default(), world: Some(&w), table: None, sched: &mut sched };
 
     // find real (object, symid, field) with a stream-written scalar of kind 1 (f32)
     let mut checked = 0;

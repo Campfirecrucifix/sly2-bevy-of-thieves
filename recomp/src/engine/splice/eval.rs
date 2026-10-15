@@ -8,6 +8,11 @@ use super::value::*;
 use super::SpliceError;
 use std::rc::Rc;
 
+/// WP-SCR6 d2 diagnostic hook: appends the printed operator sub-expression of every `apply`
+/// that is about to raise `NotCallable(-1)`. Zero cost unless a Nil-apply actually fires
+/// (populated only on an existing error path).
+pub static NIL_APPLY_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Maximum argument slots of the apply stack buffer (0x001272e0: 32 CRefs).
 pub const MAX_ARGS: usize = 32;
 
@@ -293,7 +298,15 @@ impl Vm {
             }
             Ref::Method(m) => (m.nargs, false),
             Ref::Proc(p) => (p.nargs, p.rest),
-            other => return Err(SpliceError::NotCallable(other.tagk())),
+            other => {
+                if other.tagk() == TAGK_NIL {
+                    let text = super::serialize::print_ref(&op_e, &self.symbols);
+                    if let Ok(mut g) = NIL_APPLY_LOG.lock() {
+                        g.push(text);
+                    }
+                }
+                return Err(SpliceError::NotCallable(other.tagk()));
+            }
         };
         let mut cur = head.borrow().next.clone();
         let mut args = Vec::with_capacity(nargs + rest as usize);

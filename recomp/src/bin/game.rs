@@ -1,6 +1,6 @@
 //! Sly 2 playable app (feature `game`). Usage:
 //!   game [path/to/Sly 2.iso] [--level <static-table row> | --table <level-table row>] [--width W --height H]
-//!        [--screenshot <out.png> --frames N]
+//!        [--screenshot <out.png> --frames N] [--mods <mods dir>]
 //! (ISO else settings.toml `iso`, else the ISO next to the exe). Boots to the first boot level of the ELF static table even when the
 //! renderer has nothing to draw yet (empty scene).
 //!
@@ -125,7 +125,9 @@ fn main() {
     };
     // WP-PUB2: the engine's static tables are read from this ISO's SCUS_973.16 on first use
     sly2_recomp::engine::disc::exe::set_iso_path(&iso_path);
-    let mods = settings.mod_overlay(&exe_dir().join("mods")).unwrap_or_else(|e| {
+    // WIRE-C2: `--mods <dir>` replaces the mods folder next to the exe (render tests / mod authors)
+    let mods_dir = args.mods.clone().unwrap_or_else(|| exe_dir().join("mods"));
+    let mods = settings.mod_overlay(&mods_dir).unwrap_or_else(|e| {
         eprintln!("mods: {e}; running without mods");
         Default::default()
     });
@@ -214,6 +216,7 @@ fn main() {
         .add_plugins(sly2_recomp::engine::npcdraw::plugin::NpcDrawPlugin)
         .add_plugins(sly2_recomp::engine::ui::plugin::UiPlugin)
         .add_plugins(japp::ScriptClassesPlugin)
+        .add_plugins(sly2_recomp::engine::game::arch1_bridge::Arch1BridgePlugin)
         .add_plugins(sly2_recomp::engine::game::flow_app::GameFlowPlugin)
         .add_plugins(FmvPlugin)
         .insert_resource(sly2_recomp::engine::gfx::game::GfxSettings { ink_outlines: settings.ink_outlines })
@@ -273,11 +276,12 @@ struct Args {
     level: Option<usize>,
     table: Option<usize>,
     screenshot: Option<(std::path::PathBuf, u32)>,
+    mods: Option<std::path::PathBuf>,
 }
 
 impl Args {
     fn parse(settings: &mut Settings) -> Args {
-        let mut a = Args { level: None, table: None, screenshot: None };
+        let mut a = Args { level: None, table: None, screenshot: None, mods: None };
         let mut shot = None;
         let mut frames = 60;
         let mut it = std::env::args().skip(1);
@@ -294,6 +298,7 @@ impl Args {
                 "--frames" => frames = num("--frames"),
                 "--width" => settings.width = num("--width"),
                 "--height" => settings.height = num("--height"),
+                "--mods" => a.mods = it.next().map(std::path::PathBuf::from),
                 "--screenshot" => shot = it.next().map(std::path::PathBuf::from),
                 _ if x.starts_with("--") => {
                     eprintln!("unknown option {x}");
@@ -400,17 +405,17 @@ fn level_transition(mut commands: Commands, loader: Res<LevelLoader>, mut g: Res
 }
 
 /// WP-J3: level script blocks (FUN_001ffa70) once the world is active.
-fn level_scripts(g: Res<GameLoop>, mut lg: ResMut<LevelGame>, mut st: NonSendMut<SpliceState>, w: Option<Res<World>>, cm: Res<Cm>, mut em: ResMut<EmitterSystem>, mut rq: ResMut<RumbleQueue>, opt: Res<WorldOptions>) {
+fn level_scripts(g: Res<GameLoop>, mut lg: ResMut<LevelGame>, mut st: NonSendMut<SpliceState>, w: Option<Res<World>>, cm: Res<Cm>, mut em: ResMut<EmitterSystem>, mut rq: ResMut<RumbleQueue>, opt: Res<WorldOptions>, mut spawn_lists: ResMut<sly2_recomp::engine::player::plugin::PlayerSpawnLists>, mut live_q: ResMut<sly2_recomp::engine::classes::q::live::LiveQ>) {
     let Some(w) = w else { return };
-    japp::run_level_scripts(g.clock.t, &mut lg, &mut st, &w, Some(&cm), &mut em, &mut rq, opt.0.mission);
+    japp::run_level_scripts(g.clock.t, &mut lg, &mut st, &w, Some(&cm), &mut em, &mut rq, opt.0.mission, &mut spawn_lists.0, Some(&mut live_q));
 }
 
 /// WP-J4: MainStep::WorldUpdate (FUN_00226550) script work: due Splice callbacks, after the clock step.
 #[allow(clippy::too_many_arguments)]
-fn tick_scripts(g: Res<GameLoop>, mut lg: ResMut<LevelGame>, mut st: NonSendMut<SpliceState>, w: Option<Res<World>>, mut cm: ResMut<Cm>, mut em: ResMut<EmitterSystem>, mut rq: ResMut<RumbleQueue>, opt: Res<WorldOptions>) {
+fn tick_scripts(g: Res<GameLoop>, mut lg: ResMut<LevelGame>, mut st: NonSendMut<SpliceState>, w: Option<Res<World>>, mut cm: ResMut<Cm>, mut em: ResMut<EmitterSystem>, mut rq: ResMut<RumbleQueue>, opt: Res<WorldOptions>, mut spawn_lists: ResMut<sly2_recomp::engine::player::plugin::PlayerSpawnLists>, mut live_q: ResMut<sly2_recomp::engine::classes::q::live::LiveQ>) {
     let Some(w) = w else { return };
     let clk = CmClock { t: g.clock.t, dt: g.clock.dt, dt_real: g.clock.dt_real };
-    japp::tick_scripts(g.clock.t, g.clock.dt, clk, &mut lg, &mut st, &w, &mut cm, &mut em, &mut rq, opt.0.mission);
+    japp::tick_scripts(g.clock.t, g.clock.dt, clk, &mut lg, &mut st, &w, &mut cm, &mut em, &mut rq, opt.0.mission, &mut spawn_lists.0, Some(&mut live_q));
 }
 
 /// MainStep::Clock (FUN_0014d0b8(g_clock, 0)).

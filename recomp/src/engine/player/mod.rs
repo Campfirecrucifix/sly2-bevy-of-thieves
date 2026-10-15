@@ -104,6 +104,7 @@ pub mod p23;
 pub mod p25;
 pub mod p26;
 pub mod loot;
+pub mod pj_adapt;
 
 pub use p4::{Attach, JtContact, JtTarget, LedgeHit, TargetCand};
 
@@ -443,6 +444,10 @@ pub struct Jt {
     pub slot50: Vec<usize>,
     /// WP-K33: a recorded kind-7 attach waiting for its first jts-7 frame (0x1911a8)
     pub k7_pending: bool,
+    /// WP-PJ1 jt +0x270: count of the attached-item list (+0x274..), FUN_00144068 busy test
+    pub n_270: i32,
+    /// WP-PJ1 jt +0x1084: held / carried object (FUN_00143de8 sets it), FUN_00144068 busy test
+    pub held_1084: Option<usize>,
     /// jt+0x4c0 attach object
     pub attach: Attach,
     /// jt+0x1000 target category mask (TARGET +0x1c test)
@@ -513,6 +518,19 @@ pub struct Jt {
     /// the yaw of the CM forward row, set by the game layer each frame (REPLACED: the look policy's own
     /// +0x10 is not shared; activate copies it from that row and the look drives the row)
     pub cam_yaw: Option<f32>,
+    /// WP-PJ2b: jt+0x19b8 / +0x19bc class-0x35 sub objects: ((obj+0xa8)->+0x60)+0x20 pose offset vector
+    /// (written by SetDmgState 0x1a0b40)
+    pub pose_19b8: [f32; 4],
+    pub pose_19bc: [f32; 4],
+    /// WP-SCR2: FUN_00143ee0 slot-87 pose - jt+0x1030 anim handle (FUN_001305b8), jt+0x1034 state-machine
+    /// link record (FUN_001f1448), and the slot-87 current index (vt+0x2c4 writes; FUN_00144038 is
+    /// (idx - 5) < 2). The k22 wait condition reads `pose_87_idx` in {5, 6} for the slot-88 10 / 11 test;
+    /// Bentley mirrors it on +0x1084 but Sly reads it from the same field as slot-87.
+    pub pose_1030: u32,
+    pub pose_1034: u32,
+    pub pose_87_idx: i32,
+    /// WP-PJ2b: DAT_002ddfd0 camera position (CM +0x90), set by the game layer each frame (None = unknown)
+    pub cam_pos: Option<V3>,
 }
 
 /// One object of the 0x19b110 category lists with its attach data (REPLACED: the game's object lists).
@@ -621,6 +639,8 @@ impl Jt {
             cands: None,
             slot50: Vec::new(),
             k7_pending: false,
+            n_270: 0,
+            held_1084: None,
             attach: Attach::default(),
             mask_1000: u32::MAX,
             is_player: true,
@@ -654,6 +674,12 @@ impl Jt {
             gad_glide: [0.0; 2],
             cam_glide: false,
             cam_yaw: None,
+            pose_19b8: [0.0; 4],
+            pose_19bc: [0.0; 4],
+            pose_1030: 0,
+            pose_1034: 0,
+            pose_87_idx: 0,
+            cam_pos: None,
         }
     }
 
@@ -1077,6 +1103,28 @@ impl Jt {
         self.FUN_0018f0a8(anim);
         // WP-P7: leaving jts 4 clears the damage state (0x18c250 case 4)
         p7_damage::exit_sync(self, anim);
+        // WP-EP1f: 0x18b7e8 -> 0x19fc30 (after 0x1a1358) records the safe points 0x19f590 warps back to
+        self.FUN_0019fc30();
+    }
+
+    /// WP-EP1f: 0x0019fc30. jts 0 1 5 6 9 10 0xb 0xc 0xf 0x10 0x11 0x14 0x17 0x18: a ground contact (+0x208)
+    /// with normal z > 0.7, SO +0x148 bit 29 clear and no water (+0x108c) -> 0x19feb0(jt+0x9e0, contact SO,
+    /// contact point +0x60). REPLACED: the contact SO / its +0x148 bit are not modelled (object None, bit
+    /// clear); contact point = (x, y, +0x238). UNPORTED (recorded): jts 3 / 0x16 0x19fd30 (rail / pipe
+    /// parameter points), jts 7 0x1942f0, jts 8 0x19ea60.
+    pub fn FUN_0019fc30(&mut self) {
+        match self.jts {
+            0 | 1 | 5 | 6 | 9 | 10 | 0xb | 0xc | 0xf | 0x10 | 0x11 | 0x14 | 0x17 | 0x18 => {
+                if self.ground_nz.is_some_and(|z| 0.7 < z) && self.p8.water.is_none() {
+                    let p = [self.phys.pos[0], self.phys.pos[1], self.z_contact];
+                    p5_states::FUN_0019feb0(&mut self.p5.safe_points, None, p);
+                }
+            }
+            3 | 0x16 => self.calls.push((0x0019fd30, self.jts)),
+            7 => self.calls.push((0x001942f0, 0)),
+            8 => self.calls.push((0x0019ea60, 0)),
+            _ => {}
+        }
     }
 
     /// 0x00197500 JMP update (see module doc). Restarts while jtbs changes (do/while on +0x1c).
@@ -1470,6 +1518,50 @@ impl Jt {
         }
         let dt = self.dt;
         self.with_p5(|jt, st, w| p5_states::FUN_0018c250_p5(jt, st, w, jts, jtbs, dt, &mut *anim));
+    }
+
+    /// WP-SCR2: FUN_00143ee0 for Sly (class 53) - one of the three branches resolved by
+    /// `EngineHost::k22_pose_143ee0`. REPLACED: the slot-87 index set (vt+0x2c4) is kept as the `pose_87_idx`
+    /// field here - Sly's per-state slot-87 writer (states 10 / 11 enter / exit) is not traced.
+    pub fn ee_sub_143ee0(
+        &mut self,
+        req: &crate::engine::classes::plugin::PlayerPoseReq,
+        h: &mut dyn crate::engine::classes::ClassHost,
+    ) {
+        use crate::engine::classes::guard::PLAYER_HANDLE;
+        use crate::engine::classes::plugin::PlayerPoseKind;
+        use crate::engine::classes::shared::anim::{ee_sub_130658, ee_sub_1305b8};
+        match req.kind {
+            PlayerPoseKind::Clear => {
+                // FUN_00143ff8: slot-88 state 10 / 11 -> slot-87 idx 0
+                if (self.pose_87_idx as u32).wrapping_sub(5) < 2 {
+                    self.pose_87_idx = 0;
+                }
+            }
+            PlayerPoseKind::Sm { obj, flags } => {
+                self.pose_87_idx = req.idx as i32;
+                ee_sub_130658(&mut self.pose_1030, h);
+                crate::engine::classes::k17_55::ee_sub_1f1448(
+                    obj,
+                    PLAYER_HANDLE,
+                    -1,
+                    flags,
+                    &mut self.pose_1034,
+                    h,
+                );
+            }
+            PlayerPoseKind::Anim { obj, flags } => {
+                self.pose_87_idx = req.idx as i32;
+                h.ee_sub_1f15b8(&mut self.pose_1034);
+                ee_sub_1305b8(0, 1.0, obj, PLAYER_HANDLE, flags, &mut self.pose_1030, h);
+            }
+        }
+    }
+
+    /// WP-SCR2: FUN_00144038(Sly) - slot-88 index 5 / 6 (states 10 / 11): the pose is active. Mirrored
+    /// onto `pose_87_idx` here.
+    pub fn posing_144038(&self) -> bool {
+        (self.pose_87_idx as u32).wrapping_sub(5) < 2
     }
 
     /// Attach data of a registry object.

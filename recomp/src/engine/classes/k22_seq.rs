@@ -62,6 +62,13 @@ pub struct Node {
     /// K28: +0x40 / +0x44 the action-0x23 record and its subject (FUN_001e4eb8)
     pub f_40: Option<usize>,
     pub f_44: u32,
+    /// WP-SCR2: action 0xa (FUN_001e1e30 case 10) +0x4c anim handle (0x30 / 0x6d scope / anim branch),
+    /// +0x54 the posed subject (is-a 0x34, FUN_00143ee0 branch); both kept while the record waits
+    pub f_4c: u32,
+    pub f_54: u32,
+    /// PLAN1: +0x58 SMA handle from FUN_0020fff0 (action 0xd), +0x5c done flag
+    pub f_58: u32,
+    pub f_5c: u32,
     /// K28: action 0x38 camera move (FUN_001e57a0): +0x80 end time, +0x84 / +0x88 the 0x38 / 0x39 records,
     /// +0x8c duration, +0x90 / +0x94 / +0x9c state words
     pub f_80: f32,
@@ -93,7 +100,7 @@ fn ee_sub_171cf8(c: &mut C2d8c48, g: u32, r: u32) {
 }
 
 /// K27: FUN_00171d58
-fn ee_sub_171d58(c: &mut C2d8c48, g: u32) {
+pub fn ee_sub_171d58(c: &mut C2d8c48, g: u32) {
     if g == 0 {
         return;
     }
@@ -102,7 +109,7 @@ fn ee_sub_171d58(c: &mut C2d8c48, g: u32) {
 }
 
 /// K27: FUN_00171da8(guard, routine): guard in substate 5 running `routine`
-fn ee_sub_171da8(c: &C2d8c48, g: u32, r: u32) -> bool {
+pub fn ee_sub_171da8(c: &C2d8c48, g: u32, r: u32) -> bool {
     c.k27_running.iter().any(|x| x.0 == g && x.1 == r)
 }
 
@@ -116,6 +123,7 @@ fn ee_sub_1e50e0(c: &mut C2d8c48, n: u32, on: u32, flags: u32, h: &mut dyn Class
             return;
         }
         h.k27_world_20f030(nd.f_3c);
+        h.k27_world_20f0f0();
         nd.f_3c = flags;
     } else {
         if nd.f_38 != 0 {
@@ -124,8 +132,10 @@ fn ee_sub_1e50e0(c: &mut C2d8c48, n: u32, on: u32, flags: u32, h: &mut dyn Class
             }
             // FUN_0020f030(0x3dd490) with the flags argument dropped by the decompiler: the old +0x3c
             h.k27_world_20f030(nd.f_3c);
+            h.k27_world_20f0f0();
         }
         h.k27_world_20efc0(flags);
+        h.k27_world_20f0c0();
         nd.f_3c = flags;
     }
     nd.f_38 = on;
@@ -405,6 +415,44 @@ pub fn ee_sub_1e3890(c: &mut C2d8c48, k: usize, rec: usize, now: f32, h: &mut dy
         }
         // K28: owner-clock timer (LAB_001e42ac, as 0x33)
         0x23 => f32::from_bits(r[4]) < now - n.f_34,
+        // WP-SCR2: FUN_001e3890 case 10 pose wait: if +0x54 (class-0x34 subj) != 0 -> FUN_00144038(subj)
+        // keeps it active (slot-88 state 10 / 11), else clear +0x54. If +0x54 == 0, check +0x4c anim
+        // handle: 0 -> done; FUN_00131968(h) still running -> wait; else stop (vt+0x14) and clear.
+        0xa => {
+            if n.f_54 != 0 {
+                if h.k22_posing_144038(n.f_54) {
+                    return false;
+                }
+                c.k22_nodes[k].f_54 = 0;
+                return true;
+            }
+            let a = n.f_4c;
+            if a == 0 {
+                return true;
+            }
+            if h.ee_sub_131968(a) {
+                h.vcall(a, 0x14);
+                c.k22_nodes[k].f_4c = 0;
+                return true;
+            }
+            false
+        }
+        // PLAN1: case 0xd wait — done when +0x58 == 0. If +0x58 != 0 and (FUN_001f0638 done or
+        // +0x5c != 0) -> FUN_001e5410(owner) release, recheck +0x58. Else wait.
+        0xd => {
+            if n.f_58 == 0 {
+                return true;
+            }
+            let sma_done = h.ee_sub_1f0638(n.f_58);
+            if sma_done || n.f_5c != 0 {
+                let owner = c.f_6c as u32 + 1;
+                h.k22_release_1e5410(owner);
+                c.k22_nodes[k].f_58 = 0;
+                c.k22_nodes[k].f_5c = 0;
+                return true;
+            }
+            false
+        }
         // K28: the camera move's end time (+0x80) passed -> FUN_001e5a98(node, rec[0x11]) / +0x9c = 0
         0x39 => {
             let done = n.f_80 <= now;
@@ -594,6 +642,14 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
             }
         }
         0x44 => h.k22_title_show_1dd820(),
+        // WP-EP1f: FUN_001e1db8(node, rec[4]) of class 0x29 (warp) -> FUN_00228170(warp) (the +0x14 / +0x24
+        // next-record choice is not modelled, like the other actions)
+        0x16 => {
+            let o = ee_sub_1e1db8(nd.ctx, r[4], h);
+            if o != 0 && h.ee_sub_132b10(o, 0x29) != 0 {
+                h.ee_sub_228170(o);
+            }
+        }
         // K27: FUN_00171cf8(guard, routine); r[1] == 0 (wait) keeps both at +0xd8 / +0xdc
         0x55 => {
             let g = ee_sub_1e1db8(nd.ctx, r[4], h);
@@ -613,6 +669,45 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
         9 => h.k27_script_msg(me, 4, &r[4..5]),
         // K27: FUN_00161f48(0x2deb30, 1, &rec[4], ctx)
         0x11 => h.ee_sub_161f48_list(nd.ctx.saturating_sub(1) as usize, &[[r[4], r[5]]]),
+        // WP-SCR2: FUN_001e1e30 case 10 (slot-87 pose dispatch): subj = FUN_001e1db8(ctx, rec[5]);
+        // if subj is-a 0x34 (PLAYER parent) -> FUN_00143ee0(subj, rec[4], rec[6] | 1, idx) and r[1] == 0
+        // (wait) keeps subj at +0x54. Else subj is-a 0x30 kept as the anim scope (else 0), and rec[4]
+        // is-a 0x6d -> FUN_00130488(0, 1.0, anim, scope, rec[6]) handle at +0x4c when r[1] == 0.
+        // (ELF decomp text_001e0000.c:1733; idx = 0 - the 4th arg Ghidra lost at this one call site.
+        // The other three FUN_00143ee0 call sites all pass 5 / 6 explicitly, so a leftover register
+        // is the only explanation; of its 4 observed values 5 / 6 require slot-88 states 10 / 11 and
+        // 0 is the default pose index Bentley's FUN_00143ff8 restores.)
+        0xa => {
+            let subj_h = ee_sub_1e1db8(nd.ctx, r[5], h);
+            let mut scope = 0u32;
+            let mut handled = false;
+            if subj_h != 0 {
+                if h.ee_sub_132b10(subj_h, 0x34) != 0 {
+                    h.k22_pose_143ee0(subj_h, r[4] as i32, r[6] | 1, 0);
+                    if r[1] == 0 {
+                        if let Some(k) = ix(c, n) {
+                            c.k22_nodes[k].f_54 = subj_h;
+                        }
+                    }
+                    handled = true;
+                } else if h.ee_sub_132b10(subj_h, 0x30) != 0 {
+                    scope = subj_h;
+                }
+            }
+            if !handled {
+                let anim = ee_sub_1e1db8(nd.ctx, r[4], h);
+                if anim != 0 && h.ee_sub_132b10(anim, 0x6d) != 0 {
+                    let hdl = super::shared::anim::ee_sub_130488(
+                        0, 1.0, anim, scope, r[6], h,
+                    );
+                    if r[1] == 0 {
+                        if let Some(k) = ix(c, n) {
+                            c.k22_nodes[k].f_4c = hdl;
+                        }
+                    }
+                }
+            }
+        }
         // K27: FUN_001e50e0(node, rec[4], rec[5])
         0x12 => ee_sub_1e50e0(c, n, r[4], r[5], h),
         // K27: FUN_00210338(rec[5] fade, 0x3dd490, on, rec[4] oid, ctx, owner); a waiting fade of an ALO
@@ -715,6 +810,53 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
         }
         0x40 => h.k30_zoom(ZoomOp::Zoom(f32::from_bits(r[4]))),
         0x41 => h.k30_zoom(ZoomOp::Snap),
+        // PLAN1: case 0x1d — FUN_00142140(subj, resolve(rec[4])). Subject (f_24) is-a 0x34.
+        0x1d => {
+            if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 {
+                let pose = ee_sub_1e1db8(nd.ctx, r[4], h);
+                h.ee_sub_142140(subj, pose);
+            }
+        }
+        // PLAN1: case 0xd — FUN_0020fff0 (SMA start) with node +0x58/+0x5c state.
+        // {rec[4], rec[5], rec[6], -1}, mode = rec[7]==0 ? 1 : 3, ctx = node.ctx, owner.
+        // don't-wait (rec[1] != 0): FUN_001e5410(owner) immediately.
+        0xd => {
+            let entry = [r[4], r[5], r[6], 0xffff_ffff_u32];
+            let mode = if r[7] == 0 { 1 } else { 3 };
+            let handle = h.k22_sma_20fff0(nd.ctx, &entry, mode, me);
+            if let Some(k) = ix(c, n) {
+                c.k22_nodes[k].f_58 = handle;
+                c.k22_nodes[k].f_5c = 0;
+            }
+            if r[1] != 0 {
+                h.k22_release_1e5410(me);
+            }
+        }
+        // SEQ1: no-op actions whose wait conditions are already ported (3/4) or trivial (0x13/0x1a/0x2a/0x24)
+        // In the original FUN_001e1e30, cases 3/4/0x13 fall to the default break (no action body).
+        // 0x1a/0x2a/0x24 set up player-movement state through FUN_001e4eb8 etc. that the recomp
+        // does not model (the player layer owns position); their wait conditions default to true,
+        // so the sequence advances immediately. Porting them as explicit no-ops removes the false
+        // UNPORTED log entries.
+        3 | 4 | 0x13 => {}
+        // SEQ1: player movement / attach (subject is-a 0x34): action + FUN_001e4eb8 sets node
+        // +0x40/+0x44 (record, subject). The recomp's player position is owned by the player layer;
+        // these are cosmetic (cutscene choreography). Port as no-ops with the f_40/f_44 bookkeeping.
+        0x1a | 0x2a | 0x24 => {
+            if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 {
+                if let Some(k) = ix(c, n) {
+                    c.k22_nodes[k].f_40 = Some(cur);
+                    c.k22_nodes[k].f_44 = subj;
+                }
+            }
+        }
+        // SEQ1: attach/detach kind-0x33 object to/from node list (FUN_001e51a0 / FUN_001e5280).
+        // The slot 82/83 calls are cosmetic (dialog actor positioning). No-op in the recomp.
+        0x47 | 0x48 => {}
+        // SEQ1: dialog start (FUN_0019cc50 on subject+0xf00) — cosmetic voice line. No-op.
+        0x3b => {}
+        // SEQ1: dialog release (FUN_001e54b0, node+0xa0). No-op.
+        0x3c => {}
         _ => h.k22_seq_action(me, subj, &r),
     }
     // LAB_001e380c: the action start time

@@ -179,14 +179,14 @@ impl JobMgr {
     pub fn FUN_00163f48(&mut self, t: usize) {
         self.FUN_00165de8(None);
         if self.FUN_001637e8(t) {
-            self.FUN_001619a0(0x24, t as i32);
+            self.FUN_001619a0(0x24, (self.tasks[t].obj + 1) as i32);
             let (tg, an, f4) = (self.tasks[t].toggles.clone(), self.tasks[t].anims.clone(), self.tasks[t].f4);
             self.FUN_001620b0(5, &tg);
             self.FUN_001623d0(5, &an, f4);
             if self.tasks[t].f_5c != -1 && self.tasks[t].f_60 != 0 {
                 self.calls.push((0x001da578, t as i32));
             }
-            self.calls.push((0x00163f48, 0x14)); // vt+0x1c msg 0x14
+            self.task_msgs.push((t, 0x14)); // vt+0x1c msg 0x14
         }
     }
 
@@ -211,14 +211,14 @@ impl JobMgr {
         if self.FUN_001637e8(t) {
             self.tasks[t].n_64 += 1;
             self.FUN_001643b0(t);
-            self.FUN_001619a0(0x23, t as i32);
+            self.FUN_001619a0(0x23, (self.tasks[t].obj + 1) as i32);
             let (tg, an, f4) = (self.tasks[t].toggles.clone(), self.tasks[t].anims.clone(), self.tasks[t].f4);
             self.FUN_001620b0(4, &tg);
             self.FUN_001623d0(4, &an, f4);
             if self.tasks[t].f_5c != -1 && self.tasks[t].f_60 != 0 {
                 self.calls.push((0x001da4b8, t as i32));
             }
-            self.calls.push((0x00163d18, 0x13)); // vt+0x1c msg 0x13
+            self.task_msgs.push((t, 0x13)); // vt+0x1c msg 0x13
             if let Some(o) = self.tasks[t].c4 {
                 self.calls.push((0x002283d0, o)); // +0x40 flag 0x100 then 0x2283d0
             }
@@ -244,7 +244,7 @@ impl JobMgr {
     /// 0x00162d50: a task of a job that is not current started: make the job current.
     pub fn FUN_00162d50(&mut self, j: usize) {
         if !self.FUN_001633e8(j) {
-            self.FUN_001619a0(0x1c, j as i32);
+            self.FUN_001619a0(0x1c, (self.jobs[j].obj + 1) as i32);
             self.calls.push((0x00143380, j as i32)); // 0x1c4840 player is-a 0x34 -> 0x143380
             self.FUN_001628b8(j);
         }
@@ -377,8 +377,11 @@ impl JobMgr {
         if self.tasks[t].state == s {
             return;
         }
+        if self.tasks[t].oid == 1754 {
+            eprintln!("[PAD1] FUN_001657d0: task 1754 state {} -> {}", self.tasks[t].state, s);
+        }
         if self.FUN_001637e8(t) {
-            self.FUN_001619a0(0x26, t as i32);
+            self.FUN_001619a0(0x26, (self.tasks[t].obj + 1) as i32);
             self.calls.push((0x001657d0, 0x16)); // vt+0x1c msg 0x16
             self.task_msgs.push((t, 0x16));
         }
@@ -405,7 +408,7 @@ impl JobMgr {
         self.tasks[t].t_58 = self.now; // WP-J14: +0x58 = DAT_002dded0
         self.FUN_001643b0(t);
         if self.FUN_001637e8(t) {
-            self.FUN_001619a0(0x25, t as i32);
+            self.FUN_001619a0(0x25, (self.tasks[t].obj + 1) as i32);
             self.calls.push((0x001657d0, 0x15)); // vt+0x1c msg 0x15
             self.task_msgs.push((t, 0x15));
             self.calls.push((0x001657d0, 0x11)); // vt+0x24 msg 0x11 (self)

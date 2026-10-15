@@ -75,10 +75,15 @@ impl C2d0420 {
         // FUN_001eef70: goal base activate
         self.active = true;
         self.ee_sub_17a8c8(0, now);
-        // FUN_0020b210(g) (+0xf80 look mode reset) and FUN_0020ab68(g, 0, 0, 0) (attack stop) need the guard:
-        // run by the caller (`Guard::ee_sub_209e28`); FUN_001f4e28 / FUN_00153ff8 / FUN_00154038 UNPORTED
+        // FUN_0020b210(g) (+0xf80 look mode reset) and FUN_0020ab68(g, 0, 0, 0) (attack stop)
+        // run by the caller (`Guard::ee_sub_209e28`)
         h.ee_call(0x1f4e28, &[guard as u32 + 1]);
+        // FUN_001eefc0: done notification (sets +0x1c, notifies parent stack)
+        h.ee_call(0x1eefc0, &[guard as u32 + 1]);
+        // FUN_00153ff8(*(owner + 0xf64)): stop current voice
+        h.ee_call(0x153ff8, &[guard as u32 + 1]);
         if self.f_3c != 0 {
+            // FUN_00154038(*(owner + 0xf64), +0x3c, 2): play voice
             h.ee_call(0x154038, &[guard as u32 + 1, self.f_3c as u32, 2]);
         }
     }
@@ -91,7 +96,7 @@ impl C2d0420 {
         self.w_clear |= BIT_16;
     }
     /// slot 9 FUN_0017a7f8 (update): `ground` = guard +0x208 != 0
-    pub fn ee_sub_17a7f8(&mut self, ground: bool, now: f32) {
+    pub fn ee_sub_17a7f8(&mut self, ground: bool, now: f32, guard: usize, h: &mut dyn ClassHost) {
         // FUN_001eef98: goal base update (child tick: the anim goal plays on its own)
         loop {
             let s = self.f_30;
@@ -101,8 +106,9 @@ impl C2d0420 {
             if s == self.f_30 {
                 if (s == 1 || s == 4) && D_2BE6C0 < now - self.f_38 {
                     self.f_38 = now;
-                    // FUN_00156698(DAT_003e14b0, FUN_001a62e8(g), g) +0x54 = 3
                     self.noises += 1;
+                    // FUN_00156698(DAT_003e14b0, FUN_001a62e8(g), g) +0x54 = 3
+                    h.base(0x156698, guard);
                 }
                 return;
             }

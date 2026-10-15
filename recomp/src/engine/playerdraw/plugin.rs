@@ -251,7 +251,13 @@ pub fn setup_sly_draw(
     objs: Query<(Entity, &AloObject, Option<&Children>)>,
     meshes: Query<(Has<InkOutline>, Option<&SkinnedMesh>), With<Mesh3d>>,
 ) {
-    let (Some(w), Some(data)) = (world, data) else { return };
+    let Some(w) = world else { return };
+    // WP-EP1f: a re-inserted World can reuse the old one's address (hub -> job-start mission load): drop the
+    // previous world's draw state on the insert, rebuild once the level data is there
+    if w.is_changed() {
+        sd.world_key = 0;
+    }
+    let Some(data) = data else { return };
     let key = &*w as *const World as usize;
     if sd.world_key == key {
         return;
@@ -309,6 +315,11 @@ pub fn drive_sly(
     fired: Option<ResMut<PlayerAnimFired>>,
 ) {
     let Some(w) = world else { return };
+    // WP-EP1f: a new World whose draw is not set up yet (setup_sly_draw waits for its GfxLevelData): the
+    // animator / vis still index the previous world (job-start load right after the hub load)
+    if sd.world_key != &*w as *const World as usize {
+        return;
+    }
     let Some((pl, ev)) = players.iter().next() else { return };
     let sd = &mut *sd;
     // WP-P24: JT vt+0x2bc FUN_00189530 (binocucom: Sly not drawn while looking)
@@ -436,7 +447,10 @@ pub fn drive_po(
     mut commands: Commands,
     fired: Option<ResMut<PlayerAnimFired>>,
 ) {
-    let cur_o = cur.as_ref().and_then(|c| c.obj);
+    // WP-EP1f: only a selection made for the current World (po_link redoes it after a load)
+    let wk = w.as_deref().map_or(0, |w| w as *const World as usize);
+    let fresh = w.as_ref().is_some_and(|w| w.is_changed());
+    let cur_o = cur.as_ref().filter(|c| c.world_key == wk && !fresh).and_then(|c| c.obj);
     // WP-P22: the po's drawn state (vis::JtVis::load_po) applied once per (world, po)
     let key = (w.as_deref().map_or(0, |w| w as *const World as usize), cur_o);
     if shown.key != key {

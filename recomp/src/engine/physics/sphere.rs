@@ -77,10 +77,8 @@ fn len2(a: V3) -> f32 {
     dot(a, a)
 }
 
-/// 0x00119390: plane through `p` with normal `n`.
-pub fn FUN_00119390(n: V3, p: V3) -> Plane {
-    [n[0], n[1], n[2], dot(n, p)]
-}
+/// 0x00119390: plane through `p` with normal `n` (single implementation in `geom`).
+pub use super::geom::FUN_00119390;
 
 /// 0x001a93c8(r, centre, collider, limit, ..., max, out): sphere vs one collider's BSP. Prunes the BSP to the
 /// sphere (0x00118a88, budget min(+0x6c, 0x1555)); solid/empty -> no candidates. Candidate surfaces (flag 0x10)
@@ -90,7 +88,7 @@ pub fn FUN_00119390(n: V3, p: V3) -> Plane {
 /// contact, closest point strictly inside (0.0001 < t < 0.9999) within r; edge ends become vertex candidates
 /// (max 0x100, deduplicated) emitted last (kind 4) unless an edge contact already uses that vertex.
 /// Contact pos = c - r*n for every kind. Returns the number written (<= max).
-/// Unported: 0x001a9108 deep-penetration fallback (no contacts and centre inside, 0x00119090) -> 0 here.
+/// No contacts and the centre inside solid (0x00119090): 0x001a9108 deep-penetration fallback (deep()).
 pub fn FUN_001a93c8(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, max: usize, out: &mut Vec<Sbi>) -> usize {
     if max == 0 || bsp.nodes.is_empty() {
         return 0;

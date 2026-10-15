@@ -33,14 +33,14 @@ fn k24_b0_states() {
     // state 4: a noise each second
     b.f_38 = 2.0;
     for k in 0..120 {
-        b.ee_sub_17a7f8(false, 2.0 + k as f32 * DT);
+        b.ee_sub_17a7f8(false, 2.0 + k as f32 * DT, 0, &mut sly2_recomp::engine::classes::NullHost);
     }
     assert_eq!(b.noises, 1);
     // 3 (knocked) ends at ground contact only
     b.ee_sub_17a8c8(3, 5.0);
-    b.ee_sub_17a7f8(false, 5.1);
+    b.ee_sub_17a7f8(false, 5.1, 0, &mut sly2_recomp::engine::classes::NullHost);
     assert_eq!(b.f_30, 3);
-    b.ee_sub_17a7f8(true, 5.2);
+    b.ee_sub_17a7f8(true, 5.2, 0, &mut sly2_recomp::engine::classes::NullHost);
     assert_eq!((b.f_30, b.anim, b.w_32c), (-1, None, Some(0)));
     assert!(b.ee_sub_17a9c0());
     b.ee_sub_17a7b8(6.0);

@@ -113,6 +113,20 @@ pub fn alo_bone_refs(w: &World, i: usize) -> Vec<(BoneRef, Option<BoneRef>)> {
 /// objects with an ALO owner; None otherwise (null parent = identity, FUN_0022faa0).
 /// Used by BoneWorlds (FUN_0022faa0 after the re-parent) and the character rigs; alo_bone_refs keeps
 /// the load-time refs (the C3 attachment counts).
+///
+/// FUN_001f21b8 full body (684 bytes):
+///   bit 1,2: build cumulative bone matrix via FUN_0011c168 chain (+0x60 linked list +0xa0) or
+///            copy +0x40..+0x7c from first bone (bit 0x3c set).
+///   bit 4:   read position via vtable +0x10c(+0x108 offset).
+///   bit 8:   read scale via vtable +0x114(+0x110 offset).
+///   Then re-parent: for each of +0x50 entries in +0x54 array (0x100-byte records),
+///     if record +0xa0 is in old parent bone range [iVar8, iVar8+iVar7), set +0xa0 = param_3.
+///   Calls FUN_001a5900 (velocity update), FUN_0022faa0 (bone worlds refresh),
+///     vtable +0xec/+0xf4/+0x11c/+0x124 setters (position/rotation/scale),
+///     FUN_001f2468 + FUN_001f26a8 (attachment refresh), FUN_001f8668 (SO refresh if +0x10 ALO).
+///   The ECS port handles static parenting at load time; dynamic runtime re-parenting
+///   (velocity hooks, vtable position/rotation/scale setters, attachment + SO refresh)
+///   requires raw-pointer ALO layout not available in the Bevy ECS architecture.
 pub fn template_socket(w: &World, i: usize) -> Option<(BoneRef, Affine)> {
     let t = w.template_instances.iter().rev().find(|t| t.objects.contains(&i))?;
     let o = t.owner?;

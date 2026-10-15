@@ -102,6 +102,9 @@ impl ClassHost for K24Host<'_> {
     fn vcall_1c(&mut self, obj: usize, a: i32, b: i32) {
         self.h.vcall_1c(obj, a, b)
     }
+    fn ee_sub_228170(&mut self, warp: u32) {
+        self.h.ee_sub_228170(warp)
+    }
     fn ee_sub_127db8(&mut self, obj: usize, id: i32, deep: i32) -> bool {
         self.h.ee_sub_127db8(obj, id, deep)
     }
@@ -563,6 +566,12 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_20ff70(&mut self, obj: usize, entries: &[[u32; 3]]) {
         self.h.ee_sub_20ff70(obj, entries)
+    }
+    fn k22_sma_20fff0(&mut self, ctx: u32, entry: &[u32; 4], mode: u32, owner: u32) -> u32 {
+        self.h.k22_sma_20fff0(ctx, entry, mode, owner)
+    }
+    fn k22_release_1e5410(&mut self, owner: u32) {
+        self.h.k22_release_1e5410(owner)
     }
     fn ee_sub_161f48_list(&mut self, obj: usize, entries: &[[u32; 2]]) {
         self.h.ee_sub_161f48_list(obj, entries)
@@ -1049,6 +1058,12 @@ impl ClassHost for K24Host<'_> {
     }
     fn k22_seq_action(&mut self, owner: u32, subj: u32, rec: &[u32; 20]) {
         self.h.k22_seq_action(owner, subj, rec)
+    }
+    fn k22_pose_143ee0(&mut self, subj: u32, oid: i32, flags: u32, idx: u32) {
+        self.h.k22_pose_143ee0(subj, oid, flags, idx)
+    }
+    fn k22_posing_144038(&mut self, subj: u32) -> bool {
+        self.h.k22_posing_144038(subj)
     }
     fn k22_po_switch(&mut self, po: u32) {
         self.h.k22_po_switch(po)

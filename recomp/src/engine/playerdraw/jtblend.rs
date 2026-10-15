@@ -21,7 +21,7 @@
 //! - FUN_00190520 (jump blend weights): w0 = a*b, w1 = a*(1-b), w2 = 1-a, a/b approach per jtbs
 //!   targets with FUN_0011d018 (SMP 0x2bf570 / 0x2bf580); time steered to L*(f+1)/2 at |svt| <= 3.
 //! Unported: kind-2 scalar blend channels (they drive no bone), the entry +0x10 root velocity
-//! (FUN_0020b868/FUN_001a0300 speed matching), the event time rescale (+0xd8 / +0xa4).
+//! (FUN_0020b868/FUN_001a0300 speed matching). The event time rescale (+0xd8 / +0xa4) is ported (ee_sub_1384c0).
 
 use super::{aseg_of, ee_sub_15e938_below, JtRig};
 use crate::engine::anim::aseg::{Aseg, EventData};
@@ -69,6 +69,10 @@ pub struct JtBlend {
     /// +0xd4
     pub select: i32,
     pub channels: Vec<JtBlendChannel>,
+    /// +0xa4 array (stride 0x10, float 0 = time): copy of the reference ASEG's timed events (+0xa0)
+    pub events: Vec<Option<f32>>,
+    /// +0xd8: reference ASEG (first entry with events 0x98 / 0xa8 / 0xa0): (+0x74 length, its +0xa4 times)
+    pub ev_ref: Option<(f32, Vec<Option<f32>>)>,
 }
 
 /// FUN_0012f990(aseg, id): time of the label event (list 1, kind 0xb, s32 id) or 0.
@@ -163,6 +167,15 @@ impl JtBlend {
         }
         for t in times.iter_mut() {
             *t *= self.length;
+        }
+        // event times (+0xa4) rescaled from the reference ASEG (+0xd8) to the new length
+        if let Some((rl, rt)) = &self.ev_ref {
+            let k = self.length / rl;
+            for (e, r) in self.events.iter_mut().zip(rt) {
+                if let (Some(e), Some(r)) = (e.as_mut(), r) {
+                    *e = k * r;
+                }
+            }
         }
         let blend = |tb: Option<usize>| BlendAseg {
             length: self.length,
@@ -266,7 +279,11 @@ pub fn ee_sub_137a30(w: &World, rig: &JtRig, asegs: &[Option<usize>], labels: &[
     for (i, e) in entries.iter_mut().enumerate() {
         e.weight = if i == first { 1.0 } else { 0.0 };
     }
-    let mut b = JtBlend { entries, tables: labels.iter().map(|l| vec![(0.0, 0.0); l.len()]).collect(), length: 1.0, select: -1, channels };
+    // FUN_00137a30: reference ASEG = first entry with events 0x98 / 0xa8 / 0xa0 (+0xd8), its +0xa0 list copied to +0xa4
+    let ref_a = asegs.iter().filter_map(|&o| o.and_then(|o| aseg_of(w, o))).find(|a| !a.events0.is_empty() || !a.events2.is_empty() || !a.events1.is_empty());
+    let events: Vec<Option<f32>> = ref_a.map(|a| a.events1.iter().map(|e| e.time).collect()).unwrap_or_default();
+    let ev_ref = ref_a.map(|a| (a.length, events.clone()));
+    let mut b = JtBlend { entries, tables: labels.iter().map(|l| vec![(0.0, 0.0); l.len()]).collect(), length: 1.0, select: -1, channels, events, ev_ref };
     b.ee_sub_1384c0(&mut []);
     Some(b)
 }

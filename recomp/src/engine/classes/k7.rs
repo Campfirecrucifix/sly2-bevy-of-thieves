@@ -217,6 +217,9 @@ impl C2d4f80 {
     pub fn ee_sub_1bead0(&mut self, o: u32, h: &mut dyn ClassHost) {
         if o != 0 {
             self.f_108.push(o);
+            // +0x15c = 1, +0x160 = 1 (part visibility/active flags)
+            h.obj_set_u32(o, 0x15c, 1);
+            h.obj_set_u32(o, 0x160, 1);
             h.vcall(o, 0x4c);
         }
     }

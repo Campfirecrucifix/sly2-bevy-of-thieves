@@ -21,6 +21,8 @@ use super::cm::*;
 use super::collide::{CmSegmentQuery, FUN_0014ea08};
 use super::math::*;
 use super::policy::{Cplcy, CplcyCtx, CplcySave, FUN_0014fcc8, FUN_0014fce8};
+use super::follow_track::{self, TrackCtx};
+use crate::engine::classes::q::q2mem::QMem;
 
 /// Follow parameters (0x90 bytes; default instance DAT_002c4120, a track supplies its own).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -249,6 +251,11 @@ pub trait FollowWorld: CmWorld + Send + Sync {
     }
     /// WP-P24: write back the track's +0x114 params entry (FUN_00220d40 works on it in place).
     fn set_track_params(&mut self, _pv: u32, _p: &FollowParams) {}
+    /// PART-3: EE object memory holding the track / focus objects (track modes 1|2 of 0x00221dd8; calls
+    /// route through `QMem::call`). None: the struct-side track subset only.
+    fn mem(&mut self) -> Option<&mut dyn QMem> {
+        None
+    }
 }
 
 /// No world: no collision, focus not a JT.
@@ -475,6 +482,114 @@ impl CplcyFollow {
     }
 }
 
+impl CplcyFollow {
+    /// 0x00221dd8 mode 4 with track bits 1|2: blend the auto-follow (ya, pa) towards the track point by the
+    /// weight w (1 no path/ring, 3 the JT's own +0x528 track, else the heading weight) and the gain f18
+    /// (focus speed (JT only, x 1/600 or 1/200) x params +0x68, raised by the +0x16c / +0x168 ramps);
+    /// may latch modes 1 / 2 (+0x3c) when the camera crosses a track point.
+    #[allow(clippy::too_many_arguments)]
+    fn track_blend(&mut self, x: &TrackCtx, vel: V3, yaw0: f32, pitch0: f32, ya: f32, pa: f32, ta: [f32; 3], tb: [f32; 3], clk: CmClock) -> (f32, f32) {
+        let jt = self.world.jt(self.pso).is_some();
+        let now = clk.t;
+        let mut w;
+        let mut use_b = false;
+        if x.path == 0 && x.ring == 0 {
+            w = 1.0;
+        } else {
+            let own = jt && self.world.mem().map(|m| m.r32(self.pso + 0x528)) == Some(x.t);
+            if own {
+                w = 3.0;
+            } else if self.mode == 1 {
+                w = 1.0;
+            } else if self.mode == 2 {
+                w = 1.0;
+                use_b = true;
+            } else if let Some(m) = self.world.mem() {
+                let (hw, b) = follow_track::heading_weight(m, x, self.pso);
+                w = hw;
+                use_b = b;
+            } else {
+                w = 1.0;
+            }
+        }
+        let (ty, tp) = if use_b { (tb[0], tb[1]) } else { (ta[0], ta[1]) };
+        let mut f18 = 0.0;
+        if jt {
+            let (a, b) = match self.world.mem() {
+                Some(m) => (m.r32(self.pso + 0x4cc), m.r32(self.pso + 0x4c8)),
+                None => (u32::MAX, 0),
+            };
+            let k = if a == u32::MAX || b != 0 { 0.0016666667 } else { 0.005 };
+            f18 = ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() * k).min(1.0);
+        }
+        f18 *= self.params.g_track;
+        if x.i108 != 0 {
+            let mut f22 = 0.0;
+            let a = now - (self.t_move + T_MOVE_GRACE);
+            let b = now - (self.t_manual + T_MANUAL_GRACE);
+            if 0.0 < x.f178 {
+                f22 = FUN_0011d948(a / x.f178, UNIT_RANGE) * FUN_0011d948(b / x.f178, UNIT_RANGE);
+            } else if 0.0 < a && 0.0 < b {
+                f22 = 1.0;
+            }
+            let f21 = x.f17c;
+            if f18 * w < f22 * f21 {
+                w = 1.0;
+                f18 = f22 * f21;
+            }
+        }
+        if x.i10c != 0 && !self.latched {
+            let r = if 0.0 < x.f170 { FUN_0011d948((now - x.t138) / x.f170, UNIT_RANGE) } else { 1.0 };
+            let f22 = r * x.f174;
+            if f18 * w < f22 {
+                w = 1.0;
+                f18 = f22;
+            }
+        }
+        let p = [SMP_TRACK[0] * f18, SMP_TRACK[1] * f18, SMP_TRACK[2], 0.0];
+        let mut ny = FUN_0011d2d0(yaw0, FUN_0011cf60(yaw0 + FUN_0011cf60(ty - yaw0)), clk.dt, &p);
+        let mut np = FUN_0011d2d0(pitch0, FUN_0011cf60(pitch0 + FUN_0011cf60(tp - pitch0)), clk.dt, &p);
+        if FUN_0011cf60(ty - ya).abs() < FUN_0011cf60(ty - ny).abs() {
+            ny = ya;
+        }
+        if FUN_0011cf60(tp - pa).abs() < FUN_0011cf60(tp - np).abs() {
+            np = pa;
+        }
+        let iw = 1.0 - w;
+        let yaw = FUN_0011cf60(yaw0 + iw * FUN_0011cf60(ya - yaw0) + w * FUN_0011cf60(ny - yaw0));
+        let pitch = FUN_0011cf60(pitch0 + iw * FUN_0011cf60(pa - pitch0) + w * FUN_0011cf60(np - pitch0));
+        if self.first || (x.path != 0 && x.path_e0 == 0 && 2 < x.path_e8) {
+            return (yaw, pitch);
+        }
+        const HALF_PI: f32 = 1.5707964;
+        let crossed = |prev: f32, cur: f32, now_: f32, t: f32| {
+            let a = FUN_0011cf60(prev - cur);
+            let d = FUN_0011cf60(now_ - t);
+            a * d <= 0.0 || d.abs() < 0.0001
+        };
+        if x.grf & 1 != 0
+            && crossed(self.yaw, self.prev[0], yaw, ta[0])
+            && FUN_0011cf60(yaw - ta[0]).abs() < HALF_PI
+            && crossed(self.pitch, self.prev[1], pitch, ta[1])
+            && FUN_0011cf60(pitch - ta[1]).abs() < HALF_PI
+        {
+            self.latched = true;
+            self.mode = 1;
+            return (yaw, pitch);
+        }
+        if x.grf & 2 != 0
+            && crossed(self.yaw, self.prev[2], yaw, tb[0])
+            && FUN_0011cf60(yaw - tb[0]).abs() < HALF_PI
+            && crossed(self.pitch, self.prev[3], pitch, tb[1])
+            && FUN_0011cf60(pitch - tb[1]).abs() < HALF_PI
+        {
+            self.mode = 2;
+            self.latched = true;
+        }
+        (yaw, pitch)
+    }
+}
+
 impl Cplcy for CplcyFollow {
     /// 0x00221a18 (pv == 0 path).
     fn activate(&mut self, cm: &mut Cm, pso: u32, pv: u32, clk: CmClock) {
@@ -530,15 +645,30 @@ impl Cplcy for CplcyFollow {
         self.FUN_002236e8(cm, pad.input_locked, clk);
         // WP-P24: iVar1 = +0x10 track: uVar7 = +0x164, params = the live +0x114 entry (ported: `simple`)
         let mut uvar7 = 4u32;
+        // PART-3: with the track object in EE memory: +0x164 bits, 0x00221ce8, 0x00220dd8(.., track)
+        let mut trk: Option<TrackCtx> = None;
+        let mut target_t = None;
         if self.track != 0 {
-            if let Some(t) = self.world.track(self.track) {
+            if let Some(m) = self.world.mem() {
+                let (x, f, tg) = follow_track::begin(m, self.track, &mut self.params, &cm.cpdefi);
+                uvar7 = x.grf;
+                target_t = Some((tg, f));
+                trk = Some(x);
+            } else if let Some(t) = self.world.track(self.track) {
                 self.params = t.params;
                 if t.simple() {
                     uvar7 = t.grf;
                 }
             }
         }
-        let target = FUN_00220dd8(&self.params, &cm.cpdefi);
+        let mut frame = None;
+        let target = match target_t {
+            Some((tg, f)) => {
+                frame = Some(f);
+                tg
+            }
+            None => FUN_00220dd8(&self.params, &cm.cpdefi),
+        };
         if let Some(j) = jt {
             if j.state == 2 {
                 let (mut p, mut v) = (cm.pos_adjust1, cm.v_adjust1);
@@ -548,9 +678,19 @@ impl Cplcy for CplcyFollow {
             }
         }
         let focus = add(target, cm.pos_adjust1);
+        if trk.is_some_and(|x| x.f190 != 0) {
+            cm.cpdefi.grfcpd[0] &= !1;
+        }
         let g = if cm.cpdefi.grfcpd[0] & 1 == 0 { self.params.g_follow } else { 0.0 };
         self.g_follow = FUN_0011d018(self.g_follow, g, clk.dt, &SMP_GAIN).0;
         self.t_move = self.t_move.max(cm.cpdefi.t_move_last);
+        if let (Some(x), Some(f)) = (trk.as_mut(), frame) {
+            if let Some(m) = self.world.mem() {
+                follow_track::angles(m, x, &f, focus, self.first, &mut self.track_yaw);
+                follow_track::end(m, f);
+            }
+        }
+        let (mut ta, mut tb) = trk.map(|x| (x.a, x.b)).unwrap_or(([0.0; 3], [0.0; 3]));
         if self.first {
             self.mode = 4;
         }
@@ -560,11 +700,18 @@ impl Cplcy for CplcyFollow {
                 self.yaw = f32::from_bits(cm.cut_p0);
                 let o = (self.params.y_offset * cm.y_scale).atan();
                 self.pitch = FUN_0011d948(f32::from_bits(cm.cut_p1) - o, PITCH_RANGE);
-            } else {
-                // (uVar7 & 3) == 0
+            } else if uvar7 & 3 == 0 {
                 self.mode = 4;
                 self.yaw = cm.cpdefi.rad_home;
                 self.pitch = self.params.pitch_range[0];
+            } else if uvar7 & 2 == 0 {
+                self.mode = 1;
+            } else if uvar7 & 1 == 0 {
+                self.mode = 2;
+            } else {
+                let a = FUN_0011cf60(ta[0] - cm.cpdefi.rad_home);
+                let b = FUN_0011cf60(tb[0] - cm.cpdefi.rad_home);
+                self.mode = if a.abs() < b.abs() { 1 } else { 2 };
             }
             self.t_move = clk.t;
             self.t_manual = clk.t - T_MANUAL_GRACE;
@@ -573,11 +720,14 @@ impl Cplcy for CplcyFollow {
         if m & uvar7 == 0 && 0 < self.mode && self.mode < 3 {
             self.mode = 4;
         }
-        let vel = v3(cm.cpdefi.v_base);
+        let vel = match (trk, self.world.mem()) {
+            (Some(x), Some(m)) if x.f190 != 0 => follow_track::look_vel(m, &x, &cm.cpdefi),
+            _ => v3(cm.cpdefi.v_base),
+        };
         let yaw0 = self.yaw;
         let mut pitch = self.pitch;
-        let yaw;
-        let manual = self.reset || 0.0 < pad.right[2] || self.rate_yaw != 0.0 || self.rate_pitch != 0.0;
+        let mut yaw;
+        let manual = uvar7 & 4 != 0 && (self.reset || 0.0 < pad.right[2] || self.rate_yaw != 0.0 || self.rate_pitch != 0.0);
         if !manual {
             // LAB_002225d8, mode 4: auto follow.
             if self.mode == 4 {
@@ -587,7 +737,12 @@ impl Cplcy for CplcyFollow {
                 let dv = sub(focus, v3(cm.mat[3]));
                 let dl = len(dv);
                 let dir = if dl < 0.0001 { [1.0, 0.0, 0.0] } else { scale(dv, 1.0 / dl) };
-                let n = match cm.cpdefi.unk_3c.to_bits() {
+                // track +0x180 (!= -1) overrides CPDEFI +0x3c
+                let nm = match trk {
+                    Some(x) if x.f180 != u32::MAX => x.f180,
+                    _ => cm.cpdefi.unk_3c.to_bits(),
+                };
+                let n = match nm {
                     0 => cross([0.0, 0.0, 1.0], dir),
                     1 => dir,
                     // the original reads an uninitialised stack vector here
@@ -608,6 +763,11 @@ impl Cplcy for CplcyFollow {
                     let smp = [SMP_PITCH[0] * s, SMP_PITCH[1] * s, SMP_PITCH[2], 0.0];
                     let t = FUN_0011d948(pitch, self.params.pitch_range);
                     pitch = FUN_0011d2d0(pitch, t, clk.dt, &smp);
+                }
+                if let Some(x) = trk.filter(|_| uvar7 & 3 != 0) {
+                    let (y, p) = self.track_blend(&x, vel, yaw0, self.pitch, yaw, pitch, ta, tb, clk);
+                    yaw = y;
+                    pitch = p;
                 }
             } else {
                 yaw = yaw0;
@@ -666,10 +826,46 @@ impl Cplcy for CplcyFollow {
         // mode 4, (uVar7 & 3) == 0
         let (mut s_yaw, mut s_pitch, mut s_dist) = (yaw, pitch, 0.0);
         let (mut f30, mut f31) = (0.0, 0.0);
-        if self.mode == 4 {
+        if self.mode == 2 {
+            (s_yaw, s_pitch, s_dist) = (tb[0], tb[1], tb[2]);
+            f31 = -self.params.x_offset;
+            f30 = self.params.y_offset;
+        } else if self.mode == 1 {
+            (s_yaw, s_pitch, s_dist) = (ta[0], ta[1], ta[2]);
+            f31 = self.params.x_offset;
+            f30 = self.params.y_offset;
+        } else if self.mode == 4 && uvar7 & 3 == 0 {
             f30 = self.params.y_offset;
             s_dist = self.params.s_dist.abs();
             f31 = self.params.x_offset;
+        } else if self.mode == 4 {
+            // blend the two track distances / screen offsets by the yaw between the two track points
+            let w = if uvar7 & 2 == 0 {
+                1.0
+            } else if uvar7 & 1 == 0 {
+                0.0
+            } else {
+                let y = self.yaw;
+                const TAU: f32 = 6.2831855;
+                if y < ta[0] && tb[0] > y {
+                    if tb[0] < ta[0] {
+                        ta[0] -= TAU;
+                    } else {
+                        tb[0] -= TAU;
+                    }
+                } else if ta[0] < y && tb[0] < y {
+                    if tb[0] <= ta[0] {
+                        tb[0] += TAU;
+                    } else {
+                        ta[0] += TAU;
+                    }
+                }
+                let k = (y - tb[0]) / (ta[0] - tb[0]);
+                k * k * (3.0 - (k + k))
+            };
+            f30 = self.params.y_offset;
+            s_dist = w * ta[2] + (1.0 - w) * tb[2];
+            f31 = w * self.params.x_offset + (1.0 - w) * -self.params.x_offset;
         } else {
             s_yaw = 0.0;
             s_pitch = 0.0;
@@ -690,7 +886,9 @@ impl Cplcy for CplcyFollow {
         }
         let off = FUN_0011e208(s_yaw, s_pitch, s_dist);
         let mut want = add(focus, off);
-        if cm.cut == 0 {
+        if trk.is_some_and(|x| x.f18c != 0) {
+            // track +0x18c: no collision / cut placement
+        } else if cm.cut == 0 {
             want = FUN_0014f110(self.world.as_mut(), v3(self.pos), want, dt_real);
         } else {
             // WP-P17: cut -> FUN_00223a70 occlusion-free placement search
@@ -735,6 +933,7 @@ impl Cplcy for CplcyFollow {
         self.yaw = s_yaw;
         self.pitch = s_pitch;
         self.dist = s_dist;
+        self.prev = [ta[0], ta[1], tb[0], tb[1]];
         self.first = false;
     }
 

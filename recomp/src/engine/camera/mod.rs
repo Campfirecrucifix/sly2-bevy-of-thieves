@@ -4,6 +4,7 @@
 
 pub mod cm;
 pub mod follow;
+pub mod follow_track;
 pub mod collide;
 pub mod hud;
 pub mod looks;

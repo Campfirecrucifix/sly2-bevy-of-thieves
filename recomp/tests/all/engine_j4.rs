@@ -39,8 +39,8 @@ struct Ctx {
 
 fn host<'a>(c: &'a mut Ctx, t: f32, mission: i32, vars: Option<&'a SaveVars>, w: Option<&'a World>, table: Option<&'a LevelTable>, sched: &'a mut Schedule) -> PersistentHost<'a> {
     let base = GameSpliceHost { t, cm: None, emitters: &mut c.em, vars, data: &mut c.data };
-    let level = LevelSpliceHost { base, mission, aliases: &mut c.al, rumble: &mut c.rum };
-    PersistentHost { level, cm: None, clk: Default::default(), world: w, table, sched }
+    let level = LevelSpliceHost { base, mission, aliases: &mut c.al, rumble: &mut c.rum , spawn_lists: Box::leak(Box::new(sly2_recomp::engine::player::p25::SpawnLists::default()))};
+    PersistentHost { level, live_q: None, cm: None, clk: Default::default(), world: w, table, sched }
 }
 
 #[test]

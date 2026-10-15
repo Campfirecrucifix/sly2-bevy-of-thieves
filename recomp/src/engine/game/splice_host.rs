@@ -112,6 +112,7 @@ impl SpliceHost for GameSpliceHost<'_> {
 // ---------------------------------------------------------------- WP-J3: level host (running evaluation)
 
 use crate::engine::game::spawn::SpawnAliases;
+use crate::engine::player::p25::SpawnLists;
 use crate::engine::splice::value::Method;
 
 /// Basic handles of the engine globals some BIFs return (FUN_00129a10(ref, &global); payload = address,
@@ -124,6 +125,12 @@ pub const BASIC_137_GLOBAL: u32 = 0x003d_a0c0; // BIF 137 0x00125690
 pub const METHOD_ADD_ALIAS_189: u32 = 0x0010_b8f8;
 pub const METHOD_ADD_ALIAS_18A: u32 = 0x0010_b970;
 pub const METHOD_ADD_ALIAS_ARG: u32 = 0x0010_b9e8;
+/// CMethod ids of the WP-P25 spawn-list adders (FUN_0010ba70/bb38/bbe0 -> FUN_002288d8/228920/228958).
+pub const METHOD_SPAWN_REC: u32 = 0x0010_ba70;
+pub const METHOD_SPAWN_TASK: u32 = 0x0010_bb38;
+pub const METHOD_SPAWN_PAIR: u32 = 0x0010_bbe0;
+/// WP-SCR10: warp-volume task adder (FUN_0010b850 -> FUN_002284e0 -> FUN_00161f10 at +0x164/+0x168).
+pub const METHOD_WARP_TASK: u32 = 0x0010_b850;
 
 /// CMethod ref bound to object index `object` (the method table that hands these to scripts is not
 /// identified yet; the host binds them explicitly). nargs = FUN_00201360 second argument.
@@ -131,6 +138,8 @@ pub fn method_ref(object: u32, method_id: u32) -> Option<Ref> {
     let nargs = match method_id {
         METHOD_ADD_ALIAS_189 | METHOD_ADD_ALIAS_18A => 0,
         METHOD_ADD_ALIAS_ARG => 1,
+        METHOD_SPAWN_REC => 4,
+        METHOD_SPAWN_TASK | METHOD_SPAWN_PAIR | METHOD_WARP_TASK => 2,
         _ => return None,
     };
     Some(Ref::Method(std::rc::Rc::new(Method { object, method_id, nargs })))
@@ -143,6 +152,8 @@ pub struct LevelSpliceHost<'a> {
     /// DAT_003e1110 (FUN_00210a88), -1 = none
     pub mission: i32,
     pub aliases: &'a mut SpawnAliases,
+    /// WP-P25 class-0x2a run-time lists (filled by METHOD_SPAWN_REC/TASK/PAIR, drained by FUN_00228750)
+    pub spawn_lists: &'a mut SpawnLists,
     /// FUN_00187e28 requests (drained into `app::RumbleQueue`)
     pub rumble: &'a mut Vec<RumbleRequest>,
 }
@@ -157,6 +168,35 @@ impl SpliceHost for LevelSpliceHost<'_> {
             METHOD_ADD_ALIAS_18A => self.aliases.ee_sub_228988(obj, 0x18a),
             // 0x0010b9e8: FUN_00201360(.., 1 arg, kind 6) -> FUN_00228988(obj, arg)
             METHOD_ADD_ALIAS_ARG => self.aliases.ee_sub_228988(obj, args.first().map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?),
+            // 0x0010ba70 FUN_002288d8(obj, flag, oid, sub, state): kind 0x24 arg list is flag/oid/sub/state
+            METHOD_SPAWN_REC => {
+                let flag = args.first().map(|a| a.payload() as i64).ok_or(SpliceError::Arity)?;
+                let oid = args.get(1).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let sub = args.get(2).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let state = args.get(3).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let _ = self.spawn_lists.FUN_002288d8(obj, flag, oid, sub, state);
+            }
+            // 0x0010bb38 FUN_00228920(obj, oid, state)
+            METHOD_SPAWN_TASK => {
+                let oid = args.first().map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let state = args.get(1).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let _ = self.spawn_lists.FUN_00228920(obj, oid, state);
+            }
+            // 0x0010bbe0 FUN_00228958(obj, a, b)
+            METHOD_SPAWN_PAIR => {
+                let a = args.first().map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let b = args.get(1).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                self.spawn_lists.FUN_00228958(obj, a, b);
+            }
+            // WP-SCR10: 0x0010b850 FUN_002284e0(obj, oid, state) — warp-volume task adder
+            METHOD_WARP_TASK => {
+                let oid = args.first().map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let state = args.get(1).map(|a| a.payload() as i32).ok_or(SpliceError::Arity)?;
+                let l = self.spawn_lists.warp_tasks.entry(obj).or_default();
+                if l.len() < 4 { // max 4 entries, 1:1 with FUN_00161f10
+                    l.push([oid, state]);
+                }
+            }
             id => return Err(SpliceError::HostUnimplemented(format!("method {id:#x}"))),
         }
         Ok(Ref::Void)
