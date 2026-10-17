@@ -1,4 +1,4 @@
-# Sly 2 recomp — modding
+# Sly 2: Bevy of Thieves — modding
 
 Mods are folders under `mods/` next to `game.exe`. Nothing is unpacked or patched on disk: the game reads the
 original ISO and, for every file/level/texture/sound it loads, first asks the mod overlay

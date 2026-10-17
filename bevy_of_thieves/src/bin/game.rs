@@ -195,7 +195,7 @@ fn main() {
     let present_mode = if settings.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync };
     let mode = if settings.fullscreen { WindowMode::BorderlessFullscreen(MonitorSelection::Primary) } else { WindowMode::Windowed };
     let window = Window {
-        title: "Sly 2: Band of Thieves (recomp)".into(),
+        title: "Sly 2: Bevy of Thieves".into(),
         resolution: WindowResolution::new(settings.width, settings.height),
         present_mode,
         mode,

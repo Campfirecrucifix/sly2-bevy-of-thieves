@@ -1,26 +1,51 @@
-# Sly 2: Clockwerk Recompiled
+# 🦝 Sly 2: Bevy of Thieves
 
-*A PC port of Sly 2: Band of Thieves in Rust / Bevy — rebuilt piece by piece, like the gang stealing back Clockwerk's parts. EARLY ACCESS.*
+### *Sly, Rewritten.* A Rust + Bevy rewrite of *Sly 2: Band of Thieves*.
 
-> **⚠ Early Access / work in progress.** This is an unfinished recompilation. **Episode 1 is not fully
-> playable yet**: levels load and you can move Sly around, but many objects, missions, cutscenes and
-> menus are incomplete or missing. Expect bugs, crashes and visual glitches.
+> *"The Cooper Gang never steals from honest folk. They only steal from the PS2."*
 
-A fan-made PC port of the PlayStation 2 game *Sly 2: Band of Thieves* (NTSC-U, `SCUS_973.16`). The game
-code is being recompiled function by function into Rust; rendering, audio and input run on
-[Bevy](https://bevyengine.org/) 0.20.
+**Sly 2: Bevy of Thieves** is a fan-made, from-scratch **rewrite of Sly 2: Band of Thieves in Rust, running on
+the [Bevy](https://bevyengine.org/) engine**. It is not an emulator and it is not a recompiled binary wrapped
+in a PS2 runtime: the game's logic is ported 1:1 into Rust, function by function, and everything the PS2
+hardware used to do (rendering, audio, input, memory cards) is rebuilt natively on Bevy.
 
-**No game assets are included.** This repository contains only code. Every game file — levels, models,
-textures, sounds, videos, scripts and text — is read at run time from **your own disc image**.
+Think of it as **the Code Heist**: we cased the joint (decompiled the original), planned the job
+(Bentley-approved, of course), and now we're lifting the game out of the PS2 one function at a time and
+stashing it in a modern engine, without breaking any of the original's quirks on the way out.
 
-## Progress
+> **⚠ Early Access: the heist is still in progress.** **Episode 1 is not fully playable yet.** Levels load
+> and you can sneak Sly around, but many objects, jobs, cutscenes and menus are incomplete or missing.
+> Expect bugs, crashes and visual glitches. Carmelita is still on our tail.
 
-**60.4 %** of the game's EE code ported (3273 functions ported/replaced + 432 partial of 6362, as of 2026-10-13;
-partially ported functions count half).
+**No game assets are included.** This repository is pure code, no loot. Every game file (levels, models,
+textures, sounds, videos, scripts and text) is read at run time from **your own disc image**.
 
-**Playable: 69 %** of the Episode 1 release checklist passes (boot -> title -> New Game -> prologue -> Episode 1
-hub, pickpocketing, save/load, controller + keyboard work; missions, guard combat and respawn are still being
-finished). Expect bugs.
+## The Job So Far (progress)
+
+As of 2026-10-15:
+
+| Metric | | What it means |
+|---|---|---|
+| **Ported** | **97.0 %** | Share of the original game's EE functions rewritten in Rust (6362 total; partial ports count half) |
+| **Wired** | **22.1 %** | Share of that ported code hooked into the running game |
+| **Playable** | **78 %** | Episode 1 release checklist items that pass |
+
+## Why a rewrite, not a recompile?
+
+PS2 "recomps" translate the original machine code into C/C++ automatically and run it on a layer that imitates
+PS2 hardware. That's fast to make, but the game still renders through an imitation PS2 graphics chip.
+
+Bevy of Thieves goes further: the game's real 3D scene, lights, camera and data live in a modern engine.
+That's what makes these possible:
+
+- **Global ray-traced illumination** (Bevy Solari) as a normal graphics option. Raster lighting is the
+  default and always available. Requires a build with feature `rt` and a ray-tracing capable GPU.
+- **Ultrawide up to 32:9**: Hor+ (constant vertical FOV, wider view, no stretching); the HUD stays centred in
+  a 16:9 safe area. More room to spot the guards before they spot you.
+- **Easy mods**: `mods/<name>/` folders overlay disc files, levels, textures and sounds by path, with a load
+  order file. See [bevy_of_thieves/mods/README.md](bevy_of_thieves/mods/README.md). Every good thief needs a
+  disguise.
+- Keyboard + mouse and gamepads, fully rebindable (`controls.toml`).
 
 ## What works
 
@@ -29,22 +54,13 @@ finished). Expect bugs.
 - Boot flow: intro movie (PSS/MPEG-2 playback), title screen, menus, save/load (memory card files on disk).
 - All 43 level files load: geometry, textures/CLUTs, lighting, Sly's animations and movement, camera,
   collision, guards and many object classes, HUD, text/fonts, sound effects and music.
-- The Splice script VM with its built-in functions drives level logic.
+- Character switching (Sly / Bentley / Murray, rebindable).
+- The Splice script VM and its built-in functions drive level logic.
 
-Not yet: complete missions/jobs, many object behaviours, several cutscenes and menus — see `recomp/` source
-and its tests for the current scope.
+Still being cracked: complete jobs, many object behaviours, several cutscenes and menus. See
+`bevy_of_thieves/` and its tests for the current scope.
 
-## Features
-
-- **Global ray-traced illumination** (Bevy Solari) as a normal graphics option; raster lighting is the
-  default and always available. Requires a build with feature `rt` and a ray-tracing capable GPU.
-- **Ultrawide up to 32:9**: Hor+ (constant vertical FOV, wider view, no stretching); HUD stays centred in a
-  16:9 safe area.
-- **Mods**: `mods/<name>/` folders overlay disc files, levels, textures and sounds by path, with a load order
-  file — see [recomp/mods/README.md](recomp/mods/README.md).
-- Keyboard + mouse and gamepads, rebindable (`controls.toml`).
-
-## Requirements
+## Requirements (your heist kit)
 
 - Rust (stable, edition 2024) with `cargo`.
 - A disc image of *Sly 2: Band of Thieves* (USA, `SCUS-97316`) dumped from **your own** disc:
@@ -54,12 +70,12 @@ and its tests for the current scope.
 ## Build
 
 ```sh
-cd recomp
+cd bevy_of_thieves
 cargo build --release --features game        # raster only
 cargo build --release --features game,rt     # + ray-traced global illumination option
 ```
 
-The executable is `recomp/target/release/game(.exe)`.
+The executable is `bevy_of_thieves/target/release/game(.exe)`.
 
 ## Run
 
@@ -67,11 +83,11 @@ The executable is `recomp/target/release/game(.exe)`.
 cargo run --release --features game --bin game -- "path/to/Sly 2 - Band of Thieves (USA).iso"
 ```
 
-ISO lookup order: command-line path, else `iso` in `settings.toml`, else
+ISO lookup order: the command-line path, then `iso` in `settings.toml`, then
 `Sly 2 - Band of Thieves (USA).iso` next to the executable.
 
 Developer options: `--level <static-table row>` / `--table <level-table row>` start directly in a level;
-`--width W --height H` window size; `--screenshot out.png --frames N` capture a frame and exit.
+`--width W --height H` set the window size; `--screenshot out.png --frames N` capture a frame and exit.
 
 ## Controls (defaults)
 
@@ -94,32 +110,36 @@ Rebind in `controls.toml` next to the executable (written with the defaults on f
 ## Settings
 
 `settings.toml` next to the executable (written on first run; see
-[recomp/settings.example.toml](recomp/settings.example.toml)): ISO path, resolution, fullscreen, vsync,
-Hor+, `global_illumination = "off" | "raytraced"`, ink outlines, volumes and the mod load order.
-Most options are also in the in-game options menu.
+[bevy_of_thieves/settings.example.toml](bevy_of_thieves/settings.example.toml)): ISO path, resolution,
+fullscreen, vsync, Hor+, `global_illumination = "off" | "raytraced"`, ink outlines, volumes and the mod load
+order. Most options are also in the in-game options menu.
 
 ## Tests
 
 ```sh
-cd recomp
+cd bevy_of_thieves
 cargo test --release                         # fast tier
 cargo test --release -- --include-ignored    # full tier (heavy all-level tests)
 ```
 
-All tests are modules of one test binary (`tests/all/`, shared helpers in `tests/all/common.rs`).
+All tests are modules of one test binary (`tests/all/`, with shared helpers in `tests/all/common.rs`).
 
 Most tests read the game from `Sly 2 - Band of Thieves (USA).iso` in the repository root (next to
-`recomp/`); put your ISO (or a link to it) there. The ISO is git-ignored.
+`bevy_of_thieves/`); put your ISO (or a link to it) there. The ISO is git-ignored.
 
-## Contributing
+## Join the Gang (contributing)
 
-Issues and pull requests are welcome. Ground rules:
+Issues and pull requests are welcome. Ground rules for the crew:
 
-- Port game code 1:1 (same behaviour and quirks), named after the original function and commented with
-  its address (`// 0x001b3bd0`); platform code (GS/VU/DMA, IOP, PS2 SDK) is replaced by Bevy equivalents.
-- Never commit game data: no ISO, ELF, extracted files, decompiled code or copyrighted screenshots.
-- `cargo build --release --features game` and `cargo test --release` must pass. Do not run `cargo fmt`
-  on the whole tree (generated tables are hand-formatted).
+- Port game code 1:1 (same behaviour and quirks), named after the original function and commented with its
+  address (`// 0x001b3bd0`). PS2 platform code (GS/VU/DMA, IOP, PS2 SDK) is replaced by Bevy equivalents.
+- Never commit game data: no ISO, ELF, extracted files, decompiled code or copyrighted screenshots. We're
+  master thieves, not pirates.
+- `cargo build --release --features game` and `cargo test --release` must pass. Do not run `cargo fmt` on the
+  whole tree (some tables are hand-formatted).
+
+Note: the library crate is still named `sly2_recomp` internally (from the project's early days); the package
+is `bevy_of_thieves`. A full internal rename is planned.
 
 ## License
 

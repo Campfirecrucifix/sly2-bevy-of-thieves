@@ -1176,6 +1176,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
 
 [[package]]
+name = "bevy_of_thieves"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_app",
+ "bevy_ecs",
+ "log",
+ "na_mpeg2_decoder",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sly2_db",
+]
+
+[[package]]
 name = "bevy_pbr"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4574,22 +4590,6 @@ dependencies = [
 [[package]]
 name = "sly2_db"
 version = "0.1.0"
-
-[[package]]
-name = "sly2_recomp"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_app",
- "bevy_ecs",
- "log",
- "na_mpeg2_decoder",
- "png",
- "serde",
- "serde_json",
- "sha2",
- "sly2_db",
-]
 
 [[package]]
 name = "smallvec"

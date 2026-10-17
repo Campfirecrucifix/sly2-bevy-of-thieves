@@ -1,9 +1,9 @@
-/recomp/target/
+/bevy_of_thieves/target/
 *.iso
 *.ISO
-/recomp/settings.toml
-/recomp/controls.toml
-/recomp/mods/*/
-/recomp/mods/load_order.txt
-/recomp/shots/
+/bevy_of_thieves/settings.toml
+/bevy_of_thieves/controls.toml
+/bevy_of_thieves/mods/*/
+/bevy_of_thieves/mods/load_order.txt
+/bevy_of_thieves/shots/
 BASCUS-97316*/

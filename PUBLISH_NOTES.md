@@ -2,13 +2,16 @@
 
 Created from the development repo (`Sly 2/recomp`) on 2026-10-13 as a single commit with no history.
 
+Renamed 2026-10-16: project "Sly 2: Bevy of Thieves" (repo sly2-bevy-of-thieves, crate package `bevy_of_thieves`,
+library crate name still `sly2_recomp`). The public folder `bevy_of_thieves/` = dev `Sly 2/recomp/`.
+
 ## Contents
 
-- `recomp/src/` — full crate source (unchanged copy; re-synced from dev for WP-PUB2).
-- `recomp/vendor/sly2_db/` — only `final_build.rs` of the dev analysis crate (graphics settings, Hor+, mod
+- `bevy_of_thieves/src/` — full crate source (unchanged copy; re-synced from dev for WP-PUB2).
+- `bevy_of_thieves/vendor/sly2_db/` — only `final_build.rs` of the dev analysis crate (graphics settings, Hor+, mod
   load order). The database / decompiler / extraction modules and their dependencies (rusqlite, regex, ...)
   are not published; `Cargo.lock` was pruned accordingly by cargo.
-- `recomp/tests/all/` (single test binary since dev WP-T1; refreshed by WP-INT1) — 108 of the 147 dev test
+- `bevy_of_thieves/tests/all/` (single test binary since dev WP-T1; refreshed by WP-INT1) — 108 of the 147 dev test
   modules: the ones that need only the user's ISO. Generated from dev `tests/all` by a script: hard-coded
   `C:/Users/...` paths -> `CARGO_MANIFEST_DIR/..`; `C:/Temp` dumps -> OS temp dir; repo-root detection checks
   the ISO; every module-local DB-based `levels()` and `common::levels()` -> the boot level's level table
@@ -17,7 +20,7 @@ Created from the development repo (`Sly 2/recomp`) on 2026-10-13 as a single com
   and `q2` (needs the table below). Full tier (`-- --include-ignored`): 41 + 649 tests pass.
 - `src/engine/classes/q/q2_thunks.rs` (dev WP-Q2: 176 thunk -> callee pairs, used only by the dev test q2)
   is NOT published (embedded game table; the game reads thunk callees from SCUS_973.16 via exe_scan).
-- `recomp/mods/README.md` (= dev `MODDING.md`: overlay paths + load order), `recomp/settings.example.toml`.
+- `bevy_of_thieves/mods/README.md` (= dev `MODDING.md`: overlay paths + load order), `bevy_of_thieves/settings.example.toml`.
 - Not included: ISO/ELF/extracted files, `db/*.sqlite`, decompiled C, Ghidra projects, tools, screenshots,
   dev notes (ENGINE_PORT.md / PROGRESS.md / work-package briefs).
 
@@ -50,7 +53,7 @@ decompiled C bodies). Two comments mention dev-machine spec paths (`src/engine/p
 
 ## Screenshots — kept OUT (candidates for docs/, ask the user)
 
-Candidates from dev `recomp/shots/` (game art = copyrighted; include only a few small ones if wanted):
+Candidates from dev `bevy_of_thieves/shots/` (game art = copyrighted; include only a few small ones if wanted):
 - `A14/theater_5120.png` (130 KB, 32:9) and `A14/theater_1920.png` (46 KB)
 - `R2/t10_off.png` (375 KB) vs `R2/t10_raytraced.png` (1.8 MB) — raster vs ray-traced
 - `C6/t20_raster_5120x1440.png` — 32:9 Hor+ in a level

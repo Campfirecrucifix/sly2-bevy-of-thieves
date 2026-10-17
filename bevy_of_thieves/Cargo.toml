@@ -1,5 +1,8 @@
 [package]
-name = "sly2_recomp"
+name = "bevy_of_thieves"
+description = "Sly 2: Bevy of Thieves - a Rust/Bevy rewrite of Sly 2: Band of Thieves (PS2)"
+license = "MIT"
+repository = "https://github.com/Campfirecrucifix/sly2-bevy-of-thieves"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,6 +25,11 @@ features = ["default_app", "bevy_gilrs", "3d_bevy_render", "bevy_sprite", "bevy_
 game = ["dep:bevy"]
 # Global ray-traced illumination (Bevy Solari). Normal graphics option at runtime; feature only gates the dependency.
 rt = ["game", "bevy/bevy_solari"]
+
+[lib]
+# Library keeps its old crate name so existing `use sly2_recomp::...` paths stay valid.
+name = "sly2_recomp"
+path = "src/lib.rs"
 
 [[bin]]
 name = "game"
