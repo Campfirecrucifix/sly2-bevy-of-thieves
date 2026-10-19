@@ -22,13 +22,36 @@ textures, sounds, videos, scripts and text) is read at run time from **your own 
 
 ## The Job So Far (progress)
 
-As of 2026-10-15:
+As of 2026-10-19:
 
 | Metric | | What it means |
 |---|---|---|
-| **Ported** | **97.0 %** | Share of the original game's EE functions rewritten in Rust (6362 total; partial ports count half) |
-| **Wired** | **22.1 %** | Share of that ported code hooked into the running game |
-| **Playable** | **78 %** | Episode 1 release checklist items that pass |
+| **Ported** | **97.7 %** | Share of the original game's EE functions rewritten in Rust (6362 total; partial ports count half) |
+| **Wired** | **68.0 %** | Share of that ported code hooked into the running game |
+| **Playable** | **88 %** | Episode 1 release checklist: 12 of 16 items pass, the other 4 (later mission rows) are partial |
+
+## Screenshots
+
+Original (PCSX2) on the left, then Bevy of Thieves with raster lighting, then with ray-traced global
+illumination. Each set is captured from the same savestate, so the camera and Sly's position match.
+Work in progress: the HUD is still a placeholder, and some effects and poses don't match yet.
+
+**Episode 1: Paris, Hotel Vulgaire**
+![Episode 1 hub: original vs raster vs ray traced](docs/screenshots/ep1_hub_compare.jpg)
+
+**Episode 3: hub**
+![Episode 3 hub: original vs raster vs ray traced](docs/screenshots/ep3_hub_compare.jpg)
+
+**Episode 4: hub**
+![Episode 4 hub: original vs raster vs ray traced](docs/screenshots/ep4_hub_compare.jpg)
+
+**Episode 1: cellar**
+![Episode 1 cellar: original vs raster vs ray traced](docs/screenshots/ep1_cellar_compare.jpg)
+
+**32:9 ultrawide (5120x1440), ray traced**: a wider view, not stretched
+![Episode 1 hub at 32:9, ray traced](docs/screenshots/ep1_hub_32x9_raytraced.jpg)
+
+![Episode 4 hub at 32:9](docs/screenshots/ep4_hub_32x9.jpg)
 
 ## Why a rewrite, not a recompile?
 
