@@ -17,10 +17,6 @@
 > emulator captures. If you want to continue the idea, a **matching decompilation** (like the Sly 1 decomp)
 > or a **static recompilation** (like the N64 recomp projects) is probably the better-value path.
 >
-> **Dev notes, work logs and recovered function names** (1,600 names matched from the March 2004 prototype,
-> type layouts, Ghidra scripts, per-lane handoff logs) are in the companion archive
-> [sly2-rust-port](https://github.com/Campfirecrucifix/sly2-rust-port).
->
 > Everything below is the README as it stood during development.
 
 ### *Sly, Rewritten.* A Rust + Bevy rewrite of *Sly 2: Band of Thieves*.
