@@ -176,7 +176,14 @@ fn vel(jt: &Jt) -> V3 {
     vadd(jt.phys.v, jt.phys.imp_lin)
 }
 /// vt+0x11c SetVelocity (same mechanism as mod.rs `set_velocity`).
+/// FEEL R91: delegates to mod.rs `set_velocity` (direct +v write since R61); the impulse path moved the body only
+/// J dt/2 on the launch frame (0x1f9e70), so every P5 launch (jtbs 0x15 hop, ...) flew v dt/2 low (27.8 at 30 fps)
+/// (live table-2 hop to 4449: arrived 43 under the top and fell). SLY2_FEEL_R91SETV=0 = old (impulse).
 fn set_vel(jt: &mut Jt, v: V3) {
+    if std::env::var("SLY2_FEEL_R91SETV").map_or(true, |x| x != "0") {
+        jt.set_velocity(v);
+        return;
+    }
     jt.phys.imp_lin = vsub(v, jt.phys.v);
 }
 /// vt+0x124 set angular velocity (through the pending angular impulse, consumed by 0x1f9e70).
@@ -388,6 +395,8 @@ pub struct SafePoint {
     pub obj_class: Option<i32>,
     /// member != 0
     pub member: bool,
+    /// FEEL R92: the dest object (+0 obj) when it is a pick target (`Jt::p5_targets` id), None = no object
+    pub obj: Option<usize>,
 }
 
 /// 8-entry blend (jt+0x13d0 / 0x1ac0 / 0x1e10; 0x20 B per entry: +0 weight, +4 enable, +0x10 velocity).
@@ -535,6 +544,9 @@ pub struct P5 {
     pub deadline_1f0: f32,
     /// jmp+0x1d8
     pub f_1d8: bool,
+    /// FEEL R92: FUN_0019b110(jmp, obj) forced pick requested by the jtbs 0x15 body (run by the caller with the
+    /// collision world)
+    pub pick_15: Option<usize>,
 }
 impl Default for P5 {
     fn default() -> Self {
@@ -584,6 +596,7 @@ impl Default for P5 {
             dest_490: None,
             deadline_1f0: 0.0,
             f_1d8: false,
+            pick_15: None,
         }
     }
 }
@@ -607,6 +620,7 @@ pub fn FUN_0018c250_p5(jt: &mut Jt, st: &mut P5, w: &P5World, jts: i32, jtbs: i3
         return;
     }
     let old = jt.jts;
+    jt.last_target_18c250(jts);
     if jts != old {
         FUN_0018c250_exit(jt, st, w, old, jts, jtbs, &mut *anim);
         FUN_0018c250_enter(jt, st, w, old, jts, dt, anim);
@@ -1450,6 +1464,7 @@ fn FUN_00197500_15(jt: &mut Jt, st: &mut P5, _w: &P5World, anim: &mut dyn JtAnim
     if d.member && st.deadline_1f0 < t + 0.25 && attack {
         jt.FUN_00195a00(0xb, 0, anim);
         rec(jt, super::CALL_AIR_ATTACK, 1); // FUN_0019b110(jmp, obj)
+        st.pick_15 = d.obj; // FEEL R92: run by Jt::FUN_00197500 (needs the collision world)
         return;
     }
     let v = vel(jt);
@@ -1499,7 +1514,11 @@ pub fn FUN_0019a098(jt: &Jt, t_entered: f32, rate: Option<&mut f32>, normals: &[
         }
         *r = t;
     }
-    if jt.ground_nz.is_some() {
+    // FEEL R82: +0x208 is the kind-0xe motor record (0x204768), not any contact: the port gated on `ground_nz` (best
+    // of ALL contacts), so a JT wedged mid-air on steep faces (no motor record, contacts != 0) never ran the test and
+    // hung in the fall pose (USER PLAYTEST 6, canal). SLY2_FEEL_R82STUCK=0 = old gate.
+    let gate = if std::env::var("SLY2_FEEL_R82STUCK").is_ok_and(|v| v == "0") { jt.ground_nz.is_some() } else { jt.rec_208 };
+    if gate {
         return false;
     }
     let n = normals.len();
@@ -1534,7 +1553,7 @@ pub fn FUN_0019a098(jt: &Jt, t_entered: f32, rate: Option<&mut f32>, normals: &[
 /// stays), else every entry shifts down one; index 0 becomes `p`. REPLACED: the entry's object (+8, +0 its
 /// +4 word, SO +0x10 bit 51) and time (+0xc = DAT_002dded0) are not kept (`obj_class` = the object stand-in).
 pub fn FUN_0019feb0(list: &mut Vec<SafePoint>, obj: Option<i32>, p: V3) {
-    let new = SafePoint { pos: p, obj_class: obj, member: false };
+    let new = SafePoint { pos: p, obj_class: obj, member: false, obj: None };
     let hit = (1..list.len()).find(|&k| list[k].obj_class == obj && vlen(vsub(p, list[k].pos)) < 50.0);
     match hit {
         Some(k) => {
@@ -1561,7 +1580,7 @@ pub fn FUN_0019faf8(jt: &Jt, st: &P5) -> SafePoint {
         .iter()
         .copied()
         .min_by(|a, b| vlen(vsub(a.pos, p)).total_cmp(&vlen(vsub(b.pos, p))))
-        .unwrap_or(SafePoint { pos: vadd(p, jt.att.grab), obj_class: None, member: false })
+        .unwrap_or(SafePoint { pos: vadd(p, jt.att.grab), obj_class: None, member: false, obj: None })
 }
 
 /// What 0x19f590 did.
@@ -1605,8 +1624,48 @@ pub fn FUN_0019f590(jt: &mut Jt, st: &mut P5, _w: &P5World, dest: Option<SafePoi
 }
 
 /// 0x0019f540(jt, pos) 1:1: dest = {0, 0, pos}; 0x19f590.
+/// FEEL R91: the target-less point goes through 0x19f3f8 (param_3[1] == 0: point - jt+0x240) and 0x195fb8 case 0x15
+/// aims d = that - SO position (jt+0x58 +0x70); in the port frame (pos = SO - 45, +0x240 = (0,0,-75)) Sly aims 30 above
+/// the point (rec_ep1b intro hop apex/landing +47/+29 over the port). Bentley / Murray (PO frame) unchanged.
+/// SLY2_FEEL_R91HOP=0 = old (aims at the point).
 pub fn FUN_0019f540(jt: &mut Jt, st: &mut P5, w: &P5World, pos: V3, anim: &mut dyn JtAnim) -> Warp {
-    FUN_0019f590(jt, st, w, Some(SafePoint { pos, obj_class: None, member: false }), anim)
+    let pos = if jt.po_move.is_none() && std::env::var("SLY2_FEEL_R91HOP").map_or(true, |v| v != "0") {
+        vsub(vsub(pos, [0.0, 0.0, super::JT_K248]), jt.hang_so_ofs())
+    } else {
+        pos
+    };
+    FUN_0019f590(jt, st, w, Some(SafePoint { pos, obj_class: None, member: false, obj: None }), anim)
+}
+
+/// FEEL R92: FUN_001e1e30 case 0x2a on a class-0xb pipe target (text_001e0000.c:2321): dest = {t, ext = t+0x190,
+/// pos[0] = ext vt+0x14} with vt+0x14 = FUN_001c3958 (vtable 0x2d56b8: s = FUN_001e6f60(path, FUN_001a62e8(jt)) length,
+/// clamped to [100, len - 35] on an open path); the 0x15 aim 0x19f3f8 (member) = vt+0x1c FUN_001c3a08 = path(s) +
+/// DAT_002c0d04 (-50) * FUN_001c3500 frame row 0, minus the SO position (port: - hang_so_ofs). At deadline - 0.25
+/// the 0x15 body runs FUN_0019b110(jmp, t) (the pipe grab). None = `obj` is no PathBody pick target.
+pub fn FUN_0019f590_pipe(jt: &mut Jt, st: &mut P5, w: &P5World, obj: usize, anim: &mut dyn JtAnim) -> Option<Warp> {
+    use super::p5_target::TargetGeom;
+    let tgt = jt.p5_targets.iter().find(|t| t.obj.id == obj);
+    let axis = tgt.and_then(|t| t.attach.as_ref()).map_or([1.0, 0.0, 0.0], |a| a.axis_1c0);
+    let path = tgt.and_then(|t| match &t.obj.geom {
+        TargetGeom::PathBody { path } => Some(path.clone()),
+        _ => None,
+    })?;
+    let so = vadd(jt.phys.pos, jt.hang_so_ofs());
+    let mut s = path.FUN_001e6f60(so).l;
+    if !path.looped {
+        let hi = path.FUN_001e6648() - 35.0;
+        s = if s < 100.0 { 100.0 } else if s <= hi { s } else { hi };
+    }
+    let (pp, _) = path.FUN_001e6f10(s);
+    // FEEL R95: the 1:1 FUN_001c3500 frame (pipe +0x1c0 axis); SLY2_FEEL_R95FRAME=0 = old (row0 = horizontal toward)
+    let fr = super::p14::r95_frame_on()
+        .then(|| super::p14::frame_1c3500(&path, s, true, axis))
+        .flatten()
+        .unwrap_or_else(|| super::p14::path_frame(&path, s, false, vsub(pp, so), [jt.yaw.cos(), jt.yaw.sin(), 0.0]));
+    let pt = vadd(pp, vscale(fr[0], -50.0));
+    if std::env::var_os("SLY2_K22DBG").is_some() { eprintln!("R93DBG pipe so {so:?} s {s} len {} pp {pp:?} row0 {:?} pt {pt:?} spline {} l {:?} pts0 {:?} {:?}", path.FUN_001e6648(), fr[0], path.spline, path.l, path.FUN_001e6f10(0.0).0, path.l.iter().map(|&l| path.FUN_001e6f10(l).0).collect::<Vec<_>>()); }
+    let pos = vsub(pt, jt.hang_so_ofs());
+    Some(FUN_0019f590(jt, st, w, Some(SafePoint { pos, obj_class: Some(0xb), member: true, obj: Some(obj) }), anim))
 }
 
 /// 0x00195fb8 entry of jtbs 0x15 (1:1 except 0x19f3f8 = static point): flight time
@@ -1621,6 +1680,7 @@ pub fn FUN_00195fb8_enter_15(jt: &mut Jt, st: &mut P5) -> f32 {
     let v = vsub(vscale(d, 1.0 / tf), vscale(g, 0.5 * tf));
     set_vel(jt, v);
     st.deadline_1f0 = jt.t + tf;
+    if std::env::var_os("SLY2_K22DBG").is_some() { eprintln!("R93DBG enter15 t {} pos {:?} dest {:?} cls {:?} tf {tf} g {:?} v {v:?}", jt.t, jt.phys.pos, d0.pos, d0.obj_class, g); }
     rec(jt, 0x0012de58, 5);
     rec(jt, 0x001f6860, 1);
     jt.v_target = ZERO;

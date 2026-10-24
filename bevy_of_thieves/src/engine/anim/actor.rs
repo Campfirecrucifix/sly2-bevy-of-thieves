@@ -114,6 +114,16 @@ impl ActorPose {
         self.bones.iter().map(|b| b.world).collect()
     }
 
+    /// ANIM-ALL R15: the world walk from `root` over the current locals (no segment evaluation), after
+    /// locals were replaced (guest pose, `npcdraw::plugin::guest_locals_overlay`).
+    pub fn recompose(&mut self, root: &Mat4) {
+        let locals: Vec<Mat4> = self.bones.iter().map(|b| b.local).collect();
+        let parents: Vec<Option<usize>> = self.bones.iter().map(|b| b.parent).collect();
+        for (b, w) in self.bones.iter_mut().zip(world_matrices(root, &locals, &parents)) {
+            b.world = w;
+        }
+    }
+
     /// FUN_0022cdc0 local velocity of bone `i`.
     pub fn local_velocity(&self, i: usize) -> Mat4 {
         ee_sub_22cdc0(&self.bones, i)

@@ -67,6 +67,9 @@ impl C2ce4d0 {
                 continue;
             }
             let sd = match p.field {
+                // ANIM-ALL R63: 589 = descriptor +0 (sound id; PCSX2 EP1 060 copies of 3901 under 120664: +0xf0
+                // {0xdb, 195.0, 2000.0, 1.0, 0})
+                589 => 0,
                 590 => 2,
                 591 => 1,
                 592 => 3,
@@ -79,8 +82,10 @@ impl C2ce4d0 {
                     continue;
                 }
             };
-            if let Some(w) = words.first() {
-                self.f_f0.get_or_insert([0; 5])[sd] = *w;
+            // ANIM-ALL R63: 589 is a 2-byte (u16) field
+            let v = words.first().copied().or_else(|| (b.len() == 2).then(|| u16::from_le_bytes([b[0], b[1]]) as u32));
+            if let Some(w) = v {
+                self.f_f0.get_or_insert([0; 5])[sd] = w;
             }
         }
     }

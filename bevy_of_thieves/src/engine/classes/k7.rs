@@ -312,6 +312,7 @@ impl ClassSet {
                 continue;
             }
             let props = w.objects.get(o.clone_of.unwrap_or(i)).and_then(object_props).unwrap_or(&[]);
+            let props = &*super::props_ov(w, i, props);
             let k = match o.class {
                 5 => {
                     let mut c = C2dc070::default();
@@ -352,11 +353,23 @@ impl ClassSet {
             if let Inst::K7(K7::C2d4f80(c)) = x {
                 c.resolve(*i, h);
             }
+            // TAKEN BY MURRAY: class 18 slot 22 FUN_0021d358 (world entry): FUN_001a6178, DAT_003e13b4 += this
+            if let Inst::K7(K7::C2db518(c)) = x {
+                h.base(0x1a6178, *i);
+                let o = *i as u32 + 1;
+                self.g.list(super::k10::L_3E13B4).push(o);
+                self.g.l3e13b4_e8.insert(o, c.f_e8 as u32);
+                self.g.l3e13b4_f4.insert(o, c.f_f4);
+            }
         }
     }
     /// K7 per frame: class 45 slot 18
     pub(super) fn frame_k7_classes(&mut self, h: &mut dyn ClassHost) {
         for (i, x) in &self.k7 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K7(K7::C2d4f80(c)) = x {
                 c.ee_sub_1bee60(*i, h);
             }

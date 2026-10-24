@@ -80,6 +80,18 @@ impl C2db8a0 {
     pub fn anchor(&self, obj: usize) -> u32 {
         if self.f_1b0 == 0 { me(obj) } else { self.f_1b0 }
     }
+    /// FUN_001a62e8(anchor). POOL1 r32: REPLACED: the pool copy moves by its class body (phys.pos) while its
+    /// subtree's world transforms stay at load, so the anchor is the copy position plus the child's offset from
+    /// its parent (copy orientation not applied)
+    pub fn anchor_pos(&self, obj: usize, own: [f32; 3], h: &mut dyn ClassHost) -> [f32; 3] {
+        let a = self.anchor(obj);
+        let par = h.parent_10(a);
+        let (pa, pp) = (h.ee_sub_1a62e8(a), if par != 0 { h.ee_sub_1a62e8(par) } else { [0.0; 3] });
+        if a == me(obj) {
+            return own;
+        }
+        [0, 1, 2].map(|k| own[k] + pa[k] - pp[k])
+    }
 }
 
 /// slot 6 FUN_002252e0: FUN_00223f70
@@ -106,7 +118,7 @@ pub fn ee_sub_225660(b: &mut C2c9810, obj: usize, s: i32, cx: &mut Cx) {
     }
     b.ee_sub_224ec8(obj, s, cx);
     if s == 5 {
-        let p = cx.h.ee_sub_1a62e8(e.anchor(obj));
+        let p = e.anchor_pos(obj, b.phys.pos, cx.h);
         // FUN_0015e9c8(0x3dd490, 0x105, 0x38, 0, 0x20, out)
         let mut best = GRAB_R;
         let mut g = 0;
@@ -150,7 +162,7 @@ pub fn ee_sub_225300(b: &mut C2c9810, obj: usize, cx: &mut Cx) {
                         let a = e.anchor(obj);
                         let m = cx.h.ee_sub_1a6318(a);
                         cx.h.k23_guard_209840(e.f_1b4, m);
-                        if cs != 4 && dist(cx.h.ee_sub_1a62e8(a), cx.h.ee_sub_1a62e8(e.f_1b4)) < 100.0 {
+                        if cs != 4 && dist(e.anchor_pos(obj, b.phys.pos, cx.h), cx.h.ee_sub_1a62e8(e.f_1b4)) < 100.0 {
                             cx.h.k23_comp_b0_set(e.f_1b4, 4);
                         }
                         let c = cx.h.k23_guard_fc4(e.f_1b4);
@@ -161,7 +173,7 @@ pub fn ee_sub_225300(b: &mut C2c9810, obj: usize, cx: &mut Cx) {
                             cx.h.k22_pin_12d108(c, [k, k, k]);
                         }
                         if D_2C43B0 < cx.t - b.f_154 {
-                            let p = cx.h.ee_sub_1a62e8(e.f_1b0);
+                            let p = e.anchor_pos(obj, b.phys.pos, cx.h);
                             cx.h.k23_world_1c6fd8(0x5d, p, me(obj), 1);
                             cx.h.vcall(e.f_1b4, 0x4c);
                             cx.h.ee_sub_1619a0(0x18, e.f_1b4);
@@ -195,7 +207,7 @@ pub fn ee_sub_2255c8(b: &C2c9810, obj: usize, dt: f32, h: &mut dyn ClassHost) {
     let Some(gi) = (g as usize).checked_sub(1) else { return };
     let gr = h.phys_e8_80(gi);
     h.ee_sub_1fac30(gi, [-gr[0], -gr[1], -gr[2]]);
-    let tp = h.ee_sub_1a62e8(e.anchor(obj));
+    let tp = e.anchor_pos(obj, b.phys.pos, h);
     let pos = h.ee_sub_1a62e8(g);
     let v = h.k22_speed_10c(g);
     let a = FUN_001f5e10(pos, v, tp, Some(P_2C43D0), [0.0; 3], Some(P_2C43E0), dt);

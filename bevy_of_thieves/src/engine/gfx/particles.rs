@@ -92,6 +92,12 @@ pub fn ee_sub_138f08_alpha(n: u32) -> u64 {
     (n as u64) << 2 | 0x40
 }
 
+/// ALPHA_1 -> Bevy blend: B (bits 2..3) = Cd (1) is (Cs - Cd) * As + Cd, B = 2 (zero, n = 2) is Cs * As + Cd.
+#[cfg(feature = "game")]
+pub fn gs_alpha_mode(alpha1: u64) -> bevy::prelude::AlphaMode {
+    if (alpha1 >> 2) & 3 == 1 { bevy::prelude::AlphaMode::Blend } else { bevy::prelude::AlphaMode::Add }
+}
+
 /// WP-C6: the look part of FUN_001394c8(system, template) + FUN_00139370(system, shader):
 /// - template +0xdc colour keys (count, then RGBA bytes per key) -> +0x3b0 count, +0x3b4 keys in reverse
 ///   order, every byte (b + 1) >> 1 (GS 0x80 = 1.0); +0x434 = template +0xcc (VU flag bit 0);
@@ -322,6 +328,7 @@ mod plugin {
     fn draw_particles(
         mut commands: Commands,
         classes: Option<Res<Classes>>,
+        lent: Option<NonSend<crate::engine::game::vm_state::SpliceState>>,
         mut demo: ResMut<ParticleDemo>,
         mut stats: ResMut<ParticleStats>,
         time: Res<Time>,
@@ -333,6 +340,18 @@ mod plugin {
         mut images: ResMut<Assets<Image>>,
         mut mat: Local<[Option<Handle<StandardMaterial>>; 2]>,
     ) {
+        // ANIM-ALL R81 diag (SLY2_R81RNG): shared-rand draws per frame (+ SLY2_RNG_SITES=1 top sites every 60 f)
+        if std::env::var_os("SLY2_R81RNG").is_some() {
+            static F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let f = F.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let d = crate::engine::physics::driven::RNG_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("R81RNG f{f} draws {d}");
+            if f % 60 == 59 && crate::engine::physics::driven::rng_sites_on() {
+                for (s, n) in crate::engine::physics::driven::rng_sites_take().into_iter().take(12) {
+                    eprintln!("R81SITE f{f} {n} {s}");
+                }
+            }
+        }
         let (Some(cg), Some((root, rg))) = (cam.iter().next(), roots.iter().next()) else { return };
         let to_level = rg.affine().inverse();
         let right = to_level.transform_vector3(cg.right().as_vec3()).normalize_or_zero().to_array();
@@ -356,7 +375,11 @@ mod plugin {
         }
         // WP-C6: one mesh per GS register set (+0x438): [0] additive (DAT_002dd600, or no look set), [1] blend
         let mut qs: [Vec<Quad>; 2] = [Vec::new(), Vec::new()];
-        let set = classes.as_ref().map(|c| &c.set.k21c);
+        // ANIM-ALL R79: REPLACED plumbing: between frames the class set is lent to the scripts (WIRE-EP8,
+        // `game::app::lent_class_set`), so `Classes::set` was an empty default here and no class-28 system
+        // was ever drawn; read the lent set (SLY2_R79PARTOFF = old)
+        let lent_set = lent.as_ref().and_then(|s| s.sched.cls.set.as_ref()).filter(|_| std::env::var_os("SLY2_R79PARTOFF").is_none());
+        let set = lent_set.or(classes.as_ref().map(|c| &c.set)).map(|s| &s.k21c);
         let live = set.into_iter().flatten().filter_map(|(_, x)| match x {
             Inst::K21C28(c) if !c.removed => Some(&**c),
             _ => None,
@@ -393,9 +416,8 @@ mod plugin {
                     let tex = images.add(crate::engine::gfx::fx::star_texture());
                     let mut m = crate::engine::gfx::fx::fx_billboard_material(tex);
                     m.base_color = Color::WHITE;
-                    if k == 1 {
-                        m.alpha_mode = AlphaMode::Blend;
-                    }
+                    // FUN_00138f08(n): set [1] = DAT_002dd5c0 n = 1, [0] = DAT_002dd600 n = 2
+                    m.alpha_mode = gs_alpha_mode(ee_sub_138f08_alpha(if k == 1 { 1 } else { 2 }));
                     mats.add(m)
                 })
                 .clone();

@@ -49,6 +49,7 @@ pub(crate) fn add_pick_debug(app: &mut App) {
 fn pick_debug(
     mut frame: Local<u32>,
     cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    win: Query<&Window, With<bevy::window::PrimaryWindow>>,
     prims: Query<(&PrimTag, &Mesh3d, &GlobalTransform, &MeshMaterial3d<StandardMaterial>, &InheritedVisibility)>,
     meshes: Res<Assets<Mesh>>,
     mats: Res<Assets<StandardMaterial>>,
@@ -70,7 +71,7 @@ fn pick_debug(
     for pt in spec.split(';') {
         let Some((x, y)) = pt.split_once(',') else { continue };
         let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>()) else { continue };
-        let Ok(ray) = cam.viewport_to_world(cgt, Vec2::new(x, y)) else { continue };
+        let Ok(ray) = cam.viewport_to_world(cgt, super::upscale::window_to_viewport(cam, win.single().ok(), Vec2::new(x, y))) else { continue };
         let (o, d) = (ray.origin, *ray.direction);
         let mut best: Option<(f32, PrimTag, AssetId<StandardMaterial>)> = None;
         for (tag, m, gt, mat, vis) in prims.iter() {

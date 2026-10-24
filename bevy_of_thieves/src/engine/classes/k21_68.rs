@@ -265,6 +265,10 @@ impl ClassSet {
     pub(super) fn frame_k21_68(&mut self, h: &mut dyn ClassHost) {
         let now = h.k22_music_1fe3f8();
         for (i, x) in &mut self.k21c {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K21C68(c) = x {
                 let mgr = self.k22c.iter_mut().rev().find_map(|(j, y)| match y {
                     Inst::K22C121(m) => Some((*j, &mut **m)),

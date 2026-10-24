@@ -38,6 +38,16 @@ pub fn alo_of(w: &World, i: usize) -> Option<&Alo> {
     }
 }
 
+fn r80_xfm_off() -> bool {
+    static O: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *O.get_or_init(|| std::env::var_os("SLY2_R80XFM").is_none())
+}
+
+/// ANIM-ALL R81: emit frames from the live world (classes::plugin ee_sub_15bd20); follows the R80 XFM switch
+pub fn r81_frame_on() -> bool {
+    !r80_xfm_off() && std::env::var_os("SLY2_R81FRAMEOFF").is_none()
+}
+
 /// Class-3 style (FUN_00231768) bone ref + local matrix of a non-ALO object.
 pub fn xfm_of(w: &World, i: usize) -> Option<(i16, Affine)> {
     let (s, x) = match &w.objects.get(i)?.payload {
@@ -45,6 +55,32 @@ pub fn xfm_of(w: &World, i: usize) -> Option<(i16, Affine)> {
         Payload::Loaded(LoadData::L227380 { xform, .. }) | Payload::Loaded(LoadData::L231170Blob { xform, .. }) => (xform.s, &xform.xform),
         Payload::Loaded(LoadData::Solid(sol)) => (sol.xform.s, &sol.xform.xform),
         Payload::Loaded(LoadData::L2282b0 { solid, .. }) => (solid.xform.s, &solid.xform.xform),
+        // HEIST r41: an in-place FUN_001c9b08 record (class-6 spawner) keeps the bone ref at +0x50 and the xform at
+        // +0x60..+0x9c (text_001c0000.c FUN_001c9b08; EP4 Disguise Bridge 77238 local (6994, -9127, -423))
+        Payload::Loaded(LoadData::B4(b)) if let crate::engine::world::loads_b4::B4Load::Class6 { in_place: true, bone, xform, .. } = &**b => (*bone, xform),
+        // ANIM-ALL R80: the FUN_00231170-loaded B4 classes (29 emitters FUN_00258598, 31 FUN_0015c1e8, 43 / 45 / 46)
+        // are XFM objects too (class 29 vtable +0xfc = FUN_00231440: world = +0x60 local x +0x50 bone); without them
+        // every emitter frame was the identity and all class-28 particles spawned at the level origin
+        // OPT-IN SLY2_R80XFM=1 (+ SLY2_R80XFMALL=1 for 31/43/45/46): the emitter frames shift the shared GameRng draws and
+        // break the RNG-dependent wired_guards_hear_search_and_return_live (guard picks); default = old (identity)
+        Payload::Loaded(LoadData::B4(b)) if !r80_xfm_off() => match &**b {
+            crate::engine::world::loads_b4::B4Load::L258598 { xform, .. } => (xform.s, &xform.xform),
+            crate::engine::world::loads_b4::B4Load::L15c1e8 { xform, .. } | crate::engine::world::loads_b4::B4Load::L231170 { xform, .. }
+                if std::env::var_os("SLY2_R80XFMALL").is_some() => (xform.s, &xform.xform),
+            _ => return None,
+        },
+        // ANIM-ALL R81: a FUN_0013e510 copy of an emitter (vt+0x144 copies the +0x50 / +0x60 XFM state of the source):
+        // the source's xform, its bone ref resolved against the copy's own owner (SLY2_R81CLONEOFF = old: no xfm)
+        Payload::Clone if !r80_xfm_off() && std::env::var_os("SLY2_R81CLONEOFF").is_none() => {
+            let mut r = i;
+            while let Some(c) = w.objects[r].clone_of.filter(|&c| c != r) {
+                r = c;
+            }
+            match &w.objects[r].payload {
+                Payload::Loaded(LoadData::B4(b)) if let crate::engine::world::loads_b4::B4Load::L258598 { xform, .. } = &**b => (xform.s, &xform.xform),
+                _ => return None,
+            }
+        }
         _ => return None,
     };
     Some((s, affine_from_bytes(x)))
@@ -136,6 +172,28 @@ pub fn template_socket(w: &World, i: usize) -> Option<(BoneRef, Affine)> {
         _ => ee_sub_22d6b0(w, oa.base.refs[2], w.objects[o].owner, Some(o), context_of(w, o)),
     };
     matches!(b, BoneRef::Bone(..)).then(|| (b, affine_from_bytes(&t.xform)))
+}
+
+/// LOOK R27: FUN_001c9b08 in-place branch: the class-6 spawner keeps the record's xform at +0x60, its bone at
+/// +0x50 (FUN_0022d6b0(bone, owner)) and its owner at +0x10; FUN_001caec8 hands those to every claimed copy
+/// (vt+0x54 / vt+0x12c), so a copy sits where a FUN_001ca370 copy of the same record would (`template_socket`).
+/// Returns (bone ref, record xform); the bone ref is None when the owner has no ALO bone for it.
+pub fn spawner_socket(w: &World, sp: usize) -> Option<(BoneRef, Affine)> {
+    use crate::engine::world::{loads_b4::B4Load, objects::{LoadData, Payload}};
+    let mut r = sp;
+    while let Some(c) = w.objects[r].clone_of.filter(|&c| c != r) {
+        r = c;
+    }
+    let Payload::Loaded(LoadData::B4(d)) = &w.objects[r].payload else { return None };
+    let B4Load::Class6 { in_place: true, bone, xform, .. } = &**d else { return None };
+    let pm = affine_from_bytes(xform);
+    let Some(o) = w.objects[sp].owner else { return Some((BoneRef::None, pm)) };
+    let b = match (alo_of(w, o), ee_sub_22d6b0(w, *bone, Some(o), None, BoneRef::None)) {
+        (_, b @ BoneRef::Bone(..)) => b,
+        (Some(oa), _) => ee_sub_22d6b0(w, oa.base.refs[2], w.objects[o].owner, Some(o), context_of(w, o)),
+        (None, _) => BoneRef::None,
+    };
+    Some((if matches!(b, BoneRef::Bone(..)) { b } else { BoneRef::None }, pm))
 }
 
 /// Bone ref of a class-3 (XFM) object (FUN_00231768 -> +0x50).

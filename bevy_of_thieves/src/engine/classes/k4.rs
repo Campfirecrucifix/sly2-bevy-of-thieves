@@ -126,6 +126,7 @@ impl ClassSet {
                 44 => {
                     let mut c = c2ca9f0::C2ca9f0::default();
                     c.ee_sub_12e600(i, h);
+                    c.r106_top = o.owner.is_none_or(|k| k == i);
                     c.feed(i, props, h);
                     Inst::C2ca9f0(c)
                 }
@@ -143,7 +144,10 @@ impl ClassSet {
                 Inst::C2d5dc8(c) => {
                     c.ee_sub_1c8030(*i, &mut self.g, h);
                     // slot 22 (add to world) right after slot 14, as K3's light registration
-                    c.ee_sub_1ca8e0(*i, h);
+                    // FEEL R35: only for a spawner in the world (8 out-of-world class-6/7 spawners of rec11 012 hold none)
+                    if !h.lo_removed(*i) {
+                        c.ee_sub_1ca8e0(*i, h);
+                    }
                 }
                 Inst::C2d6fe8(c) => {
                     c.ee_sub_1cb950(*i, h);
@@ -168,7 +172,17 @@ impl ClassSet {
     pub(super) fn frame_k4(&mut self, h: &mut dyn ClassHost) {
         let more = &self.more;
         let c133 = |o: u32| c133_view(more, o);
+        // CRAWL R109: every class-44 camera, owned ones too, follows Add / Remove (an Add skips a child removed on
+        // its own, fields::b56_at_load; old owner-less-only = SLY2_R109_CAMTOP_ONLY=1 or SLY2_NO_R109_B56OWN=1).
+        // CRAWL R110: DEFAULT (opt-out SLY2_NO_R110_CAMWORLD=1): the exit now retracts the hub select SMA (vm_state
+        // get-o class-114 field 620 + set-o Sly 806 -> FUN_001c3ed8 -> FUN_001f0598 msg 3 -> 249.1 s3 Removes 27337 / 27335).
+        let camworld = self.r106_camworld || std::env::var_os("SLY2_R106_CAMWORLD").is_some() || std::env::var_os("SLY2_NO_R110_CAMWORLD").is_none();
+        let camall = std::env::var_os("SLY2_R109_CAMTOP_ONLY").is_none() && std::env::var_os("SLY2_NO_R109_B56OWN").is_none();
         for (i, x) in &mut self.k4 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if !matches!(x, Inst::C2ca9f0(_)) && h.lo_removed(*i) {
+                continue;
+            }
             match x {
                 Inst::C2db0d0(c) => {
                     c.ee_sub_21c0d8(*i, &self.g, h);
@@ -177,7 +191,42 @@ impl ClassSet {
                 }
                 Inst::C2db6b8(c) => c.ee_sub_221388(*i, &mut self.k4_deferred, h),
                 // K30: no update slot; the camera state the 0x2de3e8 policy reads (classes/k30_cam.rs)
-                Inst::C2ca9f0(c) => c.k30_publish(*i, h),
+                Inst::C2ca9f0(c) => {
+                    // CRAWL R106: script Add / Remove of a class-44 camera (LO +0x28 bit 60, `lo_removed`) runs
+                    // its slot 10 FUN_0012e6a0 / slot 11 FUN_0012e6e8 (camera request 10 on 0x2de3e8 / revoke):
+                    // the safehouse table camera 27335 (obj 3920; 27337 is class 4) of script 249.1 takes the view
+                    // Only Add / Remove transitions after load: registering every in-world class-44 at load put
+                    // the character-attached cameras (7563 under Bentley 8, 4332 under Sly 7) on top of the CM,
+                    // which the original does not show (rec_ep1b: follow camera); why they stay off is open. Those
+                    // flip with their character's subtree (script Add of the gang), so only owner-less cameras
+                    // (`c.r106_top`, set at build) follow the transitions here.
+                    // CRAWL R108 (R109: the live image's LO bits mirror the port's state, not a ground truth): after load every class-44 camera has LO +0x28 bit 60 clear
+                    // (7563 / 4332 too, while their Bentley / Sly owners are in the world), i.e. they are removed on
+                    // their own and an owner's script Add (249.1 s2 Remove+Add of the gang) does not re-add them
+                    // (FUN_001a5800 walks only the in-world child list); the port's subtree Add flipped them in.
+                    // OPT-IN SLY2_R106_CAMWORLD: after X (exit) 27335 stays the top request for 600+ frames (no
+                    // script Remove reached while the port's exit walk stalls) -> the view would stay locked.
+                    if (c.r106_top || camall) && camworld {
+                        let inw = !h.lo_removed(*i);
+                        if !c.r106_seen {
+                            c.r106_seen = true;
+                            c.r106_inw = inw;
+                        } else if inw && !c.r106_inw {
+                            c.r106_inw = true;
+                            if std::env::var_os("SLY2_R82CAM").is_some() {
+                                let me = *i as u32 + 1;
+                                let ow = h.obj_i32(me, 0x10) as u32;
+                                let ow2 = if ow != 0 { h.obj_i32(ow, 0x10) as u32 } else { 0 };
+                                eprintln!("R82ADD obj {i} oid {} top {} own {ow} oid {} own2 {ow2} oid {}", h.obj_i32(me, 0x18), c.r106_top, if ow != 0 { h.obj_i32(ow, 0x18) } else { 0 }, if ow2 != 0 { h.obj_i32(ow2, 0x18) } else { 0 });
+                            }
+                            c.ee_sub_12e6a0(*i, h);
+                        } else if !inw && c.r106_inw {
+                            c.r106_inw = false;
+                            c.ee_sub_12e6e8(*i, h);
+                        }
+                    }
+                    c.k30_publish(*i, h)
+                }
                 Inst::C2cf378(c) => c.ee_sub_163078(*i, &mut self.g, &c133, h),
                 // slot 16 inherited from class 10 (FUN_001e6340)
                 Inst::C2d6fe8(c) => c.base.ee_sub_1e6340(*i, h),

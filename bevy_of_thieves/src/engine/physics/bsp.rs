@@ -26,9 +26,16 @@ fn plane_of(g: &CGeom, s: Option<usize>) -> Plane {
 fn dist(p: Plane, v: V3) -> f32 {
     dot([p[0], p[1], p[2]], v) - p[3]
 }
+/// PS2 FPU / VU results round toward zero (not IEEE nearest): exact f64 result truncated to f32.
+fn rtz(x: f64) -> f32 {
+    let y = x as f32;
+    if (y as f64).abs() > x.abs() { f32::from_bits(y.to_bits() - 1) } else { y }
+}
+/// 0x118750 sub.s (1 - t) + vmulax ACC = a * u, vmaddx = ACC + b * t (each step rounded toward zero; IEEE
+/// nearest put an exit point exactly on its plane, e.g. the guard drop probe FUN_001c6de8, WIRE-G)
 fn lerp(a: V3, b: V3, t: f32) -> V3 {
-    let u = 1.0 - t;
-    [a[0] * u + b[0] * t, a[1] * u + b[1] * t, a[2] * u + b[2] * t]
+    let u = rtz(1.0 - t as f64);
+    std::array::from_fn(|i| rtz(rtz(a[i] as f64 * u as f64) as f64 + rtz(b[i] as f64 * t as f64) as f64))
 }
 
 struct Entry {

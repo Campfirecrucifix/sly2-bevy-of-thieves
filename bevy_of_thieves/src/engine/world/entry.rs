@@ -224,10 +224,30 @@ pub struct EntrySections {
 
 /// The entry loop body of FUN_0013da18 up to FUN_0013fb40.
 pub fn read_entry_sections(s: &mut BinaryInputStream, mission: i16) -> EntrySections {
-    // 0x0020f5d0
-    let mut e = EntrySections { blob_size: s.read_s32(), blob_key: s.read_s32(), ..Default::default() };
+    let mut e = EntrySections::default();
+    ee_sub_20f5d0(s, &mut e);
+    ee_sub_1ff858(s, &mut e);
+    // 0x001eb748
+    e.eae40 = ee_sub_1eae40(s, mission);
+    e.eb098 = ee_sub_1eb098(s, mission);
+    let n = s.read_u16();
+    e.ed7a8 = (0..n).map(|_| ee_sub_1ed7a8(s)).collect();
+    let n = s.read_u16();
+    e.eb2f0 = (0..n).map(|_| ee_sub_1eb2f0(s)).collect();
+    ee_sub_20f640(s, &mut e);
+    e.block_45cc = ee_sub_1c0ec0(s);
+    e
+}
+
+/// FUN_0020f5d0: blob size, blob key, ext flag.
+pub fn ee_sub_20f5d0(s: &mut BinaryInputStream, e: &mut EntrySections) {
+    e.blob_size = s.read_s32();
+    e.blob_key = s.read_s32();
     e.ext = s.read_s32() != 0;
-    // 0x001ff858
+}
+
+/// FUN_001ff858: s32 n; n x FUN_0012a3d8 value [+ 3 strings if ext].
+pub fn ee_sub_1ff858(s: &mut BinaryInputStream, e: &mut EntrySections) {
     let n = s.read_s32();
     for _ in 0..n.max(0) {
         e.anchors.push(ee_sub_12a3d8(s, e.ext));
@@ -237,20 +257,24 @@ pub fn read_entry_sections(s: &mut BinaryInputStream, mission: i16) -> EntrySect
             }
         }
     }
-    // 0x001eb748
+}
+
+/// FUN_001eae40: u16 n x FUN_001ea8a8.
+pub fn ee_sub_1eae40(s: &mut BinaryInputStream, mission: i16) -> Vec<Rec1ea8a8> {
     let n = s.read_u16();
-    e.eae40 = (0..n).map(|_| ee_sub_1ea8a8(s, mission)).collect();
+    (0..n).map(|_| ee_sub_1ea8a8(s, mission)).collect()
+}
+
+/// FUN_001eb098: u16 n x FUN_001eaf50.
+pub fn ee_sub_1eb098(s: &mut BinaryInputStream, mission: i16) -> Vec<Rec1eaf50> {
     let n = s.read_u16();
-    e.eb098 = (0..n).map(|_| ee_sub_1eaf50(s, mission)).collect();
-    let n = s.read_u16();
-    e.ed7a8 = (0..n).map(|_| ee_sub_1ed7a8(s)).collect();
-    let n = s.read_u16();
-    e.eb2f0 = (0..n).map(|_| ee_sub_1eb2f0(s)).collect();
-    // 0x0020f640: align 16, then the blob (skipped when the key is unchanged; same bytes)
+    (0..n).map(|_| ee_sub_1eaf50(s, mission)).collect()
+}
+
+/// FUN_0020f640: align 16, then the blob (skipped when the key is unchanged; same bytes).
+pub fn ee_sub_20f640(s: &mut BinaryInputStream, e: &mut EntrySections) {
     s.align(0x10);
     e.blob_offset = s.tell();
     s.read(e.blob_size.max(0) as usize, None);
-    e.block_45cc = ee_sub_1c0ec0(s);
-    e
 }
 

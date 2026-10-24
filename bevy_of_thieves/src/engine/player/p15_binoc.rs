@@ -65,6 +65,50 @@ impl Binoc {
     }
 }
 
+/// ANIM-ALL R34: FUN_0019cd38 mode-1 player vtable calls +0x29c (slot 82, FUN_001442d0) / +0x2a4 (slot 83,
+/// FUN_00144338) with mask 0x3f; arg `SLOT_SELF` = the JT (nest 0), `SLOT_PARTNER` = +0x40 (nest 1)
+pub const CALL_SLOT_82: u32 = 0x0014_42d0;
+pub const CALL_SLOT_83: u32 = 0x0014_4338;
+pub const SLOT_SELF: i32 = 0;
+pub const SLOT_PARTNER: i32 = 1;
+
+/// ANIM-ALL R34: apply the recorded slot 82 / 83 calls to the class set, in order. `me` = the JT's object
+/// (the po, else Sly); the partner is the +0x40 handle (`binoc.arg[0]`, 0 none).
+pub fn binoc_slots(set: &mut crate::engine::classes::ClassSet, h: &mut dyn crate::engine::classes::ClassHost, me: Option<usize>, jt: &mut Jt) {
+    use crate::engine::classes::k22_seq::GuardOp;
+    let partner = jt.binoc.arg[0];
+    let mut ops = Vec::new();
+    // CRAWL R97: FUN_0019cd38's world counter calls (mode 1): FUN_0020f198 / 0020f1a8 (+0x3d84, the guards'
+    // FUN_00209098 patrol freeze) and FUN_0020f0c0 / 0020f0f0 (+0x3d7c pad lock), executed in order (SLY2_NO_R97_3D84)
+    if std::env::var_os("SLY2_NO_R97_3D84").is_none() {
+        jt.calls.retain(|&(c, _)| {
+            match c {
+                0x0020f198 => h.world_3d84_add(1),
+                0x0020f1a8 => h.world_3d84_add(-1),
+                0x0020f0c0 => h.k27_world_20f0c0(),
+                0x0020f0f0 => h.k27_world_20f0f0(),
+                _ => return true,
+            }
+            false
+        });
+    }
+    jt.calls.retain(|&(c, a)| {
+        if c != CALL_SLOT_82 && c != CALL_SLOT_83 {
+            return true;
+        }
+        let (o, nest) = if a == SLOT_PARTNER { (partner, 1) } else { (me.map_or(0, |o| o as u32 + 1), 0) };
+        if o != 0 {
+            ops.push(if c == CALL_SLOT_82 { GuardOp::Slot82(o, 0x3f, nest) } else { GuardOp::Slot83(o, 0x3f, nest) });
+        }
+        false
+    });
+    if !ops.is_empty() {
+        for op in ops {
+            set.k27_guard_op(op, h);
+        }
+    }
+}
+
 /// JT field of the enter (+0xc) / exit (+0x10) ASEG.
 pub const FIELD_BINOC_ENTER: u32 = 0xf0c;
 pub const FIELD_BINOC_EXIT: u32 = 0xf10;
@@ -123,7 +167,11 @@ impl Jt {
                 match mode {
                     1 => {
                         self.calls.push((CALL_CAM_POP, 8));
+                        // ANIM-ALL R34: +0x40 partner vt+0x2a4 (FUN_00144338)(o, 0x3f, 1), FUN_001f5720(o, 0), then
+                        // jt vt+0x2a4(jt, 0x3f, 0) (applied by `binoc_slots`)
+                        self.calls.push((CALL_SLOT_83, SLOT_PARTNER));
                         self.calls.push((0x001f5720, 0));
+                        self.calls.push((CALL_SLOT_83, SLOT_SELF));
                     }
                     0 | 2 => self.calls.push((CALL_CAM_POP, 7)),
                     _ => {}
@@ -146,9 +194,13 @@ impl Jt {
                     1 => {
                         self.calls.push((CALL_CAM_PUSH, 8));
                         self.calls.push((CALL_YAW_CAM, 1));
+                        // ANIM-ALL R34: +0x40 partner vt+0x29c (FUN_001442d0)(o, 0x3f, 1) before FUN_001f5720(o, 1);
+                        // jt vt+0x29c(jt, 0x3f, 0) after the HUD (applied by `binoc_slots`)
+                        self.calls.push((CALL_SLOT_82, SLOT_PARTNER));
                         self.calls.push((0x001f5720, 1));
                         self.calls.push((0x0019dca0, 0));
                         self.binoc_hud(0);
+                        self.calls.push((CALL_SLOT_82, SLOT_SELF));
                     }
                     0 => {
                         self.calls.push((CALL_CAM_PUSH, 7));
@@ -232,6 +284,11 @@ impl Jt {
                             }
                             // +0x3c = DAT_002de3b0 / DAT_002de50c; 0x19da78(+0x24) HUD update
                             self.calls.push((0x0019da78, 0));
+                            // ANIM-ALL R35: REPLACED: the HUD widgets (+0x2c / +0x34) are unported = null, so
+                            // 0x19da78 moves HUD 0 -> 1 at once (read by the sequence action-0x3b wait)
+                            if self.binoc.hud == 0 {
+                                self.binoc_hud(1);
+                            }
                         }
                         _ => {}
                     }

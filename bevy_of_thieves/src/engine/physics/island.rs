@@ -219,6 +219,9 @@ fn level_contacts(cw: &CollisionWorld, bodies: &[RigidBody], a: usize, out: &mut
         if left == 0 {
             break;
         }
+        if !col.near(b.alo.pos, b.radius) {
+            continue;
+        }
         FUN_001a93c8(b.radius, b.alo.pos, &col.geom, &col.bsp, left, &mut sbi);
     }
     for s in sbi {

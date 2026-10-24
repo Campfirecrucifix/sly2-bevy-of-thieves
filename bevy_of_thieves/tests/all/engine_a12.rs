@@ -62,7 +62,7 @@ fn a12_gi_switch() {
 fn a12_live_gi_no_restart_note() {
     let c = ctx();
     let mut m = MenuMgr::new(Some(elf()));
-    m.gfx = GraphicsOpts { raytraced: false, rt_available: true, hor_plus: true, ink_outlines: true };
+    m.gfx = GraphicsOpts { raytraced: false, rt_available: true, hor_plus: true, ink_outlines: true, ..Default::default() };
     m.gi_live = true;
     m.port_open_graphics();
     tick(&mut m, &c, 1);
@@ -80,7 +80,7 @@ fn a12_live_gi_no_restart_note() {
 fn a12_gi_greyed_with_reason() {
     let c = ctx();
     let mut m = MenuMgr::new(Some(elf()));
-    m.gfx = GraphicsOpts { raytraced: false, rt_available: false, hor_plus: true, ink_outlines: true };
+    m.gfx = GraphicsOpts { raytraced: false, rt_available: false, hor_plus: true, ink_outlines: true, ..Default::default() };
     m.gi_live = true;
     m.gi_reason = gi_unavailable_reason(true, false);
     m.port_open_graphics();

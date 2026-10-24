@@ -211,7 +211,7 @@ impl ClassSet {
             if !PORTED_K13.iter().any(|x| x.0 == o.class) {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             if o.class == 89 {
                 let mut c = C2dca30::default();
@@ -232,6 +232,11 @@ impl ClassSet {
             c.ee_sub_1b2070(i, h);
             if let Some(props) = props {
                 c.p.feed(props, shared::proj::ROWS_81);
+            }
+            // POOL1: row 394 +0x168 (message-9 target, e.g. the dart's explode_dart_gas emitter) is an oid
+            // resolved like the K15 projectiles (FUN_0015e938 mode 0x2002)
+            if c.p.f_168 != 0 {
+                c.p.f_168 = h.ee_sub_15e938(0x2002, c.p.f_168 as i32, handle(i));
             }
             c.p.phys.pos = bw.get(w, i, 0)[3];
             c.p.phys.gravity = [0.0; 3];

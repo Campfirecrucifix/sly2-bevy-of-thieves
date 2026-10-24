@@ -534,6 +534,13 @@ pub fn ee_sub_1c9b08(
             if key == 5 && !(class >= 0 && class::ee_sub_15e988(cls, class as ClassId)) {
                 o.props = None;
             }
+            // CRAWL R90: kind 5 = FUN_0013f810(spawner, stream): the rows are the spawner's own props (e.g. the
+            // field-26 deferred Remove that keeps the EP1 hub guard spawners 123942/8436/122332 out of the world)
+            if let (5, Some(p)) = (key, o.props.as_ref()) {
+                if std::env::var_os("SLY2_NO_R90_K5").is_none() {
+                    w.apply_override(idx, p);
+                }
+            }
             overrides.push(o);
         }
         let len = s.read_s32();
@@ -553,7 +560,40 @@ pub fn ee_sub_1c9b08(
             let oid = s.read_s32();
             let class = s.read_s16();
             let slot = s.read_s16();
-            overrides.push(override_props(s, oid, class, slot));
+            let o = override_props(s, oid, class, slot);
+            // WIRE-EP7: key 5 / 6 = the first copied object, else FUN_0015e678(0xa05, oid) (REPLACED: the
+            // copy's objects by oid, then the world); dropped unless it is-a `class` (FUN_00132b10); the
+            // props go to the target (FUN_0013f810). The slot frame (FUN_00256ee0) is not modelled.
+            // ANIM-ALL R62: FUN_0015e678(0xa05, oid, key = FUN_001c99d8 of this copy) finds the oid inside this
+            // copy's key scope, i.e. also among the copied objects' descendants (EP3 class-37 17366: three
+            // placements' rows all landed on the first world object); SLY2_R62OFF = top-level copies only
+            let sub = |w: &dyn ObjectSink| {
+                let mut st: Vec<usize> = collected.clone();
+                while let Some(i) = st.pop() {
+                    if w.objects()[i].oid == oid {
+                        return Some(i);
+                    }
+                    st.extend(w.objects()[i].children.iter().copied());
+                }
+                None
+            };
+            let r62 = std::env::var_os("SLY2_R62OFF").is_none();
+            let inside = if (5..=6).contains(&oid) { collected.first().copied() } else {
+                collected.iter().copied().find(|&i| w.objects()[i].oid == oid).or_else(|| if r62 { sub(&*w) } else { None })
+            };
+            // not in the copy's subtree yet: resolved after the load (World::pending_ovr)
+            let deferred = inside.is_none() && r62 && !collected.is_empty() && o.props.as_ref().is_some_and(|p| w.defer_override(&collected, oid, class, p));
+            let t = inside.or_else(|| w.objects().iter().position(|x| x.oid == oid));
+            let t = t.filter(|&i| class >= 0 && class::ee_sub_15e988(w.objects()[i].class, class as ClassId));
+            if let (Some(t), Some(p), false) = (t, o.props.as_ref(), deferred) {
+                w.apply_override(t, p);
+            }
+            // WIRE-EP8: FUN_00256ee0 slot frame: the override row's script slot of the record's entry is
+            // bound to the target (e.g. cellar entry 128 slot 5 = the exit volume copy: 1789 enter)
+            if let Some(t) = t.filter(|_| slot >= 0) {
+                w.bind_script_slot(t, entry, slot);
+            }
+            overrides.push(o);
         }
         trailer = None;
         nested_word = Some(s.read_s32());

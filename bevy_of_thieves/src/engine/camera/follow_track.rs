@@ -197,6 +197,11 @@ pub fn look_vel<M: QMem + ?Sized>(m: &mut M, x: &TrackCtx, c: &Cpdefi) -> V3 {
 pub fn heading_weight<M: QMem + ?Sized>(m: &mut M, x: &TrackCtx, pso: u32) -> (f32, bool) {
     let (rows, _) = m.call(0x001a_6318, &[pso], &[]);
     let r = m.rv(rows);
+    heading_weight_dir(m, x, [r[0], r[1]])
+}
+
+/// FEEL R25: `heading_weight` with the focus row 0 xy given (a focus not in `m`).
+pub fn heading_weight_dir<M: QMem + ?Sized>(m: &mut M, x: &TrackCtx, r: [f32; 2]) -> (f32, bool) {
     let h = [r[0], r[1], 0.0];
     let l = (h[0] * h[0] + h[1] * h[1]).sqrt();
     let h = if l < 0.0001 { [0.0, 0.0, 1.0] } else { [h[0] / l, h[1] / l, 0.0] };
@@ -208,4 +213,29 @@ pub fn heading_weight<M: QMem + ?Sized>(m: &mut M, x: &TrackCtx, pso: u32) -> (f
 
 pub fn end<M: QMem + ?Sized>(m: &mut M, _f: Frame) {
     stack_pop(m, FRAME);
+}
+
+/// FEEL R23: 0x00221a18 activate with a track (lines 1233-1248): +0x10c == 0 && +300 != 0 ->
+/// 0x00221ce8(o, cpdefi); then the focus 0x00220dd8(params, cpdefi, out, track) replaces the
+/// track-less one. The path branch (+0x10c != 0, 0x001e6f60) is not ported (returns None).
+/// `params` = the selected +0x114 entry (o +0x14); o +0x10 = the track.
+pub fn activate_target<M: QMem + ?Sized>(m: &mut M, t: u32, params: &FollowParams, c: &Cpdefi) -> Option<V3> {
+    if m.r32(t + 0x10c) != 0 {
+        return None;
+    }
+    let sp = stack_push(m, FRAME);
+    let (o, cp, out, prm) = (sp, sp + 0x20, sp + 0x70, sp + 0xb0);
+    for (i, x) in params.to_words().iter().enumerate() {
+        m.w32(prm + 4 * i as u32, *x);
+    }
+    m.w32(o + 0x10, t);
+    m.w32(o + 0x14, prm);
+    write_cpdefi(m, cp, c);
+    if m.r32(t + 300) != 0 {
+        crate::engine::classes::q::hard4::ee_sub_221ce8(m, o, cp);
+    }
+    crate::engine::classes::q::q_part2::ee_sub_220dd8(m, prm, cp, out, t);
+    let target = v3(m.rv(out));
+    stack_pop(m, FRAME);
+    Some(target)
 }

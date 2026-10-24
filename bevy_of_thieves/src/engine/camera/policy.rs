@@ -31,6 +31,8 @@ pub trait Cplcy: Send + Sync {
     fn reset(&mut self, _cm: &mut Cm) {}
     /// +8 of the policy (written by FUN_0014f630).
     fn set_saved_near(&mut self, _s: f32) {}
+    /// FEEL R112: the follow gain +0x64 (CplcyFollow only; tests read it through `with_policy`).
+    fn g_follow(&self) -> Option<f32> { None }
 }
 
 /// Saved state of the CPLCY base (+4 saved fov target, +8 saved near clip).

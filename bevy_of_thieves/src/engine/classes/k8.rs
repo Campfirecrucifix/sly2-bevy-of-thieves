@@ -62,6 +62,8 @@ pub struct Pickup {
     pub f_160: f32,
     pub f_164: u32,
     pub f_168: Option<i32>,
+    /// ANIM-ALL R56: the +0x168 SMA handle (FUN_001f0380 result; 0 = none)
+    pub h_168: u32,
     /// +0x16c sparkle child (FUN_0015ed78(1, 0x12))
     pub f_16c: u32,
     /// +0x170 position, +0x180 velocity, +0x190 acceleration
@@ -110,6 +112,9 @@ pub struct Pickup {
     pub owner: u32,
     /// the host's +0x100 serial when the host is a ported class-7 instance (`ClassSet::k4`)
     pub owner_100: Option<i32>,
+    /// FEEL R39: the spawner copy record +0 (set once FUN_001caec8 has claimed the copy): FUN_001ca978 scores a
+    /// never-claimed free copy 4, a returned one <= 3
+    pub claimed: bool,
 }
 
 impl Default for Pickup {
@@ -123,6 +128,7 @@ impl Default for Pickup {
             f_160: 0.0,
             f_164: 0,
             f_168: None,
+            h_168: 0,
             f_16c: 0,
             f_170: [0.0; 4],
             f_180: [0.0; 4],
@@ -156,6 +162,7 @@ impl Default for Pickup {
             in_world: true,
             owner: 0,
             owner_100: None,
+            claimed: false,
         }
     }
 }
@@ -458,16 +465,31 @@ impl Pickup {
         if anim == -1 {
             if self.f_168.is_some() {
                 h.ee_sub_1f0598(obj);
+                // ANIM-ALL R56: FUN_001f0598(+0x168), vt +0x14 release
+                if self.h_168 != 0 {
+                    h.ee_sub_1f0598_link(self.h_168);
+                    h.vcall(self.h_168, 0x14);
+                    self.h_168 = 0;
+                }
                 self.f_168 = None;
             }
         } else if self.f_168.is_none() {
-            h.ee_sub_1f0380(obj, self.f_164, anim as u32, 0);
+            // ANIM-ALL R56: FUN_001f0380(sm = +0x164, obj = this, anim, 0) (the port passed them swapped and kept no
+            // handle, so no SMA was ever created for a pickup); vt +0xc add reference
+            if self.f_164 != 0 && std::env::var_os("SLY2_R56OFF").is_none() {
+                self.h_168 = h.ee_sub_1f0380_link(self.f_164, Self::me(obj), anim, 0);
+                if self.h_168 != 0 {
+                    h.vcall(self.h_168, 0xc);
+                }
+            } else {
+                h.ee_sub_1f0380(obj, self.f_164, anim as u32, 0);
+            }
             self.f_168 = Some(anim);
             if self.f_160 > 0.0 {
                 h.ee_sub_1f10f0(obj);
             }
         } else {
-            h.ee_sub_1f0660(obj, anim);
+            h.ee_sub_1f0660(if self.h_168 != 0 { self.h_168 as usize } else { obj }, anim);
             self.f_168 = Some(anim);
         }
     }
@@ -866,6 +888,21 @@ impl ClassSet {
             let mut c = Box::<Pickup>::default();
             c.init(o.class, i, h);
             c.slot13(i, h);
+            // CRAWL R20: FUN_001c9b08 key-5/6 override rows -> FUN_0013f810 member writes on the copy: field 898
+            // (+0x158 int) and 906 (+0x230, kind 0x825 = object by oid, FUN_0015e938 resolve)
+            if let Some(ov) = w.override_props.get(&i) {
+                use crate::engine::world::props::PropValue;
+                for p in ov {
+                    let PropValue::Scalar(b) = &p.value else { continue };
+                    if b.len() < 4 { continue }
+                    let v = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    match p.field {
+                        898 => c.f_158 = v,
+                        906 => c.f_230_obj = w.find_oid(v).first().map_or(0, |&k| k as u32 + 1),
+                        _ => {}
+                    }
+                }
+            }
             let place = w.life.placed.get(&i).map(affine_from_bytes);
             let m = match &place {
                 Some(pm) => mul(&bw.get(w, i, 0), pm),
@@ -884,6 +921,295 @@ impl ClassSet {
                 c.ee_sub_1c4f60(*i, g, h);
             }
         }
+        self.k8_proxy_hosts(h);
+    }
+    /// WIRE-OBJ: the class-7 proxy hosts' deferred slot-22 call (C2d5dc8_v22 queues FUN_001ca8c0 on the world
+    /// +0x3ca8 list via FUN_00149ab8 when +0xe4 == 0; the list is drained after the load) for hosts whose
+    /// template (B4 class-6 `template` oid) is a single K8 pickup: FUN_001caec8(host, 2) = FUN_001cade0 picks
+    /// the template copy of best FUN_001ca978 priority >= 2 (4 free; owned 3 / 2, 1 = an in-world part visible
+    /// (FUN_001a61a0) -> kept; ties -> later copy), FUN_001caa60 detaches it from its old host, the copy joins
+    /// the host +0xe8 list and takes the host matrix (+0x60..+0x9c), FUN_001c99d8 rebuilds it in the world.
+    pub(super) fn k8_proxy_hosts(&mut self, h: &mut dyn ClassHost) {
+        use crate::engine::world::loads_b4::B4Load;
+        use crate::engine::world::objects::{LoadData, Payload};
+        let Some(w) = h.k21_world() else { return };
+        let hosts: Vec<(usize, bool)> = self.k4.iter().filter_map(|(i, x)| match x {
+            Inst::C2d5dc8(c) => Some((*i, c.f_e4)),
+            _ => None,
+        }).collect();
+        for (hi, e4) in hosts {
+            if e4 {
+                continue;
+            }
+            let Some(o) = w.objects.get(hi) else { continue };
+            let Payload::Loaded(LoadData::B4(b)) = &o.payload else { continue };
+            let B4Load::Class6 { template, xform, .. } = &**b else { continue };
+            let Some(e) = w.entries.iter().position(|e| e.dir.c == *template) else { continue };
+            if w.entries[e].objects.len() != 1 {
+                continue;
+            }
+            let copies: Vec<usize> = w.entries[e].instances.iter().copied().filter(|c| self.k8.iter().any(|x| x.0 == *c)).collect();
+            // FUN_001cade0(host, 2)
+            let mut best = 2;
+            let mut pick = None;
+            for &c in &copies {
+                let Some(p) = self.k8_pickup(c) else { continue };
+                let pr = if p.owner == 0 {
+                    4
+                } else if p.in_world && h.ee_sub_1a61a0(c as u32 + 1) {
+                    1
+                } else if p.in_world {
+                    2
+                } else {
+                    3
+                };
+                if pr >= best {
+                    best = pr;
+                    pick = Some(c);
+                }
+            }
+            let Some(c) = pick else { continue };
+            let host = hi as u32 + 1;
+            let old = self.k8_pickup(c).map_or(0, |p| p.owner);
+            if old != 0 {
+                // FUN_001caa60: off the old host's +0xe8 list, out of the world
+                let oi = old as usize - 1;
+                for (i, x) in &mut self.k4 {
+                    if let Inst::C2d5dc8(hc) = x {
+                        if *i == oi {
+                            hc.f_e8.retain(|&k| k != c as u32 + 1);
+                        }
+                    }
+                }
+                let g = &mut Cx { g: &mut self.g, rng: &mut self.rng };
+                if let Some((_, Inst::K8(p))) = self.k8.iter_mut().find(|x| x.0 == c) {
+                    p.slot26(c, g, h);
+                    p.in_world = false;
+                }
+            }
+            for (i, x) in &mut self.k4 {
+                if let Inst::C2d5dc8(hc) = x {
+                    if *i == hi {
+                        hc.f_e8.insert(0, c as u32 + 1);
+                    }
+                }
+            }
+            let m = affine_from_bytes(xform);
+            if let Some(p) = self.k8_pickup(c) {
+                p.f_170 = [m[3][0], m[3][1], m[3][2], 1.0];
+                p.f_180 = [0.0; 4];
+                p.xf_pos = p.f_170;
+            }
+            self.k8_attach(c, host, h);
+        }
+    }
+    /// Drop sources per frame. (a) C2d08b0_v7 first knock-out of a guard (+0x330 0 -> 1, guard/hit.rs
+    /// `base(0x154e10)` hook): FUN_00154e10(&DAT_002de578, guard +0x3e0 world point, n = `ko_coins()`
+    /// (+0x3d8, or (< 0) half the guard's +0x404 coin piles), +0x3f0, actor) -> coin drop FUN_001c6fd8(0x5b,
+    /// pos, n) and the DAT_002de578 health countdown (c+4 <= 0 -> FUN_001c6fd8(0x5d, pos, 1)). (b) queued
+    /// host requests (`ClassHost::k8_take_drops`, e.g. K23 FUN_001c6fd8(0x5d) health).
+    pub(super) fn k8_drops(&mut self, h: &mut dyn ClassHost) {
+        let mut reqs = h.k8_take_drops();
+        let mut kos = Vec::new();
+        for (i, x) in &self.k6 {
+            if let Inst::Guard(gd) = x {
+                if gd.f_330 != 0 && !self.k8_ko_dropped.contains(i) {
+                    kos.push((*i, gd.drop_pos_3e0(), gd.ko_coins(), gd.f_3f0));
+                }
+            }
+        }
+        for (o, pos, n, di) in kos {
+            self.k8_ko_dropped.push(o);
+            self.ee_sub_154e10(pos, n, di, o as u32 + 1, &mut reqs, h);
+        }
+        for r in &reqs {
+            self.k8_drop(r.0, r.1, r.3, h);
+        }
+    }
+    /// FUN_00154e10(&DAT_002de578 c, pos, n, di, actor): counters below 1 re-rolled from table c+0x14 =
+    /// DAT_002bdc00 (two FUN_00154c90-weighted rolls over +0x28/+0x30 & +0x2c/+0x34 (coins), +0x38/+0x40 &
+    /// +0x3c/+0x44 (items), FUN_0011d3f8 between them); coins -= (FUN_00132b10(actor, 0x38) ? 2 : 1), items +=
+    /// di; n < 0 -> FUN_0011d3f8(+0x10/+0x14 when coins ran out, else +0x18/+0x1c); n > 0 -> coins
+    /// FUN_001c6fd8(0x5b, pos, n); items < 1 -> one health FUN_001c6fd8(0x5d, pos, 1).
+    fn ee_sub_154e10(&mut self, pos: [f32; 3], mut n: i32, di: i32, actor: u32, reqs: &mut Vec<(i32, [f32; 3], u32, i32)>, h: &mut dyn ClassHost) {
+        let exe = crate::engine::disc::exe::exe();
+        let t = exe.w(0x002d_e578 + 0x14);
+        let t = if t != 0 { t } else { 0x002b_dc00 };
+        let tw = |k: u32| exe.w(t + k) as i32;
+        let roll = |h: &mut dyn ClassHost, lo: i32, hi: i32| -> i32 {
+            let r = h.ee_sub_154c90();
+            if lo == hi {
+                hi
+            } else if lo < hi {
+                lo + (r * ((hi as f32 + 0.999) - lo as f32)) as i32
+            } else {
+                hi + ((1.0 - r) * ((lo as f32 + 0.999) - hi as f32)) as i32
+            }
+        };
+        for (k, a, b) in [(0usize, 0x28u32, 0x2cu32), (1, 0x38, 0x3c)] {
+            if self.g.g_2de578[k] < 1 {
+                let x = roll(h, tw(a), tw(a + 8));
+                let y = roll(h, tw(b), tw(b + 8));
+                self.g.g_2de578[k] = self.rng.FUN_0011d3f8(x, y);
+            }
+        }
+        let d = if h.ee_sub_132b10(actor, 0x38) != 0 { -2 } else { -1 };
+        self.g.g_2de578[1] += di;
+        self.g.g_2de578[0] += d;
+        if n < 0 {
+            let (lo, hi) = if self.g.g_2de578[0] < 1 { (tw(0x10), tw(0x14)) } else { (tw(0x18), tw(0x1c)) };
+            n = self.rng.FUN_0011d3f8(lo, hi);
+        }
+         if 0 < n {
+            reqs.push((0x5b, pos, actor, n));
+        }
+        if self.g.g_2de578[1] < 1 {
+            reqs.push((0x5d, pos, actor, 1));
+        }
+    }
+    /// FUN_001c6de8(pos, parts, out, down, up, min): ground / ceiling probe along DAT_002a2dc0 (+z). No parts
+    /// -> FUN_0020faa0(pos .. A, filter FUN_001c5570). up > 0: FUN_0014cc58(pos -> pos + z up) hit starting
+    /// inside (+0x40 t0 == 0): exit +0x44 == 1 or exit-plane z +0x38 < min -> fail, else the exit point +0x10.
+    /// Else down < 0: FUN_0014cc58(pos -> pos + z down) entry (t0 != 0) with entry-plane z +0x28 >= min ->
+    /// the entry point; down >= 0 -> pos.
+    fn ee_sub_1c6de8(pos: [f32; 3], parts: Option<&[K8Part]>, down: f32, up: f32, min: f32, h: &mut dyn ClassHost) -> Option<[f32; 3]> {
+        let a = [pos[0], pos[1], pos[2] + up];
+        let b = [pos[0], pos[1], pos[2] + down];
+        let own;
+        let parts = match parts {
+            Some(p) => p,
+            None => {
+                let lo = std::array::from_fn(|i| pos[i].min(a[i]));
+                let hi = std::array::from_fn(|i| pos[i].max(a[i]));
+                own = h.ee_sub_20faa0_1c5570(lo, hi);
+                &own[..]
+            }
+        };
+        if 0.0 < up {
+            if let Some(l) = h.ee_sub_14cc58(parts, pos, a) {
+                if l.t[0] == 0.0 {
+                    if l.t[1] == 1.0 || l.plane[1][2] < min {
+                        return None;
+                    }
+                    return Some(l.pos[1]);
+                }
+            }
+        }
+        if down < 0.0 {
+            let l = h.ee_sub_14cc58(parts, pos, b)?;
+            (l.t[0] != 0.0 && !(l.plane[0][2] < min)).then_some(l.pos[0])
+        } else {
+            Some(pos)
+        }
+    }
+    /// FUN_001c6fd8(0x3dd490, kind, pos, actor, n) + FUN_001c6ce8: kind 0x5b -> coin class 91 (template 0x2b3),
+    /// 0x5d -> health class 93 (0x2b4). Probe g = FUN_001c6de8(pos, 0, 300, -FLT_MAX); snap onto the nav
+    /// region (FUN_001c0940, z kept); |g - p|xy > DAT_002c0e80 -> none; p = FUN_001c6de8(p, -250, 1500); up to
+    /// n free template copies (FUN_001cb250, SetState(2)); world parts in p +- 300 (FUN_0020faa0); spiral from
+    /// FUN_0011d448(-pi, pi) / radius 100 (angle += 1.8 FUN_0011cf60, radius += 23, > 300 -> -= 275), 50 tries:
+    /// target t = spot + outward * clamp(200 - 250 (i 0.02), 0, 150) with clear nav lines both ways and a
+    /// ground hit FUN_001c6de8(spot, parts, -300, 300, 0.7) -> landing = hit + z (+0x1d8 - 1), flight time
+    /// FUN_00196928(850, -850, 1, 1, landing - g, DAT_002c0d60) + k 0.075, launch FUN_001c6bd0(k * 0.1,
+    /// FLT_MAX, g, (landing - g) / t - grav t / 2) (state 3). Unplaced copies: SetState(2). Returns the placed.
+    /// Nav region: the host's (FUN_001c4840 focus region / FUN_001c0d70 lookup not distinguished: region 0).
+    pub fn k8_drop(&mut self, kind: i32, pos: [f32; 3], n: i32, h: &mut dyn ClassHost) -> Vec<usize> {
+        use crate::engine::player::p5_states::FUN_00196928;
+        let class = match kind {
+            0x5b => 91,
+            0x5d => 93,
+            _ => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        let Some(g) = Self::ee_sub_1c6de8(pos, None, 0.0, 300.0, -f32::MAX, h) else { return out };
+        let mut p = match h.ee_sub_1c0940(0, g) {
+            Some(q) => [q[0], q[1], g[2]],
+            None => return out,
+        };
+        if ((g[0] - p[0]).powi(2) + (g[1] - p[1]).powi(2)).sqrt() > 2000.0 {
+            return out;
+        }
+        match Self::ee_sub_1c6de8(p, None, -250.0, 1500.0, -f32::MAX, h) {
+            Some(q) => p = q,
+            None => return out,
+        }
+        // FUN_001c6ce8 (n == 0 -> none): n x FUN_001cb250 -> FUN_001cade0 keeps the LAST copy of the best
+        // FUN_001ca978 score (`min <= s`): host-owned copies (record +8 != 0) score 0, never-claimed free copies
+        // 4 before returned ones (3), from the end (FEEL
+        // R39, cap_feel_t3_coins: the t3 coin bursts claim copies 24, 23, 22, then 21..18, 17..14, 13..11)
+        let mut cand: Vec<(bool, usize)> = self.k8.iter().filter_map(|(i, x)| match x {
+            Inst::K8(c) if c.class == class && !c.in_world && c.owner == 0 => Some((c.claimed, *i)),
+            _ => None,
+        }).collect();
+        cand.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        let free: Vec<usize> = cand.into_iter().take(n.max(0) as usize).map(|c| c.1).collect();
+        for (i, x) in &mut self.k8 {
+            if let Inst::K8(c) = x {
+                if free.contains(i) {
+                    c.f_150 = 2;
+                    c.claimed = true;
+                }
+            }
+        }
+        if free.is_empty() {
+             return out;
+        }
+        let r = 300.0f32;
+        let parts = h.ee_sub_20faa0_1c5570([p[0] - r, p[1] - r, p[2] - r], [p[0] + r, p[1] + r, p[2] + r]);
+        let mut ang = self.rng.FUN_0011d448(-std::f32::consts::PI, std::f32::consts::PI);
+        let mut rad = 100.0f32;
+        let grav = [GRAV_2C0D60[0], GRAV_2C0D60[1], GRAV_2C0D60[2]];
+        let mut i = 0;
+        let mut launch = Vec::new();
+        loop {
+            let t = i as f32 * 0.02;
+            let hh = (200.0 + t * (-250.0 + t * 0.0)).clamp(0.0, 150.0);
+            let v5 = [p[0] + ang.cos() * rad, p[1] + ang.sin() * rad, p[2]];
+            let v3 = [v5[0] - g[0], v5[1] - g[1], 0.0];
+            let len = (v3[0] * v3[0] + v3[1] * v3[1]).sqrt();
+            let dir = if len < 1.0e-4 { [1.0, 0.0, 0.0] } else { [v3[0] / len, v3[1] / len, 0.0] };
+            let tgt = [v5[0] + dir[0] * hh, v5[1] + dir[1] * hh, v5[2]];
+            let clear = !h.ee_sub_1c0980(0, v5, tgt) && !h.ee_sub_1c0980(0, tgt, v5);
+            if clear {
+                if let Some(hit) = Self::ee_sub_1c6de8(tgt, Some(&parts), -300.0, 300.0, 0.7, h) {
+                    let o = free[launch.len()];
+                    let lift = match self.k8.iter().find(|x| x.0 == o) {
+                        Some((_, Inst::K8(c))) => c.f_1d8 - 1.0,
+                        _ => 0.0,
+                    };
+                    let land = [hit[0], hit[1], hit[2] + lift];
+                    let d = [land[0] - g[0], land[1] - g[1], land[2] - g[2]];
+                    let tf = FUN_00196928(850.0, -850.0, 1.0, 1.0, d, grav) + launch.len() as f32 * 0.075;
+                    let vel = [d[0] / tf - grav[0] * tf * 0.5, d[1] / tf - grav[1] * tf * 0.5, d[2] / tf - grav[2] * tf * 0.5];
+                    launch.push((o, vel));
+                }
+            }
+            ang = crate::engine::camera::math::FUN_0011cf60(ang + 1.8);
+            rad += 23.0;
+            if r < rad {
+                rad -= r - 25.0;
+            }
+            i += 1;
+            if i >= 0x32 || launch.len() >= free.len() {
+                break;
+            }
+        }
+        
+        for (k, &(o, vel)) in launch.iter().enumerate() {
+            let gx = &mut Cx { g: &mut self.g, rng: &mut self.rng };
+            if let Some((_, Inst::K8(c))) = self.k8.iter_mut().find(|x| x.0 == o) {
+                c.in_world = true;
+                c.f_170 = [g[0], g[1], g[2], 1.0];
+                c.xf_pos = c.f_170;
+                c.f_160 = (k + 1) as f32 * 0.1;
+                c.f_1c4 = 0;
+                c.set_state(o, 3, gx, h);
+                c.f_180 = [vel[0], vel[1], vel[2], 0.0];
+                c.xf_vel = c.f_180;
+                c.f_1cc = f32::MAX;
+            }
+            out.push(o);
+        }
+        out
     }
     /// K8 per frame: slots 15 then 16 of every pickup in the world
     pub(super) fn frame_k8(&mut self, h: &mut dyn ClassHost) {

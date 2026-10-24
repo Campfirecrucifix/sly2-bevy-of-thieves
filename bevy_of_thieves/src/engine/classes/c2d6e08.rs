@@ -11,6 +11,8 @@ pub struct C2d6e08 {
     pub f_30: f32,
     /// +0x40 bit 1 (tagged pointer or pointed word)
     pub f_40: u32,
+    /// +0xe4 (field 1178, C2d5dc8)
+    pub f_e4: bool,
 }
 
 /// slot 5: FUN_00113a70
@@ -31,6 +33,14 @@ impl C2d6e08 {
                 h.ee_sub_1a6ca8(obj, 0);
             }
             self.f_40 |= 2;
+        }
+    }
+
+    /// slot 22 inherited from C2d5dc8: FUN_001ca8e0
+    pub fn ee_sub_1ca8e0(&mut self, obj: usize, h: &mut dyn ClassHost) {
+        h.base(0x1a6178, obj);
+        if !self.f_e4 {
+            h.ee_sub_149ab8(obj, super::c2d5dc8::PMF_2A77C0, 0);
         }
     }
 }

@@ -162,6 +162,7 @@ impl C2d3838 {
     pub fn feed(&mut self, props: &[crate::engine::world::props::Prop], obj: usize, h: &mut dyn ClassHost) {
         use crate::engine::world::props::PropValue;
         let w = |b: &[u8], k: usize| b.get(k * 4..k * 4 + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+        let r61 = std::env::var_os("SLY2_R61OFF").is_none();
         for p in props {
             match (&p.value, p.field) {
                 (PropValue::Array(es), 965) => {
@@ -187,7 +188,10 @@ impl C2d3838 {
                 }
                 (PropValue::Scalar(b), 968) => {
                     if let Some(o) = w(b, 0) {
-                        self.f_1c8 = h.ee_sub_15e938(1, o as i32, Self::me(obj));
+                        // ANIM-ALL R62 1:1: FUN_0015e938(4, oid, self) like 966 / 967 (the copy's own oid-66977 listener:
+                        // PCSX2 EP2 079 two distinct +0x1c8); SLY2_R62COFF = the old mode 1
+                        let mode = if std::env::var_os("SLY2_R62COFF").is_none() { 4 } else { 1 };
+                        self.f_1c8 = h.ee_sub_15e938(mode, o as i32, Self::me(obj));
                     }
                 }
                 (PropValue::Scalar(b), 971) => {
@@ -199,6 +203,18 @@ impl C2d3838 {
                     self.f_164 = f32::from_bits(w(b, 1).unwrap_or(0));
                 }
                 (PropValue::Scalar(b), 13) => self.alo.f_38 = f32::from_bits(w(b, 0).unwrap_or(0)),
+                // ANIM-ALL R61 1:1 (descriptor table 0x2ac880): 966 / 967 kind 0x200a = oid resolved by FUN_0013e590
+                // (FUN_0015e938(4, oid, self)) into +0x16c wander / +0x170 charge path; 969 / 970 / 973 floats
+                // +0x150 / +0x154 / +0x168. SLY2_R61OFF = the old feed (paths never set: EP2 4463 idles on state 0)
+                (PropValue::Scalar(b), f @ (966 | 967)) if r61 => {
+                    if let Some(o) = w(b, 0) {
+                        let r = h.ee_sub_15e938(4, o as i32, Self::me(obj));
+                        if f == 966 { self.f_16c = r } else { self.f_170 = r }
+                    }
+                }
+                (PropValue::Scalar(b), 969) if r61 => self.f_150 = f32::from_bits(w(b, 0).unwrap_or(0)),
+                (PropValue::Scalar(b), 970) if r61 => self.f_154 = f32::from_bits(w(b, 0).unwrap_or(0)),
+                (PropValue::Scalar(b), 973) if r61 => self.f_168 = f32::from_bits(w(b, 0).unwrap_or(0)),
                 _ => {}
             }
         }
@@ -472,6 +488,8 @@ impl C2d3838 {
         self.f_224 = now;
         if s != 2 {
             if let Some(&(_, anim, fl)) = usize::try_from(s).ok().and_then(|k| self.tab.get(k)) {
+                // ANIM-ALL R61 1:1 (0x001b1790 `ori a2, a2, 1`): the table flags | 1 (SLY2_R61OFF: the flags alone)
+                let fl = if std::env::var_os("SLY2_R61OFF").is_none() { fl | 1 } else { fl };
                 ee_sub_1305b8(0, 1.0, anim, me, fl, &mut self.f_1c4, h);
             }
         }
@@ -539,6 +557,13 @@ impl super::ClassSet {
             if let Some(p) = w.objects.get(o.clone_of.unwrap_or(i)).and_then(crate::engine::game::fields::object_props) {
                 c.feed(p, i, h);
             }
+            // ANIM-ALL R61 1:1: FUN_001c9b08 key-5 override rows of the class-6 spawner (FUN_0013f810 on the copy):
+            // EP2 106767 / 106768 give their creature copy 966 / 967 paths and 969 / 970 radii (SLY2_R61OFF: not fed)
+            if std::env::var_os("SLY2_R61OFF").is_none() {
+                if let Some(ov) = w.override_props.get(&i) {
+                    c.feed(ov, i, h);
+                }
+            }
             c.ee_sub_1b0ca8(i, h);
             self.k22c.push((i, super::Inst::K22C96(c)));
         }
@@ -548,6 +573,13 @@ impl super::ClassSet {
         for (i, x) in &mut self.k22c {
             if let super::Inst::K22C96(c) = x {
                 c.ee_sub_1b0d08(*i, now, h);
+                // ANIM-ALL R62: the add to the world (FUN_001a5630) runs vtable +0x64 = slot 11 FUN_001b0c68 for an
+                // object in the update list (+0x28 bit 60) after its load-post: the +0x1c4 anim is released and the
+                // later FUN_001b0d90 SetState(1) is a no-op (same state) -> PCSX2 EP2 079: 118626 st 1, +0x1c4 0,
+                // no ASEGA (port kept the looping ASEG 118629). SLY2_R62BOFF = not run
+                if std::env::var_os("SLY2_R62BOFF").is_none() && !h.lo_removed(*i) {
+                    c.ee_sub_1b0c68(*i, h);
+                }
                 h.base(0x1f3ea8, *i);
             }
         }
@@ -555,6 +587,10 @@ impl super::ClassSet {
     pub(super) fn frame_k22_96(&mut self, h: &mut dyn ClassHost) {
         let (now, dt, m) = (self.g.t, self.g.dt, self.g.g_2ddf54);
         for (i, x) in &mut self.k22c {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let super::Inst::K22C96(c) = x {
                 c.ee_sub_1b0e28(*i, now, dt, h);
                 c.ee_sub_1b1030(*i, h);

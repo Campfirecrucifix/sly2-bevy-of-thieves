@@ -145,6 +145,16 @@ impl C2cf1e8 {
     /// slot 15: FUN_00163b48
     pub fn ee_sub_163b48(&mut self, obj: usize, g: &ClassGlobals, h: &mut dyn ClassHost) {
         h.ee_sub_1a5e28(obj);
+        // CRAWL R112: +0x54 = the task state; the port keeps it in the JobMgr (host mirror `task_state_54`), so this
+        // instance's own f_54 stayed -1 and the +0x80 marker got vt +0x4c (Remove) every frame: the hub job marker
+        // 1702 (1260 = 1584, Tailing Dimitri) never reached the world update list (no k12 proximity msg 5; EMU5
+        // rec5 067: 1584 1->2 at the marker). Opt-out SLY2_NO_R112_TASK54=1.
+        if std::env::var_os("SLY2_NO_R112_TASK54").is_none() {
+            let s = h.task_state_54(obj as u32 + 1);
+            if s != -1 {
+                self.f_54 = s;
+            }
+        }
         if self.f_54 == 1 {
             let d = self.f_78;
             let e = g.t - self.f_58;

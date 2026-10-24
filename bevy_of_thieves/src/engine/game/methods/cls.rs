@@ -60,6 +60,11 @@ pub struct ClassLink {
     /// WP-J12: SetJtJts(jt, jts, -1) requests of method 0x0010b028 on class-53 (JT) objects: (object index,
     /// jts). Not drained yet: the player layer owns FUN_0018c250 (`player::Jt::set_jts`).
     pub jt_states: Vec<(u32, i32)>,
+    /// POOL1: method 1110 thunk 0x0010d9e0 -> FUN_00224e70(o, x) on class-101 bombs: (object index, x),
+    /// drained by player::plugin::script_bomb_explode
+    pub explode_224e70: Vec<(u32, u32)>,
+    /// POOL1 r38: per-world count of method 1110 (bomb explode) calls (test probe; was a global static)
+    pub explode_count: usize,
     /// WP-J15: job manager method rows (callee, object index, int args): 0x162660 (method 1258, class 132)
     /// / 0x165118 (method 1284, class 133); applied to `jobs::JobMgr` by `vm_state::apply_job_calls`.
     pub job_calls: Vec<(u32, u32, Vec<i32>)>,
@@ -82,7 +87,7 @@ pub struct GuardOids {
 }
 
 /// Engine functions recorded only (callee address): 0x00142540 / 0x001b9ca0 (FUN_00205438 sub-object of
-/// classes 52-55), 0x001a58d0 (vtable +0x54 SetParent, mutates the hierarchy), 0x00206820 / 0x0020ab58 (guard vtable calls / +0xefc +0xed8), 0x00212e40 (class 126-131
+/// classes 52-55), 0x001a58d0 (vtable +0x54 SetParent, mutates the hierarchy), 0x0020ab58 (guard +0xefc +0xed8), 0x00212e40 (class 126-131
 /// sequence lookup), 0x001f6b48 / 0x001f6bc8 (SO +0xe4 0xb0-byte records), 0x0013b860 (classes 79-82),
 /// and the inline thunks 0x00100a00 (vtable +0x134) / 0x0010daf0 (vtable +0x18c, -1).
 /// WP-J10 adds: 0x001cb488 / 0x001cb4b8 (class 6 +0xe0 attachment record +8 = 1 / 0, FUN_001cb410; the
@@ -105,11 +110,15 @@ pub const RECORDED_INLINE: &[u32] = &[0x0010_0a00, 0x0010_daf0, 0x0010_db78, 0x0
 /// WP-EP1b adds FUN_0013b5c8 (method 389, classes 79 / 80 / 82 fuse, `k15_79::Proj::ee_sub_13b5c8`).
 /// WP-EP1f adds FUN_00228170 (thunk 0x10b760, field 778: the warp's "go", `ClassHost::ee_sub_228170`).
 pub const CLASS_CALLEES: &[u32] =
-    &[0x0022_8170, 0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8, 0x0013_3380, 0x001f_6ac8, 0x001f_6b48, 0x001f_6bc8, 0x001f_7c68, 0x0017_1d58, 0x0017_1da8, 0x0015_41d8,
+    &[0x0022_8170, 0x001d_fd58, 0x001d_fe80, 0x001d_feb8, 0x0022_83d0, 0x0015_c150, 0x0015_a150, 0x0015_a160, 0x0016_2dd0, 0x0016_4640, 0x0017_1cf8, 0x0017_0e68, 0x0013_3340, 0x001b_aed8, 0x001b_af18, 0x001d_ffe0, 0x001e_0760, 0x001d_6b00, 0x0020_87c8, 0x0020_88e0, 0x0020_8700, 0x0020_8728, 0x0013_b5c8, 0x0013_3380, 0x001f_6ac8, 0x001f_6b48, 0x001f_6bc8, 0x001f_7c68, 0x0017_1d58, 0x0017_1da8, 0x0015_41d8,
     // WP-TR1 batch
-    0x001e_0120, 0x001f_0598, 0x001f_0730, 0x001f_03a8, 0x001f_82b8, 0x001b_2020, 0x001b_2048, 0x0012_91a8, 0x0012_f990, 0x001f_78d8, 0x001f_b4f0, 0x001f_e3f8, 0x001f_e9f8, 0x001f_ea60, 0x0022_7c90, 0x001e_1970, 0x001e_1ad0, 0x001e_1b10,
+    0x001e_0120, 0x001f_0598, 0x001f_0730, 0x001f_03a8, 0x001f_82b8, 0x001b_9880, 0x001b_2020, 0x001b_2048, 0x0012_91a8, 0x0012_f990, 0x001f_78d8, 0x001f_b4f0, 0x001f_e3f8, 0x001f_e9f8, 0x001f_ea60, 0x0022_7c90, 0x001e_1970, 0x001e_1ad0, 0x001e_1b10,
     // WP-TR3b: explode projectile + SetParent
-    0x0013_b860, 0x001a_58d0];
+    0x0013_b860, 0x001a_58d0,
+    // CRAWL R25: FUN_001f17b0 (methods 309 / 310 FUN_00103ca0 / FUN_00103d28): guard pickpocket item queue
+    0x001f_17b0,
+    // BOSS: FUN_00206820 (method 454, thunk FUN_00103fe8): guard reset + re-add (home = current pose)
+    0x0020_6820];
 
 /// WP-J11: guard oid-list callees run on `ClassLink::guard_oids` (no class instance needed):
 /// FUN_0020aa78 (method 0x00102988), FUN_0020ab58.
@@ -254,6 +263,7 @@ impl ClassLink {
                 let Some(i) = (seq as usize).checked_sub(1) else { continue };
                 match find(set, i) {
                     Some(Inst::C2d8c48(c)) => {
+                        
                         ee_sub_1dfd58(c, &mut self.nodes, i, player, &mut self.host);
                         n += 1;
                     }
@@ -271,6 +281,20 @@ impl ClassLink {
         if thunk == 0x0010_b028 {
             self.ee_sub_10b028(obj, &args);
             return true;
+        }
+        // POOL1 R63: methods 0x10e398 / 0x10e420 (FUN_001cb488 / FUN_001cb4b8(spawner, copy): attach record +8 = 1 / 0)
+        // also set the class host's attach map (FUN_001ca978 rank 0); not consumed: the live bridge still writes
+        // the guest copy of the record when there is one
+        if thunk == 0x0010_e398 || thunk == 0x0010_e420 {
+            use crate::engine::classes::ClassHost;
+            if let Some(MArg::Word(c)) = args.first() {
+                if thunk == 0x0010_e398 {
+                    self.host.ee_sub_1cb488(obj + 1, c + 1);
+                } else {
+                    self.host.ee_sub_1cb4b8(obj + 1, c + 1);
+                }
+            }
+            return false;
         }
         // WP-EP2F: methods of fields 595-612 (FUN_00170b40..FUN_00170dd0): entry appended to the class-113 +0x50
         // list (`C2cf880::apply_field`); the resolved level routine gets the matching world-free command
@@ -364,11 +388,29 @@ impl ClassLink {
         // 0x0010b028
         let i = int_arg(args);
         let class = self.host.world.as_deref().and_then(|w| w.objects.get(obj as usize)).map(|o| o.class);
+        if std::env::var_os("SLY2_R83IDLE").is_some() {
+            eprintln!("R83 slot87 obj {obj} i {i} class {class:?} set {}", self.set.is_some());
+        }
         match class {
             Some(53) => {
                 // 0x0018d568: (u32) i < 9, else nothing
                 if let Some(jts) = crate::engine::player::p7_damage::FUN_0018d568(i) {
                     self.jt_states.push((obj, jts));
+                }
+            }
+            // ANIM-ALL R59: 1:1 in-set slot 87 (SetState of the jump table: index 4 = Bentley 9 / Murray 0x10,
+            // the SM 419 (+0x102c) states of PCSX2 060); SLY2_R59OFF = the old hook / recorded-only path
+            Some(55) if self.set.is_some() && std::env::var_os("SLY2_R59OFF").is_none() => {
+                let (set, host) = (self.set.as_mut().unwrap(), &mut self.host);
+                if !set.k18_slot87(obj as usize, i as u32, host) {
+                    self.recorded.push(Recorded { thunk: 0x0010_b028, callee: 0x0013_5c20, obj, args: args.to_vec() });
+                }
+            }
+            Some(54) if self.set.is_some() && std::env::var_os("SLY2_R59OFF").is_none() => {
+                let (set, host) = (self.set.as_mut().unwrap(), &mut self.host);
+                // 0x001b7e40
+                if set.k19_murray_with(obj as usize, host, |c, cx| c.ee_sub_1b7e40_cx(obj as usize, i as u32, cx)).is_none() {
+                    self.recorded.push(Recorded { thunk: 0x0010_b028, callee: 0x001b_7e40, obj, args: args.to_vec() });
                 }
             }
             Some(55) if self.set.is_some() => {
@@ -502,6 +544,8 @@ impl ClassLink {
                 }
                 set.k6_run_routine(i, ri, h);
             }
+            // BOSS: FUN_00206820(guard) (method 454 / field 330, thunk 0x00103fe8): reset + slot 25 re-add
+            0x0020_6820 => return set.k6_reset_206820(i, h),
             // WP-K28: FUN_00170e68(routine = obj, guard (kind 0x2038)) (method 0x00105cd0, field 594, class
             // 113): guard != 0 -> FUN_00171cf8(guard, routine)
             0x0017_0e68 => {
@@ -520,11 +564,20 @@ impl ClassLink {
                     _ => 0.0,
                 };
                 let t = set.g.t;
+                // HEIST r17: class 81 (K13, e.g. the EP2 turret shells 73234) is a class-79 projectile too
+                if let Some(c) = set.k13_get(i) {
+                    c.p.ee_sub_13b5c8(d, t);
+                    return true;
+                }
                 let Some(c) = set.k15_79_get(i) else { return false };
                 c.p.ee_sub_13b5c8(d, t);
             }
             // WP-TR3b: FUN_0013b860 (method 390, classes 79-82): explode projectile
             0x0013_b860 => {
+                if let Some(c) = set.k13_get(i) {
+                    c.p.ee_sub_13b860(i, h);
+                    return true;
+                }
                 let Some(c) = set.k15_79_get(i) else { return false };
                 c.p.ee_sub_13b860(i, h);
             }
@@ -542,7 +595,8 @@ impl ClassLink {
             // the K14 port `ClassSet::k14_fire` (class-112 launcher, class-81 projectile)
             0x001d_6b00 => {
                 let Some(Ref::Basic(p)) = raw.first() else { return false };
-                if set.k14_fire(i, *p as usize, h).is_none() {
+                // HEIST r18: class 79 / 80 / 82 projectiles too (the EP2 chopper's class-82 missiles, entry 186 sdf8)
+                if set.k15_fire(i, *p as usize, h).is_none() {
                     return false;
                 }
             }
@@ -569,6 +623,10 @@ impl ClassLink {
                     }
                     k += 1;
                 }
+            }
+            0x001f_17b0 => {
+                let Some((_, Inst::Guard(g))) = set.k6.iter_mut().find(|x| x.0 == i) else { return false };
+                g.ee_sub_1f17b0(int_arg(args));
             }
             0x0020_87c8 | 0x0020_88e0 => {
                 let Some((_, Inst::Guard(g))) = set.k6.iter_mut().find(|x| x.0 == i) else { return false };
@@ -634,6 +692,11 @@ impl ClassLink {
             0x001f_03a8 => { let _ = h.ee_sub_1f03a8_link(obj, int_arg(args) as u32, if args.len() > 1 { int_arg(&args[1..]) } else { 0 } as i32, if args.len() > 2 { int_arg(&args[2..]) as u32 } else { 0 }, if args.len() > 3 { int_arg(&args[3..]) } else { 0 } as i32); }
             // WP-TR1: FUN_001f82b8(obj, v) — ClassHost trait: alert/trigger
             0x001f_82b8 => h.ee_sub_1f82b8(i, int_arg(args)),
+            // HEIST: FUN_001b9880(obj) (method 939, class 54, thunk 0x10d370) = FUN_001b6078(obj, 0xf): Murray
+            // SetState 15 (Thunder Beak 1895 enter: Murray waits on marker 123935 for Bentley's team jump)
+            0x001b_9880 => {
+                let _ = set.k19_murray_with(i, h, |c, cx| c.ee_sub_1b6078(i, 0xf, cx));
+            }
             // WP-TR1b: FUN_001b2020(obj, v) — k15_79 Proj::f_23c push (cap 4)
             0x001b_2020 => {
                 let v = int_arg(args) as i32;
@@ -702,6 +765,8 @@ impl ClassLink {
             _ => match (callee, find(set, i)) {
                 // FUN_0015a150: +0x148 = DAT_002a514c (FLT_MAX)
                 (0x0015_a150, Some(Inst::C2ceb78(c))) => c.f_148 = f32::MAX,
+                // ANIM-ALL R66: FUN_0015a160 (thunk 0x105a78): +0x148 = -1.0
+                (0x0015_a160, Some(Inst::C2ceb78(c))) => c.f_148 = -1.0,
                 (0x001d_fd58, Some(Inst::C2d8c48(c))) => ee_sub_1dfd58(c, nodes, i, handle_of(raw.first()), h),
                 // FUN_001dfe80: FUN_001dfd58(obj, FUN_001c4840(SW) = SW +0x3efc)
                 (0x001d_fe80, Some(Inst::C2d8c48(c))) => {

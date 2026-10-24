@@ -213,6 +213,8 @@ impl C2cb230 {
         self.m.set_i(0x12f0, 1);
         self.m.set_f(0x1020, 100.0);
         self.f_1300 = 100;
+        // WIRE-SLY: REPLACED +0x12fc "mpCur" pool pointer -> the pool value (as the JT `Gadgets::mp`, full = 100)
+        self.ctr_12fc = Some(100);
         self.m.set_f(0x1304, -60.0);
         self.m.set_i(0x10c8, -1);
         self.m.set_i(0x10f0, 1);
@@ -277,45 +279,64 @@ pub fn ee_sub_1f1448(sm: u32, obj: u32, a: i32, b: u32, slot: &mut u32, h: &mut 
     }
 }
 
-impl C2cb230 {
-    /// FUN_00205478(self, mask): first enable of each counter kind links its state machine to self
-    pub fn ee_sub_205478(&mut self, obj: usize, mask: u32, h: &mut dyn ClassHost) {
-        for u in 0..6u32 {
-            let bit = 1u32 << u;
-            let off = 0x2a0 + 4 * u;
-            if mask & bit == 0 {
-                continue;
+/// FUN_00205478 on the +0x2a0..+0x2b4 counters `n` of actor handle `o` (shared by all players; ANIM-ALL R34:
+/// split out so Sly, whose JT is not a class instance, keeps his counters in `ClassSet::jt_2a0`)
+pub fn ee_sub_205478_cnt(n: &mut [i32; 6], o: u32, mask: u32, h: &mut dyn ClassHost) {
+    for u in 0..6u32 {
+        if mask & (1 << u) == 0 {
+            continue;
+        }
+        let c = &mut n[u as usize];
+        *c += 1;
+        if *c < 2 {
+            let sm = h.ee_sub_15e938(4, ee_sub_1fd0c0(u), o);
+            if sm != 0 && h.ee_sub_1f03c8(sm, o) == 0 {
+                // FUN_001f0198 -> FUN_001f01b8(sm, self, -1, 9, &out)
+                h.ee_sub_1f01b8(sm, o, -1, 9);
             }
-            let c = self.m.i(off) + 1;
-            self.m.set_i(off, c);
-            if c < 2 {
-                let sm = h.ee_sub_15e938(4, ee_sub_1fd0c0(u), handle(obj));
-                if sm != 0 && h.ee_sub_1f03c8(sm, handle(obj)) == 0 {
-                    // FUN_001f0198 -> FUN_001f01b8(sm, self, -1, 9, &out)
-                    h.ee_sub_1f01b8(sm, handle(obj), -1, 9);
+        }
+    }
+}
+
+/// FUN_00205588 on the counters `n` of actor handle `o`
+pub fn ee_sub_205588_cnt(n: &mut [i32; 6], o: u32, mask: u32, h: &mut dyn ClassHost) {
+    for u in 0..6u32 {
+        let c = &mut n[u as usize];
+        if mask & (1 << u) == 0 || *c == 0 {
+            continue;
+        }
+        *c -= 1;
+        if *c < 1 {
+            let sm = h.ee_sub_15e938(4, ee_sub_1fd0c0(u), o);
+            if sm != 0 {
+                let rec = h.ee_sub_1f03c8(sm, o);
+                if rec != 0 {
+                    h.ee_sub_1f0598_link(rec);
                 }
             }
         }
     }
+}
+
+impl C2cb230 {
+    /// FUN_00205478(self, mask): first enable of each counter kind links its state machine to self
+    pub fn ee_sub_205478(&mut self, obj: usize, mask: u32, h: &mut dyn ClassHost) {
+        let mut n = self.cnt_2a0();
+        ee_sub_205478_cnt(&mut n, handle(obj), mask, h);
+        self.set_cnt_2a0(n);
+    }
     /// FUN_00205588(self, mask): last disable of each counter kind removes the link record
     pub fn ee_sub_205588(&mut self, obj: usize, mask: u32, h: &mut dyn ClassHost) {
-        for u in 0..6u32 {
-            let bit = 1u32 << u;
-            let off = 0x2a0 + 4 * u;
-            let c = self.m.i(off);
-            if mask & bit == 0 || c == 0 {
-                continue;
-            }
-            self.m.set_i(off, c - 1);
-            if c - 1 < 1 {
-                let sm = h.ee_sub_15e938(4, ee_sub_1fd0c0(u), handle(obj));
-                if sm != 0 {
-                    let rec = h.ee_sub_1f03c8(sm, handle(obj));
-                    if rec != 0 {
-                        h.ee_sub_1f0598_link(rec);
-                    }
-                }
-            }
+        let mut n = self.cnt_2a0();
+        ee_sub_205588_cnt(&mut n, handle(obj), mask, h);
+        self.set_cnt_2a0(n);
+    }
+    fn cnt_2a0(&self) -> [i32; 6] {
+        std::array::from_fn(|u| self.m.i(0x2a0 + 4 * u as u32))
+    }
+    fn set_cnt_2a0(&mut self, n: [i32; 6]) {
+        for (u, v) in n.into_iter().enumerate() {
+            self.m.set_i(0x2a0 + 4 * u as u32, v);
         }
     }
     /// FUN_00144038: slot 88 index is 5 or 6 (states 10 / 11)
@@ -449,7 +470,7 @@ fn ee_sub_134310(a: i64, b: i64) -> i64 {
 impl C2cb230 {
     /// FUN_00144068: +0x270 > 0 || +0x1084 != 0
     pub fn ee_sub_144068(&self) -> bool {
-        self.m.i(0x270) > 0 || self.m.i(0x1084) != 0
+        self.m.i(0x270) > 0 || self.m.i(0x1084) != 0 || self.k22_link != 0
     }
     /// FUN_0019c870(self + 0x2c0, &flag): JMP state ASEG (flag 0)
     pub fn ee_sub_19c870(&self) -> u32 {

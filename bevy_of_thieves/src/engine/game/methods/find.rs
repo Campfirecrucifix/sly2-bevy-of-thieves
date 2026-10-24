@@ -11,8 +11,8 @@
 //! FUN_0015e958 = FUN_0015e678(.., mode | 0x200, .., max 1) and returns the first stored object.
 //!
 //! Replaced: the oid bucket is `World::find_oid` (creation order). Not modelled: the alias bucket
-//! (world+0x1838, no alias objects are created by the port's loader) and the +0x28 bits 48..51 /
-//! +0x3c scope-list pre-check of FUN_0015e3e8 (FUN_001c9950 part ids) — every candidate passes it.
+//! (world+0x1838, no alias objects are created by the port's loader). The +0x3c scope pre-check of FUN_0015e3e8
+//! is ported for the default +0x28 kind -1 (ANIM-ALL R34).
 
 use crate::engine::world::World;
 use std::collections::HashMap;
@@ -21,6 +21,15 @@ use std::collections::HashMap;
 pub fn ee_sub_15e958(w: &World, mode: u32, oid: i32, obj: u32) -> u32 {
     // 0x0015e958
     let m = mode & 0xff;
+    // POOL1 r30: REPLACED: a template copy (FUN_001c9b08) owns a cloned subtree in the original; the port's
+    // copies have no children of their own, so the search scope is the template (e.g. the bentley_mine copy's
+    // explode sound 3995 in script field 1240)
+    let obj = match w.objects.get(obj as usize).and_then(|o| o.clone_of) {
+        // HEIST: only when the template has a subtree the copy lacks (a childless clone child, e.g. the TB valve
+        // copies' use points with SLY2_CLONE_KIDS, keeps itself so the search starts from its own owner chain)
+        Some(t) if !w.objects.iter().any(|o| o.owner == Some(obj as usize)) && w.objects.iter().any(|o| o.owner == Some(t)) => t as u32,
+        _ => obj,
+    };
     if oid == -1 || (obj == 0 && m != 5) {
         return 0;
     }
@@ -48,7 +57,28 @@ pub fn ee_sub_15e958(w: &World, mode: u32, oid: i32, obj: u32) -> u32 {
         None
     };
     let (mut count, mut best, mut out) = (0i32, i32::MAX, 0u32);
-    for &cand in w.find_oid(oid) {
+    // ANIM-ALL R34: FUN_0015e3e8 scope pre-check (mode without 0x400): the searcher scope is obj +0x3c (FUN_0015e678's
+    // fallback for a 0 scope; DAT_003e139c root without obj); a candidate whose +0x28 bits 48..51 are -1 (every
+    // object FUN_0013f990 never touched: 98% in emu_play_ep4/025) passes only when its +0x3c node is on that
+    // chain (leaf .. root). Not modelled: the 0 / >0 kinds (FUN_0013f990 via the 0x2cbe44 callback, FUN_0013fa30).
+    let chain = scope_chain(w, obj);
+    // HEIST r23: then the alias bucket (FUN_0015e3c0, world+0x1838): every alias node naming `oid` with an object
+    // (+0x10) is a candidate whose scope node is the alias node's parent (+4), skipped when that object is already
+    // stored (e.g. the Train Hack ship 17344: its +0x3c node 0xf0a610 hangs under the root, so sequence 2410's
+    // root-scoped action 7 finds it only here; emu_play_ep4b/002)
+    let leafs = w.find_oid(oid).iter().map(|&c| (c, w.life.alias_leaf.get(c).copied().unwrap_or(0), false));
+    let aliases = w.life.alias.bucket.get(&oid).into_iter().flatten().filter_map(|&n| {
+        let nd = w.life.alias.nodes.get(n)?;
+        Some((nd.object?, nd.parent.unwrap_or(0), true))
+    });
+    let cands: Vec<(usize, usize, bool)> = leafs.chain(aliases).collect();
+    for (cand, node, alias) in cands {
+        if alias && count > 0 && out == cand as u32 {
+            continue;
+        }
+        if mode & 0x400 == 0 && !scope_ok(w, &chain, cand, node, mode) {
+            continue;
+        }
         // FUN_0015e3e8
         let accept = match m {
             1 => first_mark(cand) == Some(1),
@@ -74,6 +104,47 @@ pub fn ee_sub_15e958(w: &World, mode: u32, oid: i32, obj: u32) -> u32 {
         }
     }
     out
+}
+
+/// ANIM-ALL R36: FUN_0015e3e8 kind -1 over both FUN_0015e678 buckets (own +0x3c, then alias +4): some object with
+/// `oid` passes the scope pre-check of `chain` (the R34 guard in classes/plugin.rs ee_sub_15e938)
+pub fn any_in_scope(w: &World, chain: &[usize], oid: i32) -> bool {
+    w.find_oid(oid).iter().any(|&c| in_scope(w, chain, c))
+        || w.life.alias.bucket.get(&oid).into_iter().flatten().any(|&n| {
+            w.life.alias.nodes.get(n).is_some_and(|a| a.object.is_some_and(|o| scope_ok(w, chain, o, a.parent.unwrap_or(0), 0)))
+        })
+}
+
+/// ANIM-ALL R34: the searcher's +0x3c chain (alias node indices, leaf .. root node 0) of FUN_0015e3e8
+pub fn scope_chain(w: &World, obj: u32) -> Vec<usize> {
+    let mut v = Vec::new();
+    let mut n = if obj != 0 { w.life.alias_leaf.get(obj as usize).copied() } else { Some(0) };
+    while let Some(k) = n {
+        v.push(k);
+        n = w.life.alias.nodes.get(k).and_then(|x| x.parent);
+    }
+    v
+}
+
+/// ANIM-ALL R34: FUN_0015e3e8 +0x28 kind -1: the candidate's +0x3c node is on the searcher's chain
+pub fn in_scope(w: &World, chain: &[usize], cand: usize) -> bool {
+    scope_ok(w, chain, cand, w.life.alias_leaf.get(cand).copied().unwrap_or(0), 0)
+}
+
+/// ANIM-ALL R47: FUN_0015e3e8 pre-check by the candidate's +0x28 kind (FUN_0013f990, `World::life.scope_kind`):
+/// -1 (default) `node` is on `chain`; 0 some chain node (only the first with 0x800) has `node`'s entry index
+/// (FUN_001c9950 of the node keys); > 0 always passes (-2 records of FUN_0013fb40).
+pub fn scope_ok(w: &World, chain: &[usize], cand: usize, node: usize, mode: u32) -> bool {
+    let key = |n: usize| w.life.alias.nodes.get(n).map_or(u32::MAX, |x| x.key);
+    match w.life.scope_kind.get(&cand).copied().unwrap_or(-1) {
+        -1 => chain.contains(&node),
+        0 => {
+            let e = crate::engine::world::loads_b5::ee_sub_1c9950(key(node));
+            let n = if mode & 0x800 != 0 { 1 } else { chain.len() };
+            chain.iter().take(n).any(|&p| crate::engine::world::loads_b5::ee_sub_1c9950(key(p)) == e)
+        }
+        _ => true,
+    }
 }
 
 /// WP-J8: FUN_0015e9c8(world, mode, cid, obj, max, out) for the modes BIF 120 uses (0x401 with an

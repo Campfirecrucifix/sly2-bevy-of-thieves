@@ -68,15 +68,63 @@ impl C2cb230 {
     /// +0x274 stack vt+0x74, FUN_001e46a0, FUN_00140558, FUN_001a2460, FUN_00140750, FUN_00142af8,
     /// FUN_00187de0 / FUN_001db490 pause, FUN_001eed10).
     pub fn ee_sub_1403d0(&mut self, obj: usize, cx: &mut Cx) {
+        ee_sub_1403d0_vt(self, obj, cx);
+    }
+    /// FUN_00144640(self + 0xfd0) head, 1:1: when +0xfd0[10] (busy) == 0, FUN_00144068(self) and the timer
+    /// [9] <= now: [9] = now + DAT_002bd2d0; while the world lock (FUN_0020f0b0, +0x3d78 > 0) is up every
+    /// guard (FUN_00132b10 class 0x38) in self's +0xec contact list without an active 0xa9 component gets
+    /// job event 0x17 (FUN_001619a0, when its fade rate +0x130 >= 0) and a 0.5 s fade-out (FUN_001f7bf8);
+    /// any such guard ends the call. Returns true when the rest (the walk-to stall check, still the hook)
+    /// runs: busy, or past the head without a guard. REPLACED: the 0xa9 component is taken as absent.
+    fn ee_sub_144640_lock(&mut self, obj: usize, cx: &mut Cx) -> bool {
+        if self.m.i(0xfd0 + 0x28) != 0 {
+            return true;
+        }
+        let now = cx.g.t;
+        if !self.ee_sub_144068() || self.m.f(0xfd0 + 0x24) > now {
+            return true;
+        }
+        self.m.set_f(0xfd0 + 0x24, now + crate::engine::classes::q::q6::rof(0x002b_d2d0));
+        if cx.h.world_3d78() <= 0 {
+            return true;
+        }
+        let mut any = false;
+        // REPLACED solver: self's +0xec contact list = the in-world class-0x38 guards whose body is within
+        // GUARD_CONTACT_REACH of self (the same body test the player plugin feeds the guards' k7 contacts with)
+        let me = cx.h.ee_sub_1a62e8(handle(obj));
+        let reach = crate::engine::player::plugin::GUARD_CONTACT_REACH;
+        for g in cx.h.ee_sub_15e9c8_505(0x38, 256) {
+            if g == 0 || g == handle(obj) || !cx.h.lo_28_bit60(g) || cx.h.ee_sub_132b10(g, 0x38) == 0 {
+                continue;
+            }
+            let p = cx.h.ee_sub_1a62e8(g);
+            let d = [p[0] - me[0], p[1] - me[1], p[2] - me[2]];
+            if d[0] * d[0] + d[1] * d[1] >= reach * reach || d[2].abs() >= 2.0 * reach {
+                continue;
+            }
+            if cx.h.obj_f32(g, 0x130) >= 0.0 {
+                cx.h.ee_sub_1619a0(0x17, g);
+            }
+            any = true;
+            cx.h.ee_sub_1f7bf8(g as usize - 1, 0.5);
+        }
+        if std::env::var_os("SLY2_HEIST_P144").is_some() {
+            eprintln!("P144 obj {obj} t {now:.2} lock {} guards {any}", cx.h.world_3d78());
+        }
+        !any
+    }
+    /// FUN_001403d0 after the FUN_00203fc0 PO update and the FUN_00141a50 gadget poll
+    fn ee_sub_1403d0_rest(&mut self, obj: usize, cx: &mut Cx) {
         let o = handle(obj);
         let t = cx.g.t;
-        cx.h.po_call(0x203fc0, obj, 0, &[]);
-        cx.h.po_call(0x141a50, obj, 0, &[]);
         if self.joy.FUN_001c46c0(t, 0.0, 0x200) != 0 {
             cx.h.po_call(0x140338, obj, 0, &[]);
         }
         if self.dmg.state == -1 {
-            cx.h.po_call(0x144640, obj, 0xfd0, &[]);
+            // HEIST r36: FUN_00144640(self + 0xfd0) world-lock branch native; the rest stays the hook
+            if self.ee_sub_144640_lock(obj, cx) {
+                cx.h.po_call(0x144640, obj, 0xfd0, &[]);
+            }
             if cx.h.po_call(0x1449c8, obj, 0xfd0, &[]) == 0 {
                 let n = self.m.i(0x270);
                 if n >= 1 {
@@ -107,6 +155,113 @@ impl C2cb230 {
         if cx.h.po_call(0x1449c8, obj, 0xfd0, &[]) == 0 {
             cx.h.po_call(0x1eed10, obj, 0x26c, &[]);
         }
+    }
+}
+
+/// The class-52 gadget virtuals FUN_00141a50 / FUN_00141c08 dispatch through (vt +0x31c usable, +0x324 use,
+/// +0x32c held, +0x334 released), with the C2cb230 base they run on.
+pub trait GadgetVt {
+    fn base(&mut self) -> &mut C2cb230;
+    /// slot 98 (vt +0x31c)
+    fn vt_31c(&mut self, obj: usize, kind: i32, h: &mut dyn ClassHost) -> bool;
+    /// slot 99 (vt +0x324)
+    fn vt_324(&mut self, obj: usize, kind: i32, cx: &mut Cx);
+    /// slot 100 (vt +0x32c) FUN_00141dd0 (Bentley and Murray both)
+    fn vt_32c(&mut self, kind: i32, cx: &mut Cx) {
+        let dt = cx.g.dt;
+        self.base().ee_sub_141dd0(kind, dt);
+    }
+    /// slot 101 (vt +0x334) FUN_00141e28 (Bentley and Murray both)
+    fn vt_334(&mut self, _kind: i32) {
+        self.base().ee_sub_141e28();
+    }
+}
+
+impl GadgetVt for C2cb230 {
+    fn base(&mut self) -> &mut C2cb230 {
+        self
+    }
+    fn vt_31c(&mut self, obj: usize, kind: i32, h: &mut dyn ClassHost) -> bool {
+        self.ee_sub_136870(obj, kind, h)
+    }
+    fn vt_324(&mut self, obj: usize, kind: i32, cx: &mut Cx) {
+        self.ee_sub_136a90(obj, kind, cx)
+    }
+}
+
+impl GadgetVt for C2d44c8 {
+    fn base(&mut self) -> &mut C2cb230 {
+        &mut self.b
+    }
+    fn vt_31c(&mut self, obj: usize, kind: i32, h: &mut dyn ClassHost) -> bool {
+        self.ee_sub_1b98a0(obj, kind, h)
+    }
+    fn vt_324(&mut self, obj: usize, kind: i32, cx: &mut Cx) {
+        self.ee_sub_1b9a08(obj, kind, cx)
+    }
+}
+
+/// FUN_001403d0 with the owner's gadget virtuals (Bentley: C2cb230 itself, Murray: C2d44c8)
+pub fn ee_sub_1403d0_vt<V: GadgetVt + ?Sized>(v: &mut V, obj: usize, cx: &mut Cx) {
+    cx.h.po_call(0x203fc0, obj, 0, &[]);
+    ee_sub_141a50(v, obj, cx);
+    v.base().ee_sub_1403d0_rest(obj, cx);
+}
+
+/// DAT_002bcd00 (stride 0x20; +0 mode -1 / 1 held / 2 one-shot, +0xc cost) = the JT gadget table
+fn gadget_2bcd00(kind: i32) -> Option<crate::engine::player::p18_gadget::GadgetDef> {
+    crate::engine::player::p18_gadget::GADGETS.get(kind as usize).copied()
+}
+
+/// FUN_00141a50(self): the three +0x1180 gadget slots {kind, state, t} (stride 0xc) against the
+/// DAT_002c3258 buttons. +0x150 joystick != 0: REPLACED always (the JOY is held by value).
+pub fn ee_sub_141a50<V: GadgetVt + ?Sized>(v: &mut V, obj: usize, cx: &mut Cx) {
+    for i in 0..3u32 {
+        let sl = 0x1180 + i * 0xc;
+        let (kind, state) = (v.base().m.i(sl), v.base().m.i(sl + 4));
+        let mask = super::k18_55::MASK_2C3258[i as usize];
+        if state == 0 {
+            let t = cx.g.t;
+            if v.base().joy.FUN_001c46c0(t, 0.15, mask) == 0 {
+                continue;
+            }
+            if !v.vt_31c(obj, kind, cx.h) {
+                cx.h.ee_sub_1fbb90(obj, 0x2e);
+            } else if v.base().ee_sub_1441a0() < gadget_2bcd00(kind).map_or(0, |g| g.cost) {
+                cx.h.ee_sub_1fbb90(obj, 0x2e);
+                v.base().m.set_f(0x1304, cx.g.t);
+            } else {
+                ee_sub_141c08(v, obj, sl, gadget_2bcd00(kind).map_or(0, |g| g.mode), cx);
+            }
+        } else if state == 1 {
+            if v.base().joy.held & mask == 0 || !v.vt_31c(obj, kind, cx.h) {
+                ee_sub_141c08(v, obj, sl, 0, cx);
+            } else {
+                v.vt_32c(kind, cx);
+            }
+        }
+    }
+}
+
+/// FUN_00141c08(self, slot, state): slot state change; leaving 1 calls vt +0x334, entering 1 / 2 calls
+/// vt +0x324 (2 = one-shot: back to 0 at once); slot +8 = t
+pub fn ee_sub_141c08<V: GadgetVt + ?Sized>(v: &mut V, obj: usize, sl: u32, state: i32, cx: &mut Cx) {
+    let m = &mut v.base().m;
+    let (kind, cur) = (m.i(sl), m.i(sl + 4));
+    if cur == state {
+        return;
+    }
+    if cur == 1 {
+        v.vt_334(kind);
+    }
+    let m = &mut v.base().m;
+    m.set_i(sl + 4, state);
+    m.set_f(sl + 8, cx.g.t);
+    if state == 1 {
+        v.vt_324(obj, kind, cx);
+    } else if state == 2 {
+        v.vt_324(obj, kind, cx);
+        v.base().m.set_i(sl + 4, 0);
     }
 }
 
@@ -219,6 +374,28 @@ impl C2d44c8 {
         }
     }
 
+    /// FUN_001b7000 (k = 0) / FUN_001b7050 (k = 1)(self, point): with +0x13ec set: +0x13f0 = point, +0x144c = k,
+    /// SetState 4, FUN_002046f0(self, point +0x180) (face the carried object)
+    pub fn ee_sub_1b7050_k(&mut self, obj: usize, point: u32, k: i32, cx: &mut Cx) {
+        if self.b.m.i(0x13ec) == 0 {
+            return;
+        }
+        self.b.m.set_u(0x13f0, point);
+        self.b.m.set_i(0x144c, k);
+        self.ee_sub_1b6078(obj, 4, cx);
+        // FUN_002046f0(self, t) = FUN_002046b0(self, pos(t) - pos(self)): FUN_00204660(self, atan2(dy, dx)) ->
+        // +0x1a8 target yaw (the +0x1b0 rows follow from it in the body step)
+        let t = cx.h.obj_i32(point, 0x180) as u32;
+        // TAKEN BY MURRAY: the held object rides with Murray (REPLACED attach: carry acts / hand frames)
+        if t != 0 {
+            cx.h.so_carry(t, handle(obj));
+        }
+        if t != 0 {
+            let d = sub(cx.h.ee_sub_1a62e8(t), cx.h.ee_sub_1a62e8(handle(obj)));
+            self.b.m.set_f(0x1a8, d[1].atan2(d[0]));
+        }
+    }
+
     /// FUN_001b70a0(self): ally +0x10dc in reach: pick it up (Bentley in the 0xb1 slot of its +0x26c list,
     /// FUN_0017b1a8 + FUN_001b7050) or lift it (SetState 0xb, sub-state 4). 1 = handled.
     pub fn ee_sub_1b70a0(&mut self, obj: usize, cx: &mut Cx) -> bool {
@@ -248,7 +425,7 @@ impl C2d44c8 {
         if go {
             cx.h.ee_call(0x17b1a8, &[rec, 2]);
             let f = cx.h.obj_i32(ally, 0xfec) as u32;
-            cx.h.po_call(0x1b7050, obj, 0, &[f]);
+            self.ee_sub_1b7050_k(obj, f, 1, cx);
             return true;
         }
         let mut go = false;
@@ -295,7 +472,7 @@ impl C2d44c8 {
                     self.ee_sub_1b6078(obj, 8, cx);
                     break 'c;
                 }
-                if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && cx.h.vcall_ret_arg(o, 0x31c, 3) != 0 {
+                if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && self.ee_sub_1b98a0(obj, 3, cx.h) {
                     self.b.joy.FUN_001c4738(0x400);
                     cx.h.po_call(0x19cc50, obj, 0xf00, &[0, 0, 0]);
                     break 'c;
@@ -398,7 +575,7 @@ impl C2d44c8 {
                     self.ee_sub_1b8508(obj, cx);
                     break 'c;
                 }
-                if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && cx.h.vcall_ret_arg(o, 0x31c, 3) != 0 {
+                if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && self.ee_sub_1b98a0(obj, 3, cx.h) {
                     self.b.joy.FUN_001c4738(0x400);
                     cx.h.po_call(0x19cc50, obj, 0xf00, &[0, 0, 0]);
                     break 'c;

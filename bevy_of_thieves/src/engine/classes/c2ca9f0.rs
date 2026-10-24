@@ -20,6 +20,10 @@ pub struct C2ca9f0 {
     pub f_120: i32,
     pub f_128: f32,
     pub f_130: f32,
+    /// CRAWL R106: in-world state tracked by k4::frame_k4 (script Add / Remove transitions after load)
+    pub r106_seen: bool,
+    pub r106_inw: bool,
+    pub r106_top: bool,
 }
 
 /// slot 5: FUN_00113cd0
@@ -61,6 +65,9 @@ impl C2ca9f0 {
             f_130: self.f_130,
         };
         h.k30_cam_state(me, super::k30_cam::CamState::Obj(st));
+        if std::env::var_os("SLY2_R82CAM").is_some() {
+            eprintln!("R82CAM obj {obj} oid {} own {} e0 {} rows {:?} pos {:?} tgt {:?} f120 {} f128 {} f12c {} f130 {}", h.obj_i32(me, 0x18), h.obj_i32(me, 0x10), self.f_e0, h.ee_sub_1a6318(me), h.ee_sub_1a62e8(me), (self.f_e0 != 0).then(|| h.ee_sub_1a62e8(self.f_e0)), self.f_120, self.f_128, self.f_12c, self.f_130);
+        }
     }
 
     /// slot 6: FUN_0012e600

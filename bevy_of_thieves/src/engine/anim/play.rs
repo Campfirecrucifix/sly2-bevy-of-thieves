@@ -304,7 +304,8 @@ pub struct AsegaPlayer {
 
 impl AsegaPlayer {
     pub fn new(aseg: Arc<Aseg>, flags: u32, svt: f32) -> Self {
-        let state = Asega { flags, svt, svt2: svt, ..Default::default() };
+        // FUN_0012f9b8: +0x40 = rate * ASEG +0x78 (* +0x4c = 1), +0x44 = rate
+        let state = Asega { flags, svt: svt * aseg.f78(), svt2: svt, ..Default::default() };
         let segments = bind_segments(&aseg, 0.0);
         AsegaPlayer { aseg, state, segments, fired: Vec::new(), ended: false }
     }

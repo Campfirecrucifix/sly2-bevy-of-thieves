@@ -8,7 +8,7 @@
 //! pad (PadPlugin, PreUpdate) -> clock -> world -> camera -> render (Bevy) -> frame end.
 
 use bevy::prelude::*;
-use bevy::window::{PresentMode, WindowMode, WindowResolution};
+use bevy::window::{PresentMode, WindowResolution};
 use sly2_recomp::engine::camera::bevy_sync::{sync_cm_camera, CmCamera};
 use sly2_recomp::engine::camera::widescreen;
 use sly2_recomp::engine::camera::{Cm, CmClock};
@@ -28,7 +28,8 @@ use sly2_recomp::engine::game::fmv::MovieQueue;
 use sly2_recomp::engine::game::fmv_app::{no_movie, FmvPlayback, FmvPlugin};
 use sly2_recomp::engine::game::main_loop::MainState;
 use sly2_recomp::engine::game::save::MemoryCard;
-use sly2_recomp::engine::game::settings::{exe_dir, Settings};
+use sly2_recomp::engine::game::settings::exe_dir;
+use sly2_recomp::settings::PortSettings as Settings;
 use sly2_recomp::engine::game::transition::{ee_str_oidPoCurrent_20e890, LevelHost, LevelRequest, TransitionState};
 use sly2_recomp::engine::input::backend::{PadInput, PadPlugin};
 use sly2_recomp::engine::world::{build_world, World, WorldLoadError, WorldOptions};
@@ -109,6 +110,11 @@ impl LevelHost for AsyncHost<'_, '_, '_> {
 use sly2_recomp::engine::game::vm_state::SpliceState;
 
 fn main() {
+    // POOL1 R92: the original's ONE rand state (0x2c4740, seed 1 at boot) shared by every caller; SLY2_RNG_LOCAL=1 =
+    // the old per-instance generators
+    if std::env::var_os("SLY2_RNG_LOCAL").is_none() {
+        sly2_recomp::engine::physics::driven::rng_shared(Some(1));
+    }
     let settings_path = Settings::default_path();
     let mut settings = Settings::load_or_create(&settings_path).unwrap_or_else(|e| {
         eprintln!("{}: {e}; using defaults", settings_path.display());
@@ -127,10 +133,24 @@ fn main() {
     sly2_recomp::engine::disc::exe::set_iso_path(&iso_path);
     // WIRE-C2: `--mods <dir>` replaces the mods folder next to the exe (render tests / mod authors)
     let mods_dir = args.mods.clone().unwrap_or_else(|| exe_dir().join("mods"));
-    let mods = settings.mod_overlay(&mods_dir).unwrap_or_else(|e| {
+    let mut mods = settings.mod_overlay(&mods_dir).unwrap_or_else(|e| {
         eprintln!("mods: {e}; running without mods");
         Default::default()
     });
+    // WIRE-OPT: mod.toml `load_order` sorts the folders not named in settings.toml / load_order.txt;
+    // overrides provided by several mods are logged (last in order wins)
+    {
+        use sly2_recomp::settings::mods as mm;
+        let infos = mm::scan(&mods_dir);
+        let names = mm::order(&infos, &settings.mods, &std::fs::read_to_string(mods_dir.join("load_order.txt")).unwrap_or_default());
+        mods.order.mods = names.iter().map(|n| mods_dir.join(n)).collect();
+        for n in &names {
+            if let Some(m) = infos.iter().find(|m| &m.folder == n) {
+                eprintln!("mods: {} {} by {} ({})", m.name, m.version, if m.author.is_empty() { "?" } else { &m.author }, m.folder);
+            }
+        }
+        mm::log_conflicts(&mods.order.mods);
+    }
     let table = iso.read_file("SCUS_973.16").ok().and_then(|elf| descriptor::static_table(&elf)).unwrap_or_default();
     let mut movies = MovieQueue { special: [table.get(28).copied(), table.get(29).copied()], ..Default::default() };
     // WP-J15: static descriptors by address (boot queue rows, hideout 0x2a3828)
@@ -154,6 +174,11 @@ fn main() {
         },
         None => table.iter().skip(FIRST_LEVEL_ROW).find(|d| d.size() != 0).copied(),
     };
+    // WIRE-C3: mods/<mod>/text/*.toml string overrides
+    let mod_text = sly2_recomp::engine::ui::plugin::ModText(mods.text_overrides());
+    if !mod_text.0.is_empty() {
+        eprintln!("mods: {} text overrides", mod_text.0.len());
+    }
     let loader = LevelLoader::new(iso, mods);
     // --table: row of the FUN_0020f318 level table embedded in the boot level (startup only, so blocking is fine)
     let boot = match (args.table, boot) {
@@ -192,13 +217,23 @@ fn main() {
         }
     }
 
-    let present_mode = if settings.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync };
-    let mode = if settings.fullscreen { WindowMode::BorderlessFullscreen(MonitorSelection::Primary) } else { WindowMode::Windowed };
+    // PERF2: env SLY2_PRESENT=immediate|mailbox|novsync (benchmarks: uncapped frame time)
+    let present_mode = match std::env::var("SLY2_PRESENT").as_deref() {
+        Ok("immediate") => PresentMode::Immediate,
+        Ok("mailbox") => PresentMode::Mailbox,
+        Ok("novsync") => PresentMode::AutoNoVsync,
+        _ if settings.vsync => PresentMode::AutoVsync,
+        _ => PresentMode::AutoNoVsync,
+    };
+    let mode = settings.window_mode.bevy();
     let window = Window {
         title: "Sly 2: Bevy of Thieves".into(),
         resolution: WindowResolution::new(settings.width, settings.height),
         present_mode,
         mode,
+        // WIRE-C5: headless verification runs (--screenshot) must not steal focus: unfocused, off-screen.
+        focused: args.screenshot.is_none(),
+        position: if args.screenshot.is_some() { WindowPosition::At(IVec2::new(-32000, -32000)) } else { WindowPosition::Automatic },
         ..default()
     };
 
@@ -206,7 +241,12 @@ fn main() {
     #[cfg(feature = "rt")]
     let raytraced = settings.effective_lighting() == Lighting::Raytraced;
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
+    app.insert_resource(mod_text);
+    // Port addition: automated runs (--screenshot / SLY2_SHOTS / SLY2_MUTE=1) are silent; SLY2_AUDIO=1 overrides.
+    let muted = std::env::var("SLY2_AUDIO").map_or(true, |v| v != "1")
+        && (args.screenshot.is_some() || std::env::var_os("SLY2_SHOTS").is_some() || std::env::var("SLY2_MUTE").is_ok_and(|v| v == "1"));
+    let gv = bevy::audio::GlobalVolume::new(bevy::audio::Volume::Linear(if muted { 0.0 } else { 1.0 }));
+    app.add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }).set(bevy::audio::AudioPlugin { global_volume: gv, ..default() }))
         .add_plugins(PadPlugin)
         .add_plugins(sly2_recomp::engine::gfx::ultrawide::UltrawidePlugin)
         .add_plugins(sly2_recomp::engine::gfx::game::GfxPlugin)
@@ -222,13 +262,31 @@ fn main() {
         .insert_resource(sly2_recomp::engine::gfx::game::GfxSettings { ink_outlines: settings.ink_outlines })
         .insert_resource(loader)
         .insert_resource(WorldOptions::default())
+        .insert_resource({
+            let mut q = sly2_recomp::engine::classes::q::live::LiveQ::default();
+            q.load_slot = args.load_slot;
+            q.save_slot = args.save_slot;
+            q
+        })
         .insert_resource(Cm::new())
         .insert_resource(AudioSystem::new())
         .insert_resource(EmitterSystem::default())
         // WP-EP1e: replaced 989snd client state + the verification monitor (env SLY2_AUDIO_LOG=1)
         .insert_resource(sly2_recomp::engine::audio::emitter_tick::Snd989::default())
         .insert_resource(sly2_recomp::engine::audio::bevy_out::AudioMonitor { on: std::env::var("SLY2_AUDIO_LOG").is_ok_and(|v| v == "1"), ..default() })
-        .insert_resource(LevelGame { spawn_request: (-1, -1), ..default() })
+        // ANIM-ALL R93: `--load-slot` also fills the host blob 0x3d4a60 (LevelGame::data: the job task / job states
+        // FUN_00161a58 case 5 reads), as the title continue does (flow_app); it only reached the live image's store
+        // before -> e.g. EP2 job 1978 not done at a hub load from a save -> no seated table scene. Opt-out
+        // SLY2_R93_NO_SLOTDATA.
+        .insert_resource(LevelGame {
+            spawn_request: (-1, -1),
+            data: args
+                .load_slot
+                .filter(|_| std::env::var_os("SLY2_R93_NO_SLOTDATA").is_none())
+                .and_then(|s| sly2_recomp::engine::game::save::MemoryCard::user().ee_sub_1ac4c8(s).ok())
+                .unwrap_or_default(),
+            ..default()
+        })
         .insert_resource(GameAudio::new(settings.master_volume * settings.music_volume, settings.master_volume * settings.sfx_volume))
         .insert_resource(RumbleQueue::default())
         .insert_resource(GameLoop {
@@ -242,6 +300,9 @@ fn main() {
             boot: boot_queue,
             card_state,
         })
+        .insert_resource(sly2_recomp::settings::LiveGraphics { rt_quality: settings.rt_quality, hud_stretch: settings.hud_stretch, upscale: sly2_recomp::engine::gfx::upscale::env_opts(settings.upscale) })
+        // UPSCALE: render scale + EASU/RCAS (env SLY2_UPSCALE / SLY2_GI_SCALE / SLY2_SHARPNESS / SLY2_UPSCALER override)
+        .add_plugins(sly2_recomp::engine::gfx::upscale::UpscalePlugin)
         .insert_resource(AppSettings(settings))
         .insert_non_send(SpliceState::default())
         .add_systems(Startup, (startup_sequence, setup).chain())
@@ -249,7 +310,7 @@ fn main() {
             Update,
             (
                 (level_transition, poll_level_loads, capture_level_data, japp::capture_level_game, build_world, japp::activate_world, feed_player_level, feed_classes_level, level_scripts).chain(),
-                (clock_step, tick_scripts.after(japp::lend_classes)).chain(),
+                (clock_step.before(sly2_recomp::engine::player::plugin::tick_player), tick_scripts.after(japp::lend_classes)).chain(),
                 (report_world, spawn_level_geometry, japp::frame_camera, hor_plus, sync_cm_camera).chain(),
                 (japp::start_level_audio, japp::poll_level_audio, japp::update_music_layers, sly2_recomp::engine::disc::mods_sound::apply_sound_mods_system, japp::tick_sound_emitters, sly2_recomp::engine::audio::bevy_out::drain_snd_cmds, japp::play_sound_events, japp::apply_rumble, japp::audio_monitor).chain(),
                 frame_end,
@@ -265,10 +326,46 @@ fn main() {
     if let Some(sh) = std::env::var("SLY2_SHOTS").ok().map(|s| StepShots::parse(&s)).filter(|s| !s.0.is_empty()) {
         app.insert_resource(sh).add_systems(Last, step_shots);
     }
+    // WIRE-C6: env SLY2_FRAMETIME=1 logs mean / p99 frame time (wall clock) over frames 100.. every 100 frames.
+    if std::env::var_os("SLY2_FRAMETIME").is_some() {
+        app.add_systems(Last, frame_time_log);
+    }
+    // PERF2: env SLY2_GPU_DIAG=1 logs the per-pass GPU timestamps (RenderDiagnosticsPlugin) every 100 frames
+    if std::env::var_os("SLY2_GPU_DIAG").is_some() {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin).add_systems(Last, gpu_diag_log);
+    }
+    // LOOK R12 (port addition, verification): env SLY2_FIXED_DT=1 = every app frame advances 1/60 s, so
+    // --screenshot --frames N captures the same game state whatever the render cost (raster vs RT).
+    if std::env::var("SLY2_FIXED_DT").is_ok_and(|v| v == "1") {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / 60.0)));
+    }
+    // LOOK R13 (port addition, benchmarks): with SLY2_PRESENT set, the unfocused window (screenshot /
+    // bench runs never take focus) also runs continuously; Bevy's default caps it at 60 Hz, which hid
+    // every frame time under 16.7 ms.
+    if std::env::var("SLY2_PRESENT").is_ok() {
+        app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode: bevy::winit::UpdateMode::Continuous });
+    }
     if let Some((path, frames)) = args.screenshot {
         app.insert_resource(ScreenshotRequest::new(path, frames)).add_systems(Last, japp::screenshot_driver);
     }
     app.run();
+}
+
+/// PERF2: GPU pass times (ms, smoothed) of RenderDiagnosticsPlugin; `gpu total` = sum of the top-level spans.
+fn gpu_diag_log(store: Res<bevy::diagnostic::DiagnosticsStore>, mut n: Local<u32>) {
+    *n += 1;
+    if *n % 100 != 0 {
+        return;
+    }
+    let mut v: Vec<(String, f64)> = store
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("/elapsed_gpu"))
+        .filter_map(|d| Some((d.path().as_str().to_string(), d.smoothed()?)))
+        .collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let total: f64 = v.iter().filter(|(p, _)| p.matches('/').count() == 2).map(|x| x.1).sum();
+    let top: Vec<String> = v.iter().take(8).map(|(p, t)| format!("{} {t:.2}", p.trim_start_matches("render/").trim_end_matches("/elapsed_gpu"))).collect();
+    eprintln!("gpu frame {}: total {total:.2} ms | {}", *n, top.join(", "));
 }
 
 /// Command line (beyond the ISO path).
@@ -277,11 +374,13 @@ struct Args {
     table: Option<usize>,
     screenshot: Option<(std::path::PathBuf, u32)>,
     mods: Option<std::path::PathBuf>,
+    load_slot: Option<usize>,
+    save_slot: Option<usize>,
 }
 
 impl Args {
     fn parse(settings: &mut Settings) -> Args {
-        let mut a = Args { level: None, table: None, screenshot: None, mods: None };
+        let mut a = Args { level: None, table: None, screenshot: None, mods: None, load_slot: None, save_slot: None };
         let mut shot = None;
         let mut frames = 60;
         let mut it = std::env::args().skip(1);
@@ -295,10 +394,25 @@ impl Args {
             match x.as_str() {
                 "--level" => a.level = Some(num("--level") as usize),
                 "--table" => a.table = Some(num("--table") as usize),
+                // SAVE1: memory card slot (1..3) to load at start / to save into while playing
+                "--load-slot" => a.load_slot = Some((num("--load-slot") as usize).saturating_sub(1)),
+                "--save-slot" => a.save_slot = Some((num("--save-slot") as usize).saturating_sub(1)),
                 "--frames" => frames = num("--frames"),
                 "--width" => settings.width = num("--width"),
                 "--height" => settings.height = num("--height"),
                 "--mods" => a.mods = it.next().map(std::path::PathBuf::from),
+                // WIRE-OPT: settings.toml `[graphics]` overrides (not saved)
+                "--window" => settings.window_mode = it.next().as_deref().and_then(sly2_recomp::settings::WindowModeOpt::parse).unwrap_or_else(|| {
+                    eprintln!("--window needs windowed | borderless | fullscreen");
+                    std::process::exit(2)
+                }),
+                "--rt-quality" => settings.rt_quality = it.next().as_deref().and_then(sly2_recomp::settings::RtQuality::parse).unwrap_or_else(|| {
+                    eprintln!("--rt-quality needs low | medium | high");
+                    std::process::exit(2)
+                }),
+                "--hud" => settings.hud_stretch = it.next().as_deref() == Some("stretch"),
+                // WIRE-C3: lighting override for screenshots (settings.toml `[video] global_illumination`)
+                "--gi" => settings.lighting = if it.next().as_deref() == Some("raytraced") { sly2_recomp::engine::game::settings::Lighting::Raytraced } else { sly2_recomp::engine::game::settings::Lighting::Raster },
                 "--screenshot" => shot = it.next().map(std::path::PathBuf::from),
                 _ if x.starts_with("--") => {
                     eprintln!("unknown option {x}");
@@ -310,6 +424,7 @@ impl Args {
         if shot.is_some() {
             // deterministic window for verification
             settings.fullscreen = false;
+            settings.window_mode = sly2_recomp::settings::WindowModeOpt::Windowed;
         }
         a.screenshot = shot.map(|p| (p, frames));
         a
@@ -419,7 +534,17 @@ fn tick_scripts(g: Res<GameLoop>, mut lg: ResMut<LevelGame>, mut st: NonSendMut<
 }
 
 /// MainStep::Clock (FUN_0014d0b8(g_clock, 0)).
-fn clock_step(mut g: ResMut<GameLoop>, hud: Option<Res<sly2_recomp::engine::player::plugin::PlayerHud>>, mut fc: ResMut<sly2_recomp::engine::game::flow_app::FrameClock>) {
+fn clock_step(mut g: ResMut<GameLoop>, hud: Option<Res<sly2_recomp::engine::player::plugin::PlayerHud>>, mut fc: ResMut<sly2_recomp::engine::game::flow_app::FrameClock>, mut cmd: Commands, live: Option<Res<sly2_recomp::engine::classes::q::live::LiveQ>>) {
+    // CRAWL R103: the ThiefNet screen's pause: FUN_001dc260 open -> FUN_0014d1d0(0, g_clock, 0), close ->
+    // FUN_0014d1d0(1, g_clock, 0) run on the live image's g_clock (0x2dded0 +0x18); the game loop steps this one
+    if std::env::var_os("SLY2_NO_R103_TNPAUSE").is_none() {
+        if let Some(m) = live.as_ref().and_then(|l| l.mem.as_ref()) {
+            let s0 = if sly2_recomp::engine::ui::live_menu::thiefnet_open(m) { 0.0 } else { 1.0 };
+            if g.clock.scales[0] != s0 {
+                clock::ee_sub_14d1d0(s0, &mut g.clock, 0);
+            }
+        }
+    }
     // WP-J14: time-scale gadgets FUN_0014d1d0(scale, g_clock, 1)
     if let Some(h) = hud {
         sly2_recomp::engine::game::flow::apply_time_scale(&mut g.clock, h.gadgets.time_scale);
@@ -427,6 +552,9 @@ fn clock_step(mut g: ResMut<GameLoop>, hud: Option<Res<sly2_recomp::engine::play
     let now = g.start.elapsed().as_secs_f64();
     let advanced = clock::ee_sub_14d0b8(&mut g.clock, now, false);
     *fc = sly2_recomp::engine::game::flow_app::FrameClock { t: g.clock.t, dt: g.clock.dt, advanced };
+    // FEEL (F3): the player steps on g_clock DAT_002dded4 (FUN_0014d0b8: real frame time clamped to
+    // [1/60, 1/30]) like the original, not a fixed 1/60 per rendered frame (slow below 60 fps)
+    cmd.insert_resource(sly2_recomp::engine::player::plugin::PlayerClock { t: g.clock.t, dt: g.clock.dt });
 }
 
 fn report_world(mut g: ResMut<GameLoop>, w: Option<Res<World>>, err: Option<Res<WorldLoadError>>) {
@@ -518,5 +646,28 @@ fn step_shots(mut sh: ResMut<StepShots>, mut commands: Commands, mut exit: Messa
         let _ = std::fs::remove_file(&p);
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p.clone()));
         sh.2 = Some((p, f));
+    }
+}
+
+/// WIRE-C6: frame-time measurement (see SLY2_FRAMETIME).
+fn frame_time_log(mut last: Local<Option<std::time::Instant>>, mut v: Local<Vec<f32>>, mut n: Local<u32>, cam: Query<&GlobalTransform, With<sly2_recomp::engine::camera::bevy_sync::CmCamera>>, ents: Query<(), With<Mesh3d>>) {
+    let now = std::time::Instant::now();
+    *n += 1;
+    if let Some(l) = last.replace(now) {
+        if *n > 100 {
+            let ms = (now - l).as_secs_f32() * 1000.0;
+            // RENDER: name the spike frames (> 40 ms) so they can be matched with log events
+            if ms > if std::env::var_os("SLY2_FRAMETIME_ALL").is_some() { 20.0 } else { 40.0 } {
+                let c = cam.iter().next().map(|t| (t.translation(), t.forward()));
+                eprintln!("frametime spike: frame {} {ms:.1}ms cam {c:?} meshes {}", *n, ents.iter().count());
+            }
+            v.push(ms);
+            if v.len() % 100 == 0 {
+                let mut s = v.clone();
+                s.sort_by(f32::total_cmp);
+                let mean = s.iter().sum::<f32>() / s.len() as f32;
+                eprintln!("frametime: n={} mean={mean:.2}ms p99={:.2}ms", s.len(), s[s.len() * 99 / 100]);
+            }
+        }
     }
 }

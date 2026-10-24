@@ -108,7 +108,7 @@ pub fn c2d0320_v7<M: QMem + ?Sized>(m: &mut M, o: u32) {
             }
             m.w32(o + 0x6c, 1);
             let ax = m.rv(0x002a_2dc0);
-            m.call(0x0011_b500, &[sp + 0x10], &[f(ang), ax]);
+            m.call(0x0011_b500, &[sp + 0x10], &[ax, f(ang)]);
             copy(m, o + 0x70, sp + 0x10, 0x30);
         } else if m.call(0x0013_2b10, &[g, 0x27], &[]).0 != 0 {
             s1 |= m.call(0x0020_7a20, &[0x29], &[]).0 as u64;

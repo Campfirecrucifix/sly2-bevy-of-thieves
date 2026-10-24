@@ -22,7 +22,7 @@
 //! face's adjacent faces for a walkable one within 1.45 (k210 - k248)) is approximated by "a walkable face
 //! hit by the same probe", see `ee_sub_2048c8`.
 #![allow(non_snake_case)]
-use super::driver::{AloPhys, FUN_001f9b20, FUN_001f9e70, FUN_001fac30, FUN_0022de88, M3};
+use super::driver::{AloPhys, FUN_001f9b20, FUN_001f9e70, FUN_001fa328, FUN_001fac30, FUN_0022de88, M3};
 use super::dynamics::FUN_0011d018;
 use super::geom::{dot, sub, V3};
 use super::sphere::{FUN_0011e9f8, FUN_001a93c8, Sbi};
@@ -353,7 +353,7 @@ pub fn FUN_001f9410_po(xps: &[Xp], mass: f32, gz: f32, mode: u32, dt: f32) -> Po
 /// side 0 = level, side 1 = PO, n from the PO towards the level side reversed (side 1 -> side 0 = -n_s),
 /// gap = n_s.c - w - r. Kinds: vertex 1, edge 3, face 0xd.
 pub fn level_xps(cw: &CollisionWorld, c: V3, r: f32, out: &mut Vec<Xp>) {
-    for col in &cw.colliders {
+    for col in cw.colliders.iter().filter(|col| col.near(c, r)) {
         let mut sbi: Vec<Sbi> = Vec::new();
         FUN_001a93c8(r, c, &col.geom, &col.bsp, 0x40, &mut sbi);
         for s in &sbi {
@@ -369,6 +369,54 @@ pub fn level_xps(cw: &CollisionWorld, c: V3, r: f32, out: &mut Vec<Xp>) {
             out.push(Xp { point: [p, add(p, scale(ns, d - r))], po_side: 1, n, gap: d - r, kind, ..Default::default() });
         }
     }
+}
+
+/// FEEL R51: level hull contacts from the 1:1 mesh/mesh chain (so_image::mesh_pair = FUN_001aa1d8 ->
+/// FUN_001a8b50 ...) of the PO's world-space hull SO (`geom` / `bsp`, body sphere `c` / `r`) against every
+/// near collider; replaces `level_xps`' sphere (REPLACED source) when the caller supplies the hull. Level
+/// body sphere = the collider's SO bounds box (centre, half diagonal), else its vertex bounds.
+pub fn mesh_xps(cw: &CollisionWorld, geom: &super::geom::CGeom, bsp: &super::geom::BspC, c: V3, r: f32, out: &mut Vec<Xp>) {
+    // FEEL R55: a collider with no vertices and no surfaces can only yield the kind-0xd fallback record, which
+    // the island gather drops below, so it is skipped without running the chain (same output, much faster)
+    for col in cw.colliders.iter().filter(|col| col.near(c, r) && !(col.geom.verts.is_empty() && col.geom.surfs.is_empty())) {
+        let (lo, hi) = col.bbox.unwrap_or_else(|| {
+            col.geom.verts.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(l, h), v| (std::array::from_fn(|k| l[k].min(v[k])), std::array::from_fn(|k| h[k].max(v[k]))))
+        });
+        let lc = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        let d = sub(hi, lo);
+        let lr = dot(d, d).sqrt() * 0.5;
+        let pairs = super::so_image::mesh_pair(geom, bsp, c, r, &col.geom, &col.bsp, lc, lr);
+        if std::env::var_os("SLY2_FEEL_MESHDBG2").is_some() && pairs.is_empty() {
+            eprintln!("MESHNEAR obj {} src {:?} nv {} ns {} ne {} bsp {} bbox {} sph {:?} lr {:.0}", col.object, col.source, col.geom.verts.len(), col.geom.surfs.len(), col.geom.edges.len(), col.bsp.nodes.len(), col.bbox.is_some(), col.sphere.map(|s| s.1 as i32), lr);
+        }
+        if std::env::var_os("SLY2_FEEL_MESHDBG").is_some() && !pairs.is_empty() {
+            eprintln!("MESHCOL obj {} src {:?} nv {} ns {} bsp {} box {:?}..{:?} n {} kinds {:?} gaps {:?}", col.object, col.source, col.geom.verts.len(), col.geom.surfs.len(), col.bsp.nodes.len(), lo.map(|v| v as i32), hi.map(|v| v as i32), pairs.len(), pairs.iter().map(|p| p.4).collect::<Vec<_>>(), pairs.iter().map(|p| p.1 as i32).collect::<Vec<_>>());
+        }
+        if std::env::var_os("SLY2_FEEL_MESHDBG3").is_some() {
+            for (h, g, p, n, k) in &pairs { eprintln!("MC3 obj {} h {} gap {:.1} k {} p {:?} n {:?}", col.object, h, g, k, p.map(|v| v as i32), n.map(|v| (v * 100.0) as i32)); }
+        }
+        for (hull_a, gap, p, n, kind) in pairs {
+            // FEEL R52: FUN_001f90d0 (island gather) skips kind-0xd records (the 0x1a8b50 / 0x1aa1d8 "no contact"
+            // fallback at the body centre, n DAT_002a2dc0): they never become solver rows
+            if kind == 0xd {
+                continue;
+            }
+            // FEEL R85 GUARD (not 1:1, source of the bad record unknown): a DEEP (gap < -40) hull-vertex / level-face
+            // record (kind 1) whose vertex lies OUTSIDE the level BSP solid (FUN_00118fb0 None) is a phantom: EP1 hub
+            // (-2150,-3690) got surf 8975's plane (a pole face 360 away) at gap -78 with no geometry at the vertex ->
+            // mode-4 popped Sly back ~72 every 14 frames (USER 'random teleport'). SLY2_FEEL_R85VTX=0 = old.
+            if kind == 1 && hull_a && gap < -40.0 && r85_vtx_guard() && !col.bsp.nodes.is_empty() && super::point::FUN_00118fb0(&col.geom, &col.bsp, 0, col.bsp.nodes.len(), p).is_none() {
+                continue;
+            }
+            out.push(Xp { point: [p, add(p, scale(n, -gap))], po_side: if hull_a { 0 } else { 1 }, n, gap, kind, ..Default::default() });
+        }
+    }
+}
+
+/// FEEL R89: OFF by default: the phantom records came from the unwritten FUN_00118a88 sentinels (so_image::write_rodata,
+/// SLY2_FEEL_R89SENT); SLY2_FEEL_R85VTX=1 re-enables the guard.
+fn r85_vtx_guard() -> bool {
+    std::env::var("SLY2_FEEL_R85VTX").is_ok_and(|v| v == "1")
 }
 
 /// Per-frame result of `po_step`.
@@ -388,6 +436,33 @@ pub struct PoStep {
 /// REPLACED source as player::p5_hull), 0x1f9410 mode 1, slot 0x20c 0x1f9e70. No sleep: the PO xf is kind 2
 /// (0x1f9410 never sleeps an island holding a kind-2 xf).
 pub fn po_step(cw: &CollisionWorld, b: &mut AloPhys, m: &PoMotor, p0_ofs: V3, probe: (f32, f32), hull: Option<(V3, f32)>, accel: V3, dt: f32) -> PoStep {
+    po_step_mesh(cw, b, m, p0_ofs, probe, hull, None, accel, dt, false)
+}
+
+/// FEEL R102: the bit-2 (collision) velocity pass of 0x1f8dd8's second island run. FEEL R113: DEFAULT ON (with the
+/// R113GAP refresh it reproduces cap_feel_fall_step3_jumps' landing vz: no snap to 0, peak ~360, same decay; coordinator
+/// decision R113: capture is ground truth). SLY2_FEEL_NO_R102BIT2=1 (or SLY2_FEEL_R102BIT2=0) = off (pre-R113 default).
+pub fn r102_bit2() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("SLY2_FEEL_NO_R102BIT2").is_none() && std::env::var("SLY2_FEEL_R102BIT2").map_or(true, |v| v != "0"))
+}
+
+/// FEEL R67: the mode-4 (gap < -2) position pass of 0x1f8dd8's second island run; SLY2_FEEL_MODE4=0 turns it off.
+pub fn po_mode4_on() -> bool {
+    std::env::var("SLY2_FEEL_MODE4").map_or(true, |v| v != "0")
+}
+
+/// FEEL R73: the mode-4 pass for Bentley / Murray too: 0x1fa528 is vt+0x21c of all three players (0x2d2e98 /
+/// 0x2d44c8 / 0x2cb230), so the original pushes POs out as well. Was Sly-only while the PO hulls sank 30-60 into
+/// the floor (k210/k248 0/0, fixed R72); open-floor punch / jump unchanged with it. SLY2_FEEL_MODE4PO=0 = Sly only.
+pub fn po_mode4_po_on() -> bool {
+    std::env::var("SLY2_FEEL_MODE4PO").map_or(true, |v| v != "0")
+}
+
+/// `po_step` with an optional world-space mesh hull (geom, bsp, body centre, radius): when given, the level
+/// hull contacts come from `mesh_xps` (1:1 FUN_001aa1d8 chain) instead of `level_xps`' sphere.
+#[allow(clippy::too_many_arguments)]
+pub fn po_step_mesh(cw: &CollisionWorld, b: &mut AloPhys, m: &PoMotor, p0_ofs: V3, probe: (f32, f32), hull: Option<(V3, f32)>, mesh: Option<(&super::geom::CGeom, &super::geom::BspC, V3, f32)>, accel: V3, dt: f32, mode4: bool) -> PoStep {
     // 0x1f3980: previous velocities, accel reset, slot 69 (0x1f9b20 gravity + the PO's own forces), 0x22de88
     b.prev_v = b.v;
     b.prev_w = b.w;
@@ -397,6 +472,7 @@ pub fn po_step(cw: &CollisionWorld, b: &mut AloPhys, m: &PoMotor, p0_ofs: V3, pr
         FUN_001f9b20(b);
         FUN_001fac30(b, accel);
     }
+    let dbg_in = (b.pos[2], b.v[2]);
     FUN_0022de88(b, dt);
     let p0 = add(b.pos, p0_ofs);
     let hit = FUN_0014c6d8(cw, add(p0, scale(UP, probe.0)), add(p0, scale(UP, -probe.1)));
@@ -407,9 +483,13 @@ pub fn po_step(cw: &CollisionWorld, b: &mut AloPhys, m: &PoMotor, p0_ofs: V3, pr
         FUN_001a7fc0(m, &mut x, b.v, dt);
         xps.push(x);
     }
-    if let Some((ofs, r)) = hull {
+    if hull.is_some() || mesh.is_some() {
         let mut lv = Vec::new();
-        level_xps(cw, add(b.pos, ofs), r, &mut lv);
+        match (mesh, hull) {
+            (Some((g, bsp, c, r)), _) => mesh_xps(cw, g, bsp, c, r, &mut lv),
+            (None, Some((ofs, r))) => level_xps(cw, add(b.pos, ofs), r, &mut lv),
+            (None, None) => {}
+        }
         for mut x in lv {
             FUN_00204250(m, &mut x);
             FUN_001a7fc0(m, &mut x, b.v, dt);
@@ -418,6 +498,96 @@ pub fn po_step(cw: &CollisionWorld, b: &mut AloPhys, m: &PoMotor, p0_ofs: V3, pr
     }
     let solve = if xps.is_empty() { PoSolve::default() } else { FUN_001f9410_po(&xps, m.mass, b.gravity[2], 1, dt) };
     b.imp_lin = add(b.imp_lin, solve.dv);
+    let dbg_int = (b.pos[2], b.v[2]);
+    let p_m1 = b.pos;
     FUN_001f9e70(b, dt);
+    if std::env::var_os("SLY2_FEEL_BIT2DBG").is_some() && !xps.is_empty() {
+        eprintln!("M1 in z {:.2} vz {:.1} | int z {:.2} vz {:.1} | m1 z {:.2} vz {:.1} dv {:.1}", dbg_in.0, dbg_in.1, dbg_int.0, dbg_int.1, b.pos[2], b.v[2], solve.dv[2]);
+    }
+    // FEEL R102 (default since R113, opt-out SLY2_FEEL_NO_R102BIT2=1): 0x1f9410 mode 1 ends with 0x1a7e60 / 0x1a7fc0 (the motor 0x2044b0
+    // rewrites +0xb0 with the NEW velocity); 0x1f8dd8's 0x1f8f80(6) gate 0x1f9240 keeps bit 2 when a non-0xb record
+    // has n.(+0xb0) < -5, and 0x1f9410 mode 2 solves the 0xe row UNBOUNDED (lo 0, hi max; b = n.v_rel, e +0x98 = 0).
+    // FEEL R103 said the apply slot 0x214 of 0x2d2e98 is 0x1f9e70 (class_slots slot 64); FEEL R115: wrong word, +0x20c is
+    // 0x1f9e70 (mode 1), +0x214 is 0x1fa328 (this pass, velocity only), 0x21c = 0x1fa528.
+    // Mode 2 itself does not refresh +0xb0 (no 0x1a7e60 / 0x1a7fc0 when bit 0 is clear): the records are the fresh
+    // ones of the 0x134040 re-detection between the passes, whose 0x1a7c18 computes +0xb0 by 0x1a7fc0 at creation =
+    // the post-mode-1 velocity, as refreshed here. The 50 of 0x158e20 is the angular bound (unused for the PO).
+    if r102_bit2() && !xps.is_empty() {
+        for x in xps.iter_mut() {
+            // FEEL R113: the end-of-mode-1 refresh is 0x1a7e60 THEN 0x1a7fc0 (decomp 0x1f9410 +327): 0x1a7e60 recomputes
+            // the side points and +0x90 = n.(p0 - p1) from the bodies (positions unchanged by the mode-1 velocity pass),
+            // so the motor's k210 - k248 shift does not accumulate: undo the creation shift before 0x2044b0 runs again
+            // (R102 refreshed the shifted gap: raw + 70). SLY2_FEEL_NO_R113GAP=1 = R102 behaviour.
+            if x.kind == 0xe && std::env::var_os("SLY2_FEEL_NO_R113GAP").is_none() {
+                x.gap -= m.k210 - m.k248;
+            }
+            FUN_001a7fc0(m, x, b.v, dt);
+        }
+        if std::env::var_os("SLY2_FEEL_BIT2DBG").is_some() {
+            eprintln!("BIT2 pos {:?} v {:?} recs {:?}", b.pos.map(|v| (v * 10.0).round() / 10.0), b.v.map(|v| (v * 10.0).round() / 10.0), xps.iter().map(|x| (x.kind, (x.gap * 10.0).round() / 10.0, (dot(x.n, x.relvel) * 10.0).round() / 10.0, x.n.map(|v| (v * 100.0) as i32))).collect::<Vec<_>>());
+        }
+        if xps.iter().any(|x| x.kind != 0xb && dot(x.n, x.relvel) < -5.0) {
+            let s2 = FUN_001f9410_po(&xps, m.mass, b.gravity[2], 2, dt);
+            b.imp_lin = add(b.imp_lin, s2.dv);
+            // FEEL R113 (capture-backed): the mode-2 velocity change does not move the body this frame.
+            // cap_feel_fall_step3_jumps run landings: sampled v after the landing step 832 (= the mode-2 tangential
+            // row's drive, reproduced here) but the step displacement * 60 = 628 = (515 + 740) / 2, i.e. no jl dt / 2
+            // half-step for the mode-2 impulse. FEEL R115: 1:1 mechanism found: 0x1f9410's bit-0-clear branch calls vt
+            // +0x214 = FUN_001fa328 (velocity-only apply; JT vt 0x2d2e98 words +0x20c 0x1f9e70 / +0x214 0x1fa328 /
+            // +0x21c 0x1fa528 in SCUS_973.16), mode 1 calls +0x20c = 0x1f9e70 (with the half-step). Capture mid-frame
+            // samples agree (clk 286.445: vz -359 -> -59, z +1.25 = only the mode-1 +150 half-stepped).
+            // SLY2_FEEL_NO_R113HALF=1 = 0x1f9e70 half-step (pre-R113); SLY2_FEEL_NO_R115HALF=1 = R113's pos restore.
+            if std::env::var_os("SLY2_FEEL_NO_R113HALF").is_some() {
+                FUN_001f9e70(b, dt);
+            } else if std::env::var_os("SLY2_FEEL_NO_R115HALF").is_some() {
+                let p_keep = b.pos;
+                FUN_001f9e70(b, dt);
+                b.pos = p_keep;
+            } else {
+                FUN_001fa328(b);
+            }
+            if std::env::var_os("SLY2_FEEL_BIT2DBG").is_some() {
+                eprintln!("M2 z {:.2} vz {:.1} dv {:.1}", b.pos[2], b.v[2], s2.dv[2]);
+            }
+        }
+    }
+    // FEEL R67: 0x1f8dd8 runs the islands again in mode 6 after the mode-1 velocity pass; the 0x1f9240 gate keeps
+    // bit 4 when some contact gap < -2: 0x1f9410 mode 4 solves b = gap + 1 (rows n, lambda >= 0), clamps by
+    // 0x158e20(2 max|gap|) and slot 0x21c (JT vt 0x2d2e98+0x21c = 0x1fa528) moves the body by it (velocity untouched).
+    // The mode-6 gather sees the same positions (mode 1 only changes velocity), so the mode-1 records are reused.
+    // Bit 2 (restitution, n.v_rel < -5) is a no-op here: e = 0 for the level records (+0x98 = 0, FUN_00204250).
+    // The motor's own kind-0xe record is left out: its gap is shifted to the hover target by 0x2044b0
+    // (+= k210 - k248), and with it the pass lifts Murray at take-off (946 vs the captured 990; see FEEL R67).
+    // `mode4`: Sly, and Bentley / Murray unless SLY2_FEEL_MODE4PO=0 (po_mode4_po_on). SLY2_FEEL_MODE4E=1 (probe) keeps
+    // the 0xe record in the pass.
+    // FEEL R115GAP4: FUN_001f9410 (CSo island solve) mode 1 applies through vt +0x20c = FUN_001f9e70, which half-steps the
+    // body (pos += dv dt / 2), then ends with FUN_001a7e60 (records' +0x90 = n.(p0 - p1) recomputed from the moved bodies);
+    // the mode-6 call (bit 4 push-out at the top of FUN_001f9410, rows b = +0x90 for type 1 / +0x90 + 1 else, then the
+    // bit-2 velocity pass) sees those refreshed gaps. The port reused the pre-apply gaps -> pushed the mode-1 half-step
+    // out a second time. Level points are static, so the refresh is gap += sgn n.dp. SLY2_FEEL_NO_R115GAP4=1 = stale gaps.
+    let gap4 = std::env::var_os("SLY2_FEEL_NO_R115GAP4").is_none();
+    let dp1 = sub(b.pos, p_m1);
+    let m4e = std::env::var_os("SLY2_FEEL_MODE4E").is_some();
+    let g4 = |x: &Xp| if gap4 && x.kind != 0xe { x.gap + sgn(x) * dot(x.n, dp1) } else { x.gap };
+    if mode4 && po_mode4_on() && xps.iter().any(|x| (m4e || x.kind != 0xe) && g4(x) < -2.0) {
+        let mut px: Vec<Xp> = xps.iter().filter(|x| m4e || x.kind != 0xe).copied().collect();
+        let mut gmax = 0.0f32;
+        for x in px.iter_mut() {
+            x.gap = g4(x);
+            x.relvel = scale(x.n, x.gap + 1.0);
+            gmax = gmax.max(x.gap.abs());
+        }
+        let mut rows: Vec<Row> = (0..px.len()).map(|i| Row { ty: 0, lo: 0.0, hi: f32::MAX, xp: i, dir: px[i].n, lambda: 0.0, link: None, tangential: false }).collect();
+        let mut dp = [0.0; 3];
+        pgs(&px, &mut rows, m.mass, &mut dp);
+        let dp = FUN_0011e9f8(2.0 * gmax, dp);
+        if std::env::var_os("SLY2_FEEL_MESHDBG3").is_some() {
+            eprintln!("MODE4 pos {:?} dp {:?} recs {:?}", b.pos.map(|v| v as i32), dp.map(|v| (v * 10.0).round() / 10.0), xps.iter().map(|x| (x.kind, (x.gap * 10.0).round() / 10.0, x.n.map(|v| (v * 100.0) as i32))).collect::<Vec<_>>());
+        }
+        b.pos = add(b.pos, dp);
+    }
+    if std::env::var_os("SLY2_FEEL_BIT2DBG").is_some() {
+        eprintln!("PO in z {:.2} vz {:.1} out z {:.2} vz {:.1} nx {}", dbg_in.0, dbg_in.1, b.pos[2], b.v[2], xps.len());
+    }
     PoStep { motor: xps.first().filter(|x| x.kind == 0xe).copied(), xps, solve }
 }

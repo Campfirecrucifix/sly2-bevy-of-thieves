@@ -56,7 +56,8 @@ pub fn ee_sub_1da350<M: QMem + ?Sized>(m: &mut M, o: u32) {
             if m.call(0x0021_32d0, &[j], &[]).0 & 0xff != 0 {
                 return;
             }
-            let v = m.rf(o + 0x14) + rof(0x002d_ded4);
+            let dt = m.rf(0x002d_ded4);
+            let v = m.rf(o + 0x14) + dt;
             m.wf(o + 0x14, v);
         }
         3 => {
@@ -264,7 +265,7 @@ pub fn ee_sub_1db520<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32) {
         return;
     }
     if m.r32(o + 0x40) == NEG1 {
-        m.call(0x0014_d1d0, &[0, 0x002d_ded0, 0], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 0], &[super::q5util::f4(0.0)]);
         m.call(0x0020_efc0, &[WORLD, 0], &[]);
         vslot(m, o, 9, &[], &[]);
     }
@@ -312,7 +313,7 @@ pub fn ee_sub_1db520<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32) {
         }
         m.w32(o + 0x4c, 0);
         m.w32(o + 0x50, 0);
-        m.call(0x0014_d1d0, &[0x3f80_0000, 0x002d_ded0, 0], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 0], &[super::q5util::f4(1.0)]);
         m.call(0x0020_f030, &[WORLD, 0], &[]);
         vslot(m, o, 10, &[], &[]);
         m.call(0x001d_a950, &[o, NEG1, NEG1], &[]);

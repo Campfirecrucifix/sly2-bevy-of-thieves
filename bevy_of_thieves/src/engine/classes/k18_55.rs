@@ -56,8 +56,211 @@ impl C2cb230 {
     fn ss(&mut self, obj: usize, s: i32, cx: &mut Cx) {
         self.ee_sub_135248(obj, s, cx.g, cx.rng, cx.h);
     }
-    fn po(&self, cx: &mut Cx, addr: u32, obj: usize, off: u32, args: &[u32]) -> i64 {
-        cx.h.po_call(addr, obj, off, args)
+    fn po(&mut self, cx: &mut Cx, addr: u32, obj: usize, off: u32, args: &[u32]) -> i64 {
+        // POOL1: the +0xf00 binocucom block is the class's own (FUN_0019cc50 / 19cce8 / 19d330 on self + 0xf00)
+        if off == 0xf00 {
+            match addr {
+                0x0019cc50 => {
+                    let (m, a, b) = (args.first().copied().unwrap_or(0) as i32, args.get(1).copied().unwrap_or(0), args.get(2).copied().unwrap_or(0));
+                    return self.binoc_19cc50(obj, m, a, b, cx) as i64;
+                }
+                0x0019cce8 => { self.binoc_19cd38(obj, 2, cx); return 0; }
+                0x0019d330 => { self.binoc_19d330(obj, cx); return 0; }
+                _ => {}
+            }
+        }
+        // POOL1: FUN_001928f8(self + 0x4c0, kind, a, b) stores +0x4c8 = kind, +0x4d4 = a, +0x4d8 = b (read back
+        // by the base message handler FUN_00140f90's event 0x27c)
+        if off == 0x4c0 && addr == 0x001928f8 {
+            self.m.set_u(0x4c8, args.first().copied().unwrap_or(0));
+            self.m.set_u(0x4d4, args.get(1).copied().unwrap_or(0));
+            self.m.set_u(0x4d8, args.get(2).copied().unwrap_or(0));
+            // POOL1 r32: FUN_00192bd8 entering 0xb (the jt machine is not run for K16): s3 = jt+0x4f8 (+0x9b8),
+            // or *(DAT_002f7900+0x1af0) when jt+0x4fc (+0x9bc) == 0x15; FUN_00130658 + FUN_001305b8(s3, self, 1,
+            // +0x1030) at f20 0 / f21 1. Its event 0x27c reaches FUN_00140f90 (ee_sub_135ad8) -> FUN_002245b8.
+            if args.first().copied() == Some(0xb) {
+                let anim = self.m.u(0x9b8);
+                let mut a = self.m.u(0x1030);
+                super::shared::anim::ee_sub_1305b8(0, 1.0, anim, obj as u32 + 1, 1, &mut a, cx.h);
+                self.m.set_u(0x1030, a);
+            }
+        }
+        // ANIM-ALL R70: FUN_00195a00 (text_00190000.c:4097) runs vt +0x2c4 slot 87(1) = SetState(2) FIRST (which clears
+        // +0x1030, FUN_00135248 case 2 has no anim), THEN its FUN_00195fb8 plays the JMP body anim. The port ran the
+        // body anim first and SetState(2) after it, so the jump ASEG was cleared and Bentley held his pose until the
+        // next jtbs change (7 frames). Opt-out SLY2_R70BJUMPOFF (old order).
+        let early = std::env::var_os("SLY2_R70BJUMPOFF").is_none();
+        let enter2 = off == 0x2c0 && addr == 0x0019_5a00 && self.state != 2 && matches!(args.first(), Some(0 | 1 | 0xb));
+        if early && enter2 {
+            self.ss(obj, 2, cx);
+        }
+        let r = cx.h.po_call(addr, obj, off, args);
+        if off == 0x2c0 && (addr == 0x0019_5a00 || self.state == 2) {
+            self.jmp_body_anim_195fb8(obj, addr, args, true, cx.h);
+        }
+        // POOL1 r34: the JMP component's slot-87 calls (vt +0x2c4) of the original: FUN_00195a00 (jump start,
+        // text_00190000.c:4097) -> index 1 = state 2; FUN_00197500 (air update) on landing (:5609) -> index 0 =
+        // state 0. REPLACED: the shadow JT (player::p20 PoHost) answers 0x197500 with 1 while it is airborne.
+        // REPLACED: only the jump kinds 0 / 1 (the other kinds, e.g. 0xb / 0x11 gadget poses, have no shadow-JT
+        // air phase in the port, so their state 2 would end at once and drop the gadget state)
+        // R53: kind 0xb too (FUN_00136118's carry exit after the drop, case 0xb = a fall with +0x24 = 1): the
+        // gadget is already dropped there, and without state 2 -> 0 Bentley stayed in state 6 (no 2nd Triangle)
+        if !early && enter2 {
+            self.ss(obj, 2, cx);
+        } else if off == 0x2c0 && addr == 0x0019_7500 && r == 0 && self.state == 2 {
+            self.ss(obj, 0, cx);
+        }
+        r
+    }
+    /// ANIM-ALL R21: the body-anim part of FUN_00195fb8(self + 0x2c0 JMP, jtbs, ..) (text_00190000.c:4308) for a
+    /// Bentley / Murray. The JMP code itself runs on the shadow JT (player::p20 PoHost); its body state (jmp +0x1c,
+    /// read back through `po_jtbs` after the JMP call) is the po's +0x2dc, and on a change the tail plays the po's
+    /// own JMP anim: FUN_001f15b8(+0x1034); FUN_001305b8(0, 1.0, anim, self, 1, +0x1030) unless +0x1030 already
+    /// plays it; vtable +0x2d4. FUN_00195a00 first stores jmp[1] = kind (kind != 6), jmp[2] = index.
+    /// Anim (words jmp[i] = +0x2c0 + 4i, bound by the slot-13 table rows +0x3e0..): states 0/1/4/5/7: kind 0xe ->
+    /// [0x56], 0xd -> [0x52], 0xf -> +0x1518, 0x10 -> +0x1514, else (or 0) [0x48 + idx], else [0x48]; states 2/3:
+    /// kind 0xe -> [0x57], else [0x4d + idx], else [0x4d], else [0x48]; 0x11 (ledge) [0x55] flags 9. NOT PORTED here:
+    /// the other states (6, 8..0x10, 0x12..0x16: attach / flight / glide / gadget anims, which the shadow JT's p5 paths own) and -1 (no anim).
+    pub fn jmp_body_anim_195fb8(&mut self, obj: usize, addr: u32, args: &[u32], direct: bool, h: &mut dyn ClassHost) {
+        const J: u32 = 0x2c0;
+        if addr == 0x0019_5a00 {
+            let k = args.first().copied().unwrap_or(0);
+            if k != 6 {
+                self.m.set_u(J + 4, k);
+            }
+            self.m.set_u(J + 8, args.get(1).copied().unwrap_or(0));
+        }
+        // FUN_00195a00's own FUN_00195fb8 call (kind 0 -> 4, kinds 1 / 2 / 3 / 0x12 -> 0) for a caller that
+        // enters state 2 with it (`direct`, Bentley's po wrapper): the K27 body falls without the shadow JT
+        let k = args.first().copied().unwrap_or(u32::MAX);
+        let own = match k {
+            0 => Some(4),
+            1 | 2 | 3 | 0x12 => Some(0),
+            _ => None,
+        };
+        let Some(new) = own.filter(|_| direct && addr == 0x0019_5a00).or_else(|| h.po_jtbs(obj)) else { return };
+        if new == self.f_2dc {
+            return;
+        }
+        self.f_2dc = new;
+        self.m.set_i(J + 0x1c, new);
+        let (kind, idx) = (self.m.i(J + 4), self.m.u(J + 8));
+        let w = |m: &super::k17_55::Mem, i: u32| m.u(J + i * 4);
+        let anim = match new {
+            0 | 1 | 4 | 5 | 7 => {
+                let k = match kind {
+                    0xe => w(&self.m, 0x56),
+                    0xd => w(&self.m, 0x52),
+                    0xf => self.m.u(0x1518),
+                    0x10 => self.m.u(0x1514),
+                    _ => 0,
+                };
+                [k, w(&self.m, 0x48 + idx), w(&self.m, 0x48)].into_iter().find(|&a| a != 0).unwrap_or(0)
+            }
+            2 | 3 => {
+                let k = if kind == 0xe { w(&self.m, 0x57) } else { 0 };
+                [k, w(&self.m, 0x4d + idx), w(&self.m, 0x4d), w(&self.m, 0x48)].into_iter().find(|&a| a != 0).unwrap_or(0)
+            }
+            // 0x11 (ledge hang, text_00190000.c:4591): [0x55], flags 9 (the attach / +0x1010 part is the shadow JT's)
+            0x11 => w(&self.m, 0x55),
+            _ => return,
+        };
+        let flags = if new == 0x11 { 9 } else { 1 };
+        let o = handle(obj);
+        let cur = self.m.u(0x1030);
+        if std::env::var_os("ANIMALL_DBG").is_some() {
+            eprintln!("[jmp195fb8] obj {obj} addr {addr:#x} args {args:x?} direct {direct} new {new} kind {kind} idx {idx} anim {anim:#x} cur {cur:#x}");
+        }
+        if cur == 0 || h.anim_slot_f(cur, 0x14).to_bits() != anim {
+            let mut sl = self.m.u(0x1034);
+            h.ee_sub_1f15b8(&mut sl);
+            self.m.set_u(0x1034, sl);
+            let mut a = cur;
+            super::shared::anim::ee_sub_1305b8(0, 1.0, anim, o, flags, &mut a, h);
+            self.m.set_u(0x1030, a);
+        }
+        h.vcall(o, 0x2d4);
+    }
+    /// FUN_0019cc50(self + 0xf00, mode, a, b): open the binocucom (a running one is only re-entered for mode 1);
+    /// +0x40 / +0x44 = a / b
+    pub fn binoc_19cc50(&mut self, obj: usize, mode: i32, a: u32, b: u32, cx: &mut Cx) -> bool {
+        if self.binoc.state != -1 {
+            if self.binoc.mode == 1 || mode != 1 {
+                return false;
+            }
+            self.binoc_19cd38(obj, 2, cx);
+            self.binoc_19cd38(obj, -1, cx);
+        }
+        self.binoc.mode = mode;
+        self.binoc.arg = [a, b];
+        self.binoc_19cd38(obj, 0, cx);
+        true
+    }
+    /// FUN_0019cd38 SetBinocState on a non-JT owner. REPLACED: camera push / pop, sound bus, body suspend
+    /// and the enter / exit ASEG (+0xf0c / +0xf10) -> state + time only; an ASEG of length `len` = 0 ends at once.
+    /// ANIM-ALL R35: mode 1 (sequence action 0x3b): entering 1 -> +0x40 partner vt+0x29c(0x3f, 1) (queued in
+    /// `binoc_ops`), self vt+0x29c(0x3f, 0) (FUN_001442d0); leaving 1 -> the same through vt+0x2a4
+    /// (FUN_00144338); the HUD state +0xf28 (FUN_0019d660: 0 on 1, 2 on 2, -1 on -1)
+    pub fn binoc_19cd38(&mut self, obj: usize, new: i32, cx: &mut Cx) {
+        if new == self.binoc.state {
+            return;
+        }
+        let p = self.binoc.arg[0];
+        // CRAWL R97: FUN_0019cd38 mode 1: leaving -1 -> FUN_0020f198 + FUN_0020f0c0; entering -1 -> FUN_0020f1a8 +
+        // FUN_0020f0f0 (world +0x3d84 / +0x3d7c; the guards' FUN_00209098 freeze), opt-out SLY2_NO_R97_3D84
+        let r97 = self.binoc.mode == 1 && std::env::var_os("SLY2_NO_R97_3D84").is_none();
+        if r97 && self.binoc.state == -1 {
+            cx.h.world_3d84_add(1);
+            cx.h.k27_world_20f0c0();
+        } else if r97 && new == -1 {
+            cx.h.world_3d84_add(-1);
+            cx.h.k27_world_20f0f0();
+        }
+        if self.binoc.state == 1 && self.binoc.mode == 1 {
+            if p != 0 {
+                self.binoc_ops.push(super::k22_seq::GuardOp::Slot83(p, 0x3f, 1));
+            }
+            self.ee_sub_144338(obj, 0x3f, false, cx.h);
+        }
+        self.binoc.state = new;
+        self.binoc.t_state = cx.g.t;
+        match new {
+            1 => {
+                if self.binoc.mode == 1 && p != 0 {
+                    self.binoc_ops.push(super::k22_seq::GuardOp::Slot82(p, 0x3f, 1));
+                }
+                if matches!(self.binoc.mode, 0..=2) {
+                    self.binoc.hud = 0;
+                }
+                if self.binoc.mode == 1 {
+                    self.ee_sub_1442d0(obj, 0x3f, false, cx.h);
+                }
+            }
+            2 => self.binoc.hud = 2,
+            -1 => {
+                self.binoc.hud = -1;
+                self.binoc.mode = -1;
+            }
+            _ => {}
+        }
+    }
+    /// FUN_0019d330: enter (0) -> 1 and exit (2) -> -1 once the ASEG is done (`len` after the state start);
+    /// state 1 modes 0 / 1: FUN_0019da78 HUD update (REPLACED: the HUD widgets +0x2c / +0x34 are unported =
+    /// null, so HUD 0 -> 1 at once)
+    pub(crate) fn binoc_19d330(&mut self, obj: usize, cx: &mut Cx) {
+        loop {
+            let (s, t) = (self.binoc.state, cx.g.t);
+            let done = |b: &crate::engine::player::p15_binoc::Binoc, k: usize| t - b.t_state >= b.len[k];
+            match s {
+                0 if done(&self.binoc, 0) => self.binoc_19cd38(obj, 1, cx),
+                1 if matches!(self.binoc.mode, 0 | 1) && self.binoc.hud == 0 => self.binoc.hud = 1,
+                2 if done(&self.binoc, 1) => self.binoc_19cd38(obj, -1, cx),
+                _ => {}
+            }
+            if self.binoc.state == s {
+                return;
+            }
+        }
     }
     /// FUN_00136a28(self, kind): carry record of a gadget kind (byte offset, 0 none)
     pub fn ee_sub_136a28(kind: i32) -> u32 {
@@ -243,6 +446,13 @@ impl C2cb230 {
             let b = self.m.f(AIM + 0x1c);
             self.m.set_f(rec, 1.0 - b);
             anim = self.m.u(rec + 0x18);
+            // POOL1 r34: REPLACED: FUN_00137a30 (FUN_00136d28 init) builds a class-0x6e blend ASEG of the record's
+            // two entries {weight, ASEG} at rec / rec + 0xc into rec + 0x18, re-weighted by FUN_001384c0; the port
+            // has no blend ASEG (host hook no-op), so the dominant entry's ASEG plays (its length ends the swing)
+            if anim == 0 {
+                anim = if self.m.f(rec + 0xc) > 0.5 { self.m.u(rec + 0x10) } else { self.m.u(rec + 4) };
+                if anim == 0 { anim = self.m.u(rec + 4) | self.m.u(rec + 0x10); }
+            }
             self.m.set_f(rec + 0xc, b);
             h.ee_sub_1384c0_rec(obj, rec);
         }
@@ -269,7 +479,7 @@ impl C2cb230 {
             self.ee_sub_136f48(obj, s, g, h);
         }
         if s != -1 && (self.m.i(AIM + 4) == -1 || self.m.i(AIM + 0xc) != 0) {
-            if self.joy.FUN_001c4660(g.t, 0.1, 0x80) != 0 && h.vcall_ret_arg(handle(obj), 0x31c, 2) != 0 {
+            if self.joy.FUN_001c4660(g.t, 0.1, 0x80) != 0 && self.ee_sub_136870(obj, 2, h) {
                 self.joy.FUN_001c4738(0x80);
                 self.ee_sub_136f48(obj, -1, g, h);
                 self.ee_sub_136f48(obj, s, g, h);
@@ -403,7 +613,7 @@ impl C2cb230 {
     }
     /// LAB_00134be4: carry button
     fn lab_134be4(&mut self, obj: usize, cx: &mut Cx) {
-        if self.joy.FUN_001c4660(cx.g.t, 0.15, 0x10) != 0 && cx.h.vcall_ret_arg(handle(obj), 0x31c, self.m.i(0x1870)) != 0 {
+        if self.joy.FUN_001c4660(cx.g.t, 0.15, 0x10) != 0 && self.ee_sub_136870(obj, self.m.i(0x1870), cx.h) {
             self.lab_134c24(obj, cx);
         }
     }
@@ -437,12 +647,12 @@ impl C2cb230 {
                         self.po(cx, 0x195a00, obj, 0x2c0, &[1, 0, 0]);
                         break 'c;
                     }
-                    if self.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && cx.h.vcall_ret_arg(o, 0x31c, 3) != 0 {
+                    if self.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && self.ee_sub_136870(obj, 3, cx.h) {
                         self.joy.FUN_001c4738(0x400);
                         self.po(cx, 0x19cc50, obj, 0xf00, &[0, 0, 0]);
                         break 'c;
                     }
-                    if self.joy.FUN_001c4660(t, 0.15, 0x10) != 0 && cx.h.vcall_ret_arg(o, 0x31c, self.m.i(0x1870)) != 0 {
+                    if self.joy.FUN_001c4660(t, 0.15, 0x10) != 0 && self.ee_sub_136870(obj, self.m.i(0x1870), cx.h) {
                         self.lab_134c24(obj, cx);
                         break 'c;
                     }
@@ -475,7 +685,7 @@ impl C2cb230 {
                             self.po(cx, 0x195a00, obj, 0x2c0, &[1, 0, 0]);
                             break 'c;
                         }
-                        if self.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && cx.h.vcall_ret_arg(o, 0x31c, 3) != 0 {
+                        if self.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && self.ee_sub_136870(obj, 3, cx.h) {
                             self.joy.FUN_001c4738(0x400);
                             self.po(cx, 0x19cc50, obj, 0xf00, &[0, 0, 0]);
                             break 'c;
@@ -504,7 +714,19 @@ impl C2cb230 {
                     }
                 }
                 0xc => {
-                    self.po(cx, 0x21f418, obj, 0x11b0, &[]);
+                    // POOL1: FUN_0021f418(self + 0x11b0) (player::p26::ee_sub_21f418)
+                    let a = self.m.u(0x1030);
+                    let busy = a != 0 && !cx.h.ee_sub_131968(a);
+                    let t = cx.g.t;
+                    let joy = &mut self.joy;
+                    let ev = crate::engine::player::p26::ee_sub_21f418(&mut self.m, 0x11b0, handle(obj), busy, cx.g.g_2dd5bc_13d0, cx.h, &mut |k| joy.FUN_001c46c0(t, 0.1, k) != 0);
+                    for e in ev {
+                        match e {
+                            crate::engine::player::p26::Ev21f418::Set(s) => { cx.h.po_call(0x2206c8, obj, 0x11b0, &[s as u32]); }
+                            crate::engine::player::p26::Ev21f418::OwnerIdle => self.ss(obj, 0, cx),
+                            crate::engine::player::p26::Ev21f418::Listener(l) => cx.h.vcall(l, 0x48),
+                        }
+                    }
                 }
                 0xd => {
                     self.po(cx, 0x19e1e0, obj, 0xf50, &[]);
@@ -559,7 +781,10 @@ impl C2cb230 {
         if !cx.h.lo_28_bit60(o) {
             return;
         }
-        self.po(cx, 0x194a40, obj, 0, &[]);
+        // CRAWL R96: 0x134de4 a2 = 0xf8fe (category mask); was called with mask 0 -> Bentley's target list stayed
+        // empty and his Circle (door / use point pick FUN_001938c0) found nothing (opt-out SLY2_NO_R96_BMASK)
+        let mask: &[u32] = if std::env::var_os("SLY2_NO_R96_BMASK").is_none() { &[0xf8fe] } else { &[] };
+        self.po(cx, 0x194a40, obj, 0, mask);
         self.ee_sub_134d30(obj, cx);
         self.ee_sub_134850(obj, cx);
         let (ang, mag) = (self.joy.angle, self.joy.mag);
@@ -637,6 +862,21 @@ impl C2cb230 {
     pub fn ee_sub_135ad8(&mut self, obj: usize, msg: i32, args: &[u32], h: &mut dyn ClassHost) {
         h.base(0x140f90, obj);
         let a0 = args.first().copied().unwrap_or(0);
+        // FUN_00140f90 event 0x27c with +0x4c8 == 0xb: the held bomb +0x4d4 (is-a 100, FUN_00224590 state 1..2)
+        // -> FUN_002245b8: slot 75 state 5 for kind 0xb, else 3
+        if msg == 9 && args.get(2).copied() == Some(0x27b) && self.m.i(0x11b4) != -1 {
+            crate::engine::player::p26::ee_sub_2205a8(&self.m, 0x11b0, handle(obj), 0, -1, h);
+        }
+        if msg == 9 && args.get(2).copied() == Some(0x27c) && self.m.i(0x4c8) == 0xb {
+            let b = self.m.u(0x4d4);
+            if b != 0 && h.ee_sub_132b10(b, 100) != 0 {
+                let st = h.obj_i32(b, 0x150);
+                if 0 < st && st < 3 {
+                    let k = h.obj_i32(b, 0x15c);
+                    h.vcall_arg(b, 0x264, if k == 0xb { 5 } else { 3 });
+                }
+            }
+        }
         if msg == 1 {
             for i in 0..6u32 {
                 let rec = 0x1824 + i * 0xc;
@@ -706,6 +946,8 @@ impl C2cb230 {
     pub fn ee_sub_1347a8(&mut self, obj: usize, cx: &mut Cx) {
         let o = handle(obj);
         cx.h.base(0x1400b8, obj);
+        // JtVis_load_1400b8 tail: FUN_0021f388(self + 0x11b0) (carry machine anim blends)
+        crate::engine::player::p26::ee_sub_21f388_k(&mut self.m, 0x11b0);
         let c = cx.h.ee_sub_1f4c58(o, 0xb, 1);
         self.m.set_u(0x10b8, c);
         cx.h.ee_sub_1a0300(obj, 0x13e0, 0x14e0);
@@ -903,6 +1145,18 @@ impl ClassSet {
             c.ee_sub_1c3ed8(k, focused)
         } else if let Some(m) = self.k18_murray(obj) {
             m.b.ee_sub_1c3ed8(k, focused)
+        } else if h.ee_sub_132b10(handle(obj), 0x48) != 0 {
+            // HEIST r23: a C2d15d0 (world class 72: the EP4 Train Hack ship 17344, sequence 2410's action 7) runs
+            // only in the live image, where its slot 78 is the base FUN_001c3ed8 (joystick +0x150, guest focus
+            // world +0x3efc, FUN_001c4940); the hand focus (`k18_active`) follows the same rule
+            h.live_vcall(0x27c, handle(obj), k as u32);
+            if (-1..1).contains(&k) && focused {
+                Some(false)
+            } else if k == 1 && !focused {
+                Some(true)
+            } else {
+                None
+            }
         } else {
             return;
         };
@@ -943,6 +1197,24 @@ impl ClassSet {
             }
         }
     }
+    /// WIRE-BM2: FUN_00141ef8(self), the tail of slot 14 FUN_001400b8 for Bentley (slot 14 0x1347a8) and Murray
+    /// (0x1b49e0): for i in 0..3 the +0x1180 + 0xc * i slot gadget = save value (slot 102 name, "apukCur",
+    /// sprintf 0x2a4d50 "%d" i) word 1 (FUN_001d8a38; `save` = the store 0x3d4a60 by path, 0 when absent), then
+    /// slot 104 (Bentley FUN_00136c50 part 0x24d, Murray FUN_00141e70 empty). REPLACED: the slot 104 focus
+    /// argument (a1 left over by the caller) = `focused`.
+    pub fn k18_load_apuk_cur(&mut self, obj: usize, focused: bool, save: &dyn Fn(&str) -> u32, h: &mut dyn ClassHost) {
+        if let Some(c) = self.k16_get(obj) {
+            for i in 0..3u32 {
+                c.m.set_u(0x1180 + 0xc * i, save(&format!("{}/apukCur/{i}", c.ee_sub_136cb0())));
+            }
+            c.ee_sub_136c50(obj, focused, h);
+        } else if let Some(m) = self.k18_murray(obj) {
+            for i in 0..3u32 {
+                m.b.m.set_u(0x1180 + 0xc * i, save(&format!("{}/apukCur/{i}", m.ee_sub_1b9b60())));
+            }
+            m.ee_sub_141e70();
+        }
+    }
     /// K18 player API: the controlled character's joystick for this frame (REPLACED jt +0x150 JOY)
     pub fn k18_feed_joy(&mut self, joy: crate::engine::player::Joy) {
         let Some(o) = self.k18_active else {
@@ -957,6 +1229,54 @@ impl ClassSet {
     /// K18: per frame, the controlled Bentley: slot 15 update, slot 69 forces, slot 18 draw (the order the
     /// player layer runs JtUpdate / forces / draw for Sly). No-op until `k18_set_active`.
     pub(super) fn frame_k18_55(&mut self, h: &mut dyn ClassHost) {
+        self.refresh_2dd5bc_13d0();
+        // WIRE-BM2: anim event messages (FUN_00131290 case 0xb) -> slot 4 msg 9 of Bentley (FUN_00135ad8) /
+        // Murray (FUN_001b68b8): Murray's pick-up leaves state 4 on event 0x1c8, Bentley's throw spawns on 0x216
+        for (owner, args) in h.k26_take_msg9() {
+            let Some(o) = (owner as usize).checked_sub(1) else { continue };
+            if let Some(c) = self.k16_get(o) {
+                c.ee_sub_135ad8(o, 9, &args, h);
+            } else if self.k18_murray(o).is_some() {
+                self.k19_murray_with(o, h, |m, cx| m.ee_sub_1b68b8(o, 9, &args, cx));
+            }
+        }
+        // POOL1: FUN_001b7000(murray, point) of the carry points (class 10 slot 50)
+        for (user, point) in h.take_1b7000() {
+            let Some(o) = (user as usize).checked_sub(1) else { continue };
+            if self.k18_murray(o).is_some() {
+                self.k19_murray_with(o, h, |m, cx| m.ee_sub_1b7050_k(o, point, 0, cx));
+            }
+        }
+        // TAKEN BY HEIST: an uncontrolled Bentley in state 8 (team move: mounted on / thrown by Murray) runs his
+        // own slot 15 / 69 / K27 step too (the original updates every character; REPLACED: the port's other
+        // uncontrolled characters stay frozen, their bodies are not stepped)
+        let team: Vec<usize> = self.k16.iter().map(|x| x.0).filter(|&b| Some(b) != self.k18_active).collect();
+        for b in team {
+            if self.k16_get(b).map(|c| c.state) != Some(8) {
+                // ANIM-ALL R36: an uncontrolled Bentley's binocucom part of FUN_00134da8 (FUN_00134d30 after the
+                // +0x28 bit-60 gate) still runs, e.g. the job-start seq 2351 action 0x3b (mode 1) -> state 1 ->
+                // slot 82 / 83 (0x3f) -> layer SMs 1548..1552; the rest of the uncontrolled update stays frozen
+                if self.k16_get(b).is_some_and(|c| c.binoc.active()) {
+                    self.k18_with(b, h, |c, cx| {
+                        if cx.h.lo_28_bit60(handle(b)) {
+                            c.ee_sub_134d30(b, cx);
+                        }
+                    });
+                }
+                continue;
+            }
+            if let Some(c) = self.k16_get(b) {
+                c.joy = Default::default();
+            }
+            self.k18_with(b, h, |c, cx| {
+                c.ee_sub_134da8(b, cx);
+                c.ee_sub_135940(b, cx.h);
+                cx.h.k27_po_step(b, super::k27::motor_of(|x| c.m.f(x)), cx.g.dt);
+                // REPLACED: +0x208 (the PO's ground object) of the thrown Bentley: the K27 step has no surface object,
+                // -1 stands for "on level ground" so FUN_001367d8 (+0x1800 == 1, landed) ends the flight
+                c.f_208 = if cx.h.k27_grounded(b) { -1 } else { 0 };
+            });
+        }
         let Some(o) = self.k18_active else {
             return;
         };
@@ -965,6 +1285,12 @@ impl ClassSet {
             c.ee_sub_135940(o, cx.h);
             // K27: the body's physics frame after the slot 69 forces (classes/k27.rs)
             cx.h.k27_po_step(o, super::k27::motor_of(|x| c.m.f(x)), cx.g.dt);
+            // BOSS: FUN_00204768 (PO ground probe): a ground object found -> +0x208 = it, +0x20c = DAT_002dded0.
+            // FUN_00134850 reads +0x20c (> 0.1 s ago -> FUN_00195a00 jump/fall start = state 2); REPLACED: the K27
+            // step's grounded flag stands for the ground object
+            if cx.h.k27_grounded(o) {
+                c.m.set_f(0x20c, cx.g.t);
+            }
             c.ee_sub_1425b0(o, cx.g, cx.h);
         });
     }

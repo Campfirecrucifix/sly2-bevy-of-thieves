@@ -50,6 +50,18 @@ pub fn in_cm_view(r: &ViewReport, p: [f32; 3]) -> bool {
     p[0] > 0.0 && p[1].abs() <= p[0] * r.x_scale && p[2].abs() <= p[0] * r.y_scale
 }
 
+/// WIRE-OPT: HUD layout for settings.toml `[graphics] hud`: "centre" = the centred 16:9 safe rect
+/// (`HudLayout::new`), "stretch" = same HUD scale but the safe rect spans the full window width, so
+/// left / right anchored elements sit at the screen edges.
+pub fn hud_layout(w: f32, h: f32, stretch: bool) -> HudLayout {
+    let mut l = HudLayout::new(w, h);
+    if stretch {
+        l.safe.x = 0.0;
+        l.safe.w = w;
+    }
+    l
+}
+
 #[cfg(feature = "game")]
 pub use bevy_uw::*;
 
@@ -88,16 +100,16 @@ mod bevy_uw {
         }
     }
 
-    pub fn update_safe_rect(windows: Query<&Window>, mut r: ResMut<HudSafeRect>) {
+    pub fn update_safe_rect(windows: Query<&Window>, mut r: ResMut<HudSafeRect>, live: Option<Res<crate::settings::LiveGraphics>>) {
         let Ok(w) = windows.single() else { return };
-        let l = HudLayout::new(w.width(), w.height());
+        let l = hud_layout(w.width(), w.height(), live.is_some_and(|l| l.hud_stretch));
         if r.0 != l {
             r.0 = l;
         }
     }
 
     /// Outline the safe rect just behind the near plane of the CM camera.
-    pub fn draw_safe_rect(mut gizmos: Gizmos<HudGizmos>, r: Res<HudSafeRect>, cams: Query<(&Camera, &GlobalTransform, &Projection), With<CmCamera>>) {
+    pub fn draw_safe_rect(mut gizmos: Gizmos<HudGizmos>, r: Res<HudSafeRect>, cams: Query<(&Camera, &GlobalTransform, &Projection), With<CmCamera>>, win: Query<&Window, With<bevy::window::PrimaryWindow>>) {
         let s = r.0.safe;
         for (cam, gt, proj) in &cams {
             let near = match proj {
@@ -112,7 +124,7 @@ mod bevy_uw {
                 Vec2::new(s.x + inset, s.y + s.h - inset),
             ];
             let mut outline = |px: [Vec2; 4], c: Color| {
-                let pts: Vec<Vec3> = px.iter().filter_map(|p| cam.viewport_to_world(gt, *p).ok()).map(|ray| ray.origin + *ray.direction * near * 2.0).collect();
+                let pts: Vec<Vec3> = px.iter().filter_map(|p| cam.viewport_to_world(gt, crate::engine::gfx::upscale::window_to_viewport(cam, win.single().ok(), *p)).ok()).map(|ray| ray.origin + *ray.direction * near * 2.0).collect();
                 if pts.len() == 4 {
                     gizmos.linestrip(pts.iter().copied().chain(std::iter::once(pts[0])), c);
                 }

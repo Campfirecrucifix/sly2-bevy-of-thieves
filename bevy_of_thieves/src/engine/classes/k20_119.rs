@@ -347,6 +347,10 @@ impl ClassSet {
     pub(super) fn frame_k20_119(&mut self, h: &mut dyn ClassHost) {
         let t = self.g.t;
         for (i, x) in &mut self.k20 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K20Spawner(c) = x {
                 c.ee_sub_173a68(*i, t, h);
             }

@@ -104,16 +104,54 @@ pub fn ee_sub_1ed278(c: [u8; 4], grey_mode: bool) -> [u8; 4] {
     ee_sub_11dd30(ee_sub_1ed2d8(ee_sub_11dcd8(c)), c[3])
 }
 
-/// Bevy fog. Replacement for the GS fog: linear falloff between `start` and `end` with the
-/// colour alpha = amount at `end` (the GS curve is hyperbolic in 1/w between the same two
-/// points; `fog_amount` gives the exact original curve).
+/// LOOK R21: GS fog curve in the Bevy fog shader. FUN_0014e270/FUN_001a37d0 make the GS fog value
+/// linear in 1/w: value = 4080 - k (1 - start/w), k = 4080 max E/(E-1), E = end/start, so
+/// amount(w) = clamp(max E/(E-1) (1 - start/w), 0, 1) with w = the view depth (VU clip w), not the
+/// radial distance. Bevy's linear mode (only used by `distance_fog`) is patched to that curve:
+/// (pbr_functions call site, fog.wesl formula). Kill switch SLY2_LOOK_LINEARFOG=1.
+pub const FOG_SHADER_PATCHES: [(&str, &str); 2] = [
+    (
+        "linear_fog(fog_params, input_color, distance, scattering)",
+        "linear_fog(fog_params, input_color, max(-view_z, 1e-4), scattering)",
+    ),
+    (
+        "fog_color.a *= 1.0 - clamp((end - distance) / (end - start), 0.0, 1.0);",
+        "fog_color.a = clamp(fog_color.a * end / (end - start) * (1.0 - start / distance), 0.0, 1.0);",
+    ),
+];
+
+/// Apply `FOG_SHADER_PATCHES` to the bevy_pbr shader sources as they finish loading (same
+/// mechanism as rt.rs `patch_solari_shaders`).
+#[cfg(feature = "game")]
+pub fn patch_fog_shaders(mut ev: bevy::prelude::MessageReader<bevy::prelude::AssetEvent<bevy::shader::Shader>>, mut shaders: bevy::prelude::ResMut<bevy::prelude::Assets<bevy::shader::Shader>>) {
+    use bevy::shader::Source;
+    if std::env::var("SLY2_LOOK_LINEARFOG").is_ok() {
+        return;
+    }
+    for e in ev.read() {
+        let bevy::prelude::AssetEvent::Added { id } = e else { continue };
+        let hit = matches!(shaders.get(*id).map(|s| &s.source), Some(Source::Wesl(src)) if FOG_SHADER_PATCHES.iter().any(|(a, _)| src.contains(a)));
+        if !hit {
+            continue;
+        }
+        let Some(mut sh) = shaders.get_mut(*id) else { continue };
+        if let Source::Wesl(src) = &sh.source {
+            let s = FOG_SHADER_PATCHES.iter().fold(src.to_string(), |s, (a, b)| s.replace(a, b));
+            sh.source = Source::Wesl(s.into());
+            bevy::log::info!("fog: GS 1/w fog curve patched into {}", sh.path);
+        }
+    }
+}
+
+/// Bevy fog. Replacement for the GS fog: `start`/`end` and the colour alpha = `max` (amount at
+/// `end`); the shader patch above turns the linear mode into the GS 1/w curve (`fog_amount`).
 #[cfg(feature = "game")]
 pub fn distance_fog(cm: &CmFog, scale: f32, color: [u8; 4], grey_mode: bool) -> bevy::pbr::DistanceFog {
     use bevy::prelude::*;
     let c = ee_sub_1ed278(color, grey_mode);
     let amount = fog_amount(scale, cm, cm.end).clamp(0.0, 1.0);
     bevy::pbr::DistanceFog {
-        color: Color::srgba_u8(c[0], c[1], c[2], (amount * 255.0) as u8),
+        color: super::light::ps2_color(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, (amount * 255.0) as u8 as f32 / 255.0),
         falloff: bevy::pbr::FogFalloff::Linear { start: cm.start, end: cm.end.max(cm.start + 1e-3) },
         ..default()
     }

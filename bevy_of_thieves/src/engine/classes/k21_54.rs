@@ -43,6 +43,8 @@ impl C2d44c8 {
             m.set_u(0x13fc, h.ee_call(0x12de58, &[(cx.g.t + t70).to_bits(), x, b58, 5]) as u32);
             h.vcall(x, 0x11c);
             m.set_u(0x1400, h.ee_call(0x12dc18, &[x, b5c, 5, 7, 2]) as u32);
+            // TAKEN BY MURRAY: the attach acts' effect (REPLACED): x follows Murray's hands
+            h.so_carry(x, o);
         } else {
             let carrier = m.u(0x13ec);
             h.ee_call(0x1a58d0, &[x, carrier, 0xf]);
@@ -53,6 +55,8 @@ impl C2d44c8 {
             let b5c = h.obj_i32(x, 0x5c) as u32;
             m.set_u(0x13f8, h.ee_call(0x12dc18, &[x, b5c, 5, 7, 2]) as u32);
             m.set_u(0x13f4, h.ee_call(0x12dc18, &[x, b58, 5, 7, 2]) as u32);
+            // TAKEN BY MURRAY: the throw pins' effect (REPLACED): x stays in Murray's hands until released
+            h.so_carry(x, o);
             let c = m.u(0x13f0);
             // the two grips: (+0x190 hand, record +0x1610, acts +0x1618 / 161c, pin +0x15f4 -> +0x1604) and
             // (+0x198, +0x1614, +0x1620 / 1624, +0x15fc -> +0x160c)

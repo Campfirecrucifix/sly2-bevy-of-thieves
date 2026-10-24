@@ -46,7 +46,10 @@ pub fn ee_sub_1f01b8<M: QMem + ?Sized>(m: &mut M, sm: u32, obj: u32, label: u32,
     vslot(m, sm, 0, &[], &[]);
     let o = m.r32(sm);
     m.call(0x0025_6ee0, &[s, o], &[]);
-    vslot(m, s, 7, &[2, 0, 0, 0, 0], &[]);
+    // CRAWL R104: message 2 goes through vt +0x1c (= slot 2, FUN_001331f8), was slot 7 (vt +0x44): the SMA's
+    // script never got its start message (e.g. safehouse script 249.1 s2 = seat the gang, hub camera)
+    let k = if std::env::var_os("SLY2_NO_R104_SMA2").is_some() { 7 } else { 2 };
+    vslot(m, s, k, &[2, 0, 0, 0, 0], &[]);
     if m.call(0x001f_0638, &[s], &[]).0 == 0 {
         if label != u32::MAX {
             let i = ee_sub_1f0400(m, sm, label);
@@ -60,9 +63,10 @@ pub fn ee_sub_1f01b8<M: QMem + ?Sized>(m: &mut M, sm: u32, obj: u32, label: u32,
     s
 }
 
-/// FUN_001f0380(sm, obj, label, p4): FUN_001f01b8 with p5 = 0 (the decompiler drops the register args)
+/// FUN_001f0380(sm, obj, label, p4): FUN_001f01b8 with p5 = mask 4 (`addiu t0, zero, 4` at 0x1f0384; the
+/// decompiler drops the register args) - WIRE-UI fix, was 0 (no transition matched FUN_001f0b80)
 pub fn ee_sub_1f0380<M: QMem + ?Sized>(m: &mut M, sm: u32, obj: u32, label: u32, p4: u32) -> u32 {
-    ee_sub_1f01b8(m, sm, obj, label, p4, 0)
+    ee_sub_1f01b8(m, sm, obj, label, p4, 4)
 }
 
 /// FUN_001f1448(sm, obj, label, p4, slot): release the SMA at *slot (FUN_001f0598, vt +0x14), then link a new one

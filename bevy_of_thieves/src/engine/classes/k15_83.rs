@@ -416,7 +416,7 @@ impl ClassSet {
             if o.class != 83 {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             let mut c = C2cc950::default();
             c.ee_sub_148bb0(i, h);
@@ -453,6 +453,10 @@ impl ClassSet {
     pub(super) fn frame_k15_83(&mut self, h: &mut dyn ClassHost) {
         let t = self.g.t;
         for (i, x) in &mut self.k15 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K15d(c) = x {
                 let contacts = if c.f_2a8 == 0 { h.so_contacts_57(*i) } else { Vec::new() };
                 c.ee_sub_148c98(*i, &contacts, t, h);
@@ -464,6 +468,137 @@ impl ClassSet {
                     c.ee_sub_149010(t, h);
                 }
             }
+        }
+    }
+}
+
+/// WIRE-EP8: class 24 C2cc7b0 (trigger volume, the C2c9c20 slots 11 / 14 / 15 FUN_00149880 / 149398 /
+/// 149440): the toggle block at +0x130 (`Toggle`), signal list from method row 440 (FUN_00105508 ->
+/// FUN_00149828 -> FUN_00161f10). Candidates: no explicit object / class list in the cellar volumes -> the
+/// player list (DAT_003e1348 / 0x3e134c); inside = FUN_00227c90 on the VOL solid (`ClassHost::vol_contains`).
+/// REPLACED: the candidate scan without tracking (+0x2c8 = 0 here) stops at the first hit.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct C2cc7b0 {
+    pub tg: Toggle,
+    /// MURRAY: +0x288 / +0x28c object list (row 432 FUN_001497b8, 8 max; kind 0x2002 refs, handles after
+    /// post-load), +0x2ac / +0x2b0 class-id list (row 433 FUN_001497e0, 4 max; FUN_0015e9c8 mode 0x505)
+    pub objs: Vec<u32>,
+    pub oids: Vec<i32>,
+    /// CRAWL R95: +0x1d8 first candidate inside this update (handle; 0 none), script field 447 (symid 534)
+    pub f_1d8: u32,
+}
+
+impl C2cc7b0 {
+    /// FUN_00149440 (update)
+    pub fn ee_sub_149440(&mut self, obj: usize, t: f32, h: &mut dyn ClassHost) {
+        let st = self.tg.state;
+        if st == 2 {
+            let d = self.tg.hold;
+            if 0.0 <= d && d < t - self.tg.t0 {
+                self.tg.ee_sub_148a78(1, t, h);
+            }
+            return;
+        }
+        if !(0..3).contains(&st) {
+            return;
+        }
+        // FUN_00149440: candidates = the object list (+0x28c) + the objects of the oid list (+0x2b0,
+        // FUN_0015e9c8); with both lists empty the player list (0x3e134c)
+        let mut cands: Vec<u32> = self.objs.clone();
+        // HEIST r21: FUN_0015e9c8(0x3dd490, 0x505, +0x2b0[i], 0, 0x40 - n, ..): row 433 holds CLASS ids, not oids
+        // (EP4 Wall Bombing volume 77426: 53 = the JT class -> Sly; before, an oid-53 search found nothing)
+        for &cid in &self.oids {
+            let n = cands.len();
+            cands.extend(h.ee_sub_15e9c8_505(cid, 0x40usize.saturating_sub(n)));
+        }
+        if self.objs.is_empty() && self.oids.is_empty() {
+            cands.extend(h.k22_targets_3eb8());
+        }
+        // FUN_00149440: +0x1d8 = 0, then the first candidate found inside
+        self.f_1d8 = 0;
+        let mut hit = false;
+        for x in cands {
+            if x != 0 && { let p = h.ee_sub_1a62e8(x); h.vol_contains(obj, p) } {
+                hit = true;
+                if self.f_1d8 == 0 { self.f_1d8 = x; }
+            }
+        }
+        self.tg.ee_sub_148a78(hit as i32, t, h);
+    }
+}
+
+impl ClassSet {
+    /// class 24: construct (FUN_001492f0: FUN_00148718), feed row 440, owner (slot 40), slot 14 (state 0)
+    pub(super) fn build_k24v(&mut self, w: &World, h: &mut dyn ClassHost) {
+        for (i, o) in w.objects.iter().enumerate() {
+            if o.class != 24 {
+                continue;
+            }
+            let src = super::clone_src(w, i);
+            let mut c = C2cc7b0::default();
+            c.tg.ee_sub_148718();
+            if let Some(p) = w.objects.get(src).and_then(crate::engine::game::fields::object_props) {
+                for p in p.iter() {
+                    match p.field {
+                        440 => {
+                            let a = method_args(&p.value);
+                            c.tg.ee_sub_161f10(a.first().copied().unwrap_or(0), a.get(1).copied().unwrap_or(0));
+                        }
+                        432 | 433 => {
+                            let v = method_args(&p.value).first().copied().unwrap_or(0);
+                            if p.field == 432 && c.objs.len() < 8 {
+                                c.objs.push(v);
+                            } else if p.field == 433 && c.oids.len() < 4 {
+                                c.oids.push(v as i32);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            c.tg.owner = handle(i);
+            self.k24v.push((i, c));
+        }
+    }
+    pub(super) fn post_load_k24v(&mut self, h: &mut dyn ClassHost) {
+        let t = self.g.t;
+        for (i, c) in &mut self.k24v {
+            // MURRAY: row-432 kind 0x2002 object references -> handles (FUN_0015e938 mode 0x2002)
+            // POOL1 R63: | 0x400 (scope check skipped). REPLACED: the original resolves these load-time refs before
+            // the player's +0x3c path moves off the root (EP1 disco capture cap_pool1_bomb_slot/000: volumes 124082-4
+            // +0x288 = 1, +0x28c = Bentley 0x7ef600 although Bentley's node is not on their chain); the R34 scope
+            // check (kind -1) would drop Bentley here and the disco task chain stalls
+            for o in c.objs.iter_mut() {
+                *o = h.ee_sub_15e938(0x2002 | 0x400, *o as i32, handle(*i));
+            }
+            c.tg.ee_sub_148a78(0, t, h);
+        }
+    }
+    /// POOL1 R98: FUN_001c48c0 (called by FUN_001c4940 on every focus change): each follow-po object
+    /// FUN_001a58d0(obj, focus, 0) (SetParent keeping its local matrix: it moves with the new focus).
+    /// REPLACED: run when the focus differs from the last applied one; the +0xe4 record's +8 word (= focus) is not
+    /// modelled; only the player-object focus (EngineHost po) is seen, not the hub menu focus (rec11 005: 17239).
+    pub(super) fn frame_follow_po(&mut self, h: &mut dyn ClassHost) {
+        if self.follow_po.is_empty() {
+            return;
+        }
+        let f = h.sw_focus_po();
+        if f == 0 || f == self.follow_po_at {
+            return;
+        }
+        self.follow_po_at = f;
+        for &i in &self.follow_po {
+            h.ee_sub_1a58d0(i, f as i32, 0);
+        }
+    }
+    pub(super) fn frame_k24v(&mut self, h: &mut dyn ClassHost) {
+        let t = self.g.t;
+        for (i, c) in &mut self.k24v {
+            // FEEL R32: slot 15 only for objects in the world's update list (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
+            c.ee_sub_149440(*i, t, h);
         }
     }
 }

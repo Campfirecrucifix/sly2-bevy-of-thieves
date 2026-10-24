@@ -25,6 +25,7 @@ pub mod ik;
 #[cfg(feature = "game")]
 pub mod plugin;
 pub mod vis;
+pub mod look;
 pub mod glider;
 pub mod po;
 
@@ -67,6 +68,30 @@ pub const FIELD_JUMP: u32 = 0x1994;
 pub const FIELD_GLIDE_OPEN: u32 = 0x438;
 /// ASEG members whose end pose is held (no state ASEG follows them).
 pub const HOLD_AT_END: [u32; 1] = [FIELD_GLIDE_OPEN];
+/// FEEL R85: the cane jtcs fields (p11_cane::jtcs_field: 0x1a74 / 0x1a78 recoils, 0x1ce0..0x1d18 swings) hold
+/// their end pose instead of looping.
+pub fn cane_hold_at_end(field: u32) -> bool {
+    (field == 0x1a74 || field == 0x1a78 || (0x1ce0..=0x1d18).contains(&field)) && std::env::var("SLY2_FEEL_R85CANE").map_or(true, |v| v != "0")
+}
+/// ANIM-ALL R84: the JT's SMA lives in the native JtAnimator (`JtAnimator::sm`), not in the class runtime (k25): a
+/// script FUN_001f67e0(Sly's JT, SM oid) finds it here as this pseudo SMA handle (k25 SMA tag, never allocated:
+/// handles count up from 1), and its field-372 goal (FUN_001f0660) is queued in `JT_SMA_GOALS` for the animator
+/// (safehouse table script 249.1 #sym1748: Sly's seated SM 419 goal 5526 = ASEG 4544, PCSX2 cap_table_seated).
+/// REPLACED: the original's JT +0x102c SMA is an ordinary SMA in the 0x3e126c list. Opt-out SLY2_NO_R84_JTSMA=1 (R85: default; with the R85 script-request carry in player/plugin.rs the
+/// seated request reaches the animator).
+/// Handle = JT_SMA_HANDLE | SM oid (20 bits). Goals wait (up to 60 animator frames) for the JT SMA of that SM: the
+/// script's SetState(4) (jts 0x12 -> FUN_001f03a8(+0x102c)) reaches the animator after the goal is set.
+pub const JT_SMA_HANDLE: u32 = 0x42f0_0000;
+pub static JT_SMA_GOALS: std::sync::Mutex<Vec<(i32, i32, u32)>> = std::sync::Mutex::new(Vec::new());
+pub fn jt_sma_handle(sm_oid: i32) -> u32 {
+    JT_SMA_HANDLE | (sm_oid as u32 & 0xf_ffff)
+}
+pub fn jt_sma_of(h: u32) -> Option<i32> {
+    (h & 0xfff0_0000 == JT_SMA_HANDLE).then_some((h & 0xf_ffff) as i32)
+}
+pub fn jt_sma_on() -> bool {
+    std::env::var_os("SLY2_NO_R84_JTSMA").is_none()
+}
 /// JT +0x1028: the SM (class 111, oid 0x7c) 0x18c250 drives for jts 0 (FUN_001f03a8).
 pub const SM_JT_1028: i32 = 0x7c;
 
@@ -75,6 +100,10 @@ pub const SM_JT_1028: i32 = 0x7c;
 pub fn sm_field_oid(field: u32) -> Option<i32> {
     match field {
         0x1950 | 0x1bc4 | 0x1f14 => JT_TABLE.iter().find(|r| r.2 == field).map(|r| r.1),
+        // CRAWL R111: +0x102c (0x18c250 jts 0x12 seated, label -1)
+        // CRAWL R113: JT_TABLE has no +0x102c row (R111 returned None: the seated SMA never started, Sly stood);
+        // cap_table_seated 000: Sly jt+0x102c = SM 0x10cc780, oid 419. Opt-out SLY2_NO_R113_SEATMASK=1 (old lookup).
+        0x102c => JT_TABLE.iter().find(|r| r.2 == field).map(|r| r.1).or_else(|| std::env::var_os("SLY2_NO_R113_SEATMASK").is_none().then_some(419)),
         _ => None,
     }
 }
@@ -85,6 +114,10 @@ pub const FIELD_RUN2: u32 = 0x1c34;
 
 /// Cross-fade between ASEGs on a field change (replaced FUN_0012f9b8 blend-in, seconds).
 pub const BLEND_TIME: f32 = 0.15;
+/// ANIM-ALL R15: guest ASEGA ref words of the JT ([`JtAnimator::guest`]): body (current ASEG / SMA link) and
+/// the glider SMA (JT +0x1d28)
+pub const GUEST_SLOT_BODY: u32 = 0;
+pub const GUEST_SLOT_GLIDER: u32 = 1;
 
 /// How a blend field is built at JT post-load (FUN_00188608 tail).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -160,7 +193,8 @@ pub fn jt_anim_members(w: &World, jt: usize) -> HashMap<u32, usize> {
 pub fn aseg_of(w: &World, o: usize) -> Option<&Aseg> {
     match &w.objects[o].payload {
         Payload::Loaded(LoadData::Aseg(a)) => Some(a),
-        _ => None,
+        // HEIST: a FUN_001f66f0 clone child ASEG shares its source's data
+        _ => aseg_of(w, w.objects[o].clone_of?),
     }
 }
 
@@ -326,6 +360,8 @@ pub struct JtAnimator {
     pub jump: JumpWeights,
     /// JT +0x18d0 (jtbs) read by the jump blend update (set by the caller each frame)
     pub jtbs: i32,
+    /// FEEL R84: last non-cane field the JT state requested (jt+0x1030 in the original), (field, jtbs)
+    pub state_req: Option<(u32, i32)>,
     pub current: Option<JtPlay>,
     /// bone locals at the last ASEG change and the fade time left
     pub from: Vec<Mat4>,
@@ -341,6 +377,9 @@ pub struct JtAnimator {
     /// WP-A4: FUN_001f13a8 signals of the last request_sm / sm_tick (the JT's own slot-4 handler for
     /// message 10 is not ported; consumers read them here)
     pub signals: Vec<SmaMsg>,
+    /// ANIM-ALL R15: FUN_001305b8 calls for the guest image, (slot, (t, svt, ASEG object, flags)); slot
+    /// [`GUEST_SLOT_BODY`] / [`GUEST_SLOT_GLIDER`], None = FUN_00130658 (release). Drained by playerdraw.
+    pub guest: Vec<(u32, Option<(f32, f32, usize, u32)>)>,
     /// WP-P17: two-bone IK records (FUN_00186670 / FUN_00186a50)
     pub ik: ik::JtIkSet,
     /// WP-P23: timed ASEG events fired by `step` (ASEG object, event index, reverse) for the FUN_00131290
@@ -350,6 +389,11 @@ pub struct JtAnimator {
     pub blend_ev: HashMap<u32, (usize, f32, Vec<(usize, f32)>)>,
     /// WP-P24: JT +0x1d28 glider SMA (SM 0x5f6 on the glider model 0x5f5, FUN_00188608)
     pub glider: Option<JtSma2>,
+    /// WIRE-AN: JT +0x10f8 / +0x10fc look target and priority (FUN_00142af8), the class-21 candidates of
+    /// the world (None: not collected yet), and the FUN_001430c8 idle mask they give
+    pub look: (Option<usize>, i32),
+    pub look_list: Option<Vec<(usize, crate::engine::classes::k10::C2db378)>>,
+    pub idle_mask: u32,
 }
 
 /// WP-P24: a second SMA of the JT whose transition ASEGs play over the body pose (only the bones their
@@ -448,7 +492,7 @@ fn lerp_m(a: &Mat4, b: &Mat4, u: f32) -> Mat4 {
 impl JtAnimator {
     pub fn new(rig: JtRig) -> Self {
         let from = rig.pose.bones.iter().map(|b| b.local).collect();
-        JtAnimator { rig, blends: HashMap::new(), built: false, jump: JumpWeights::default(), jtbs: 0, current: None, from, fade: 0.0, sm: None, sms: HashMap::new(), rng: GameRng::default(), sm_due: false, signals: vec![], ik: ik::JtIkSet::default(), fired: vec![], blend_ev: HashMap::new(), glider: None }
+        JtAnimator { rig, blends: HashMap::new(), built: false, jump: JumpWeights::default(), jtbs: 0, state_req: None, current: None, from, fade: 0.0, sm: None, sms: HashMap::new(), rng: GameRng::default(), sm_due: false, signals: vec![], ik: ik::JtIkSet::default(), fired: vec![], blend_ev: HashMap::new(), glider: None, look: (None, -1), look_list: None, idle_mask: 8, guest: vec![] }
     }
 
     /// Field of the current ASEGA.
@@ -472,6 +516,15 @@ impl JtAnimator {
         // of the same SM is kept, as for +0x1028)
         if let Some(oid) = sm_field_oid(field).filter(|_| self.rig.aseg_for(field).is_none()) {
             if ee_sub_15e938_below(w, self.rig.jt, oid).is_some() {
+                // CRAWL R113: jts 0x12 (+0x102c) starts with mask 0xfffc (0x18c250 case 0x12; cap_table_seated 000 Sly
+                // SMA 0x1dc4260 +0x48 = 0xfffc, SM 419 cur = goal = 2 playing ASEG 4544); the idle mask (8) found no path
+                // 0 -> 2 (Sly stood in his seat). Opt-out SLY2_NO_R113_SEATMASK=1.
+                if field == 0x102c && std::env::var_os("SLY2_NO_R113_SEATMASK").is_none() {
+                    let keep = std::mem::replace(&mut self.idle_mask, 0xfffc);
+                    self.request_sm_oid(w, oid, -1);
+                    self.idle_mask = keep;
+                    return;
+                }
                 return self.request_sm_oid(w, oid, -1);
             }
         }
@@ -499,8 +552,13 @@ impl JtAnimator {
             }
             let Some(a) = aseg_of(w, o) else { return };
             // FUN_0012f9b8 start at svt 1 (flags 0); looping replaced (restart on end)
+            self.guest.push((GUEST_SLOT_BODY, Some((0.0, 1.0, o, 0))));
             JtPlay::Aseg(o, AsegaPlayer::new(Arc::new(a.clone()), 0, 1.0))
         };
+        if matches!(play, JtPlay::Blend { .. }) {
+            // ANIM-ALL R15: blend fields (class 110 + FUN_0020bb58 weights) stay native: the body slot is released
+            self.guest.push((GUEST_SLOT_BODY, None));
+        }
         self.from = self.rig.pose.bones.iter().map(|b| b.local).collect();
         self.fade = BLEND_TIME;
         self.current = Some(play);
@@ -508,7 +566,7 @@ impl JtAnimator {
 
     /// 0x18c250 jts 0: FUN_001f03a8(JT +0x1028 SM, jt, label, flags 1, FUN_001430c8 mask) with label
     /// 0x175 (0x177 from jts 10, 0x176 from jts 0xc, 0x178/0x179 landing from jts 2; FUN_001f0400 -1
-    /// -> none). FUN_001430c8: JT +0x10fc look mode 0 (no look-at target tracked) -> mask 8.
+    /// -> none). FUN_001430c8 mask from the look target of [`Self::look_update`] (none -> 8).
     pub fn request_sm(&mut self, w: &World, label: i32) {
         self.request_sm_oid(w, SM_JT_1028, label);
     }
@@ -524,7 +582,7 @@ impl JtAnimator {
         let Some(m) = self.sm_of(w, sm) else { return };
         let label = if crate::engine::anim::sm::ee_sub_1f0400(&m.states, label) < 0 { -1 } else { label };
         let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
-        let mut sma = Sma::ee_sub_1f01b8(&m, &mut self.rng, label, 1, 8, &len);
+        let mut sma = Sma::ee_sub_1f01b8(&m, &mut self.rng, label, 1, self.idle_mask, &len);
         self.signals = sma.dispatch(&m, None, &mut []);
         self.sm = Some((sm, sma));
         self.sm_play(w);
@@ -588,11 +646,12 @@ impl JtAnimator {
         }
         let mut pl = AsegaPlayer::new(Arc::new(a.clone()), p.flags, p.svt);
         pl.state.t = p.start;
+        self.guest.push((GUEST_SLOT_GLIDER, Some((p.start, p.svt, p.aseg, p.flags))));
         g.play = Some((p.aseg, pl));
     }
 
     /// FUN_001efac0 post-load tables of an SM object (cached).
-    fn sm_of(&mut self, w: &World, sm: usize) -> Option<Arc<Sm>> {
+    pub fn sm_of(&mut self, w: &World, sm: usize) -> Option<Arc<Sm>> {
         use crate::engine::world::loads_b4::B4Load;
         if let Some(m) = self.sms.get(&sm) {
             return Some(m.clone());
@@ -606,6 +665,68 @@ impl JtAnimator {
     }
 
     /// The SMA's transition ASEGA ended (FUN_001f1078); call before `step`.
+    /// WIRE-AN: FUN_00142af8 target pick (+0x10f8 / +0x10fc) and FUN_001430c8 mask for the JT at `pos` with
+    /// rotation rows `rot` and stick (`ang`, `mag`); jts 0 (`idle`): FUN_0018a0c8 -> FUN_001f1350(JT +0x1034
+    /// SMA, mask) on the JT +0x1028 SM.
+    pub fn look_update(&mut self, w: &World, pos: [f32; 3], rot: &[[f32; 3]; 3], ang: f32, mag: f32, idle: bool) {
+        let list = self.look_list.get_or_insert_with(|| look::targets(w));
+        self.look = look::pick(w, list, pos, ang, mag);
+        self.idle_mask = look::ee_sub_1430c8(w, self.look.0, self.look.1, pos, rot);
+        if !idle {
+            return;
+        }
+        let Some(o) = ee_sub_15e938_below(w, self.rig.jt, SM_JT_1028) else { return };
+        let Some((so, mut sma)) = self.sm.take() else { return };
+        if so == o && sma.mask != self.idle_mask {
+            if let Some(m) = self.sm_of(w, o) {
+                let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
+                if sma.ee_sub_1f1350(&m, &mut self.rng, self.idle_mask, &len) {
+                    self.signals = sma.dispatch(&m, None, &mut []);
+                    self.sm = Some((so, sma));
+                    self.sm_play(w);
+                    return;
+                }
+            }
+        }
+        self.sm = Some((so, sma));
+    }
+
+    /// ANIM-ALL R84: SM oid of the running JT SMA (`JT_SMA_HANDLE` lookups)
+    pub fn sm_oid(&self, w: &World) -> Option<i32> {
+        self.sm.as_ref().and_then(|(o, _)| w.objects.get(*o)).map(|o| o.oid)
+    }
+
+    /// ANIM-ALL R84: FUN_001f0660(JT SMA, label) of the queued script goals (`JT_SMA_GOALS`, (SM oid, label))
+    pub fn jt_sma_goals(&mut self, w: &World) {
+        let goals = std::mem::take(&mut *JT_SMA_GOALS.lock().unwrap());
+        for (oid, label, age) in goals {
+            if std::env::var_os("SLY2_R83IDLE").is_some() && age % 20 == 0 {
+                eprintln!("R84JTSMA wait sm {oid} label {label} age {age} cur sm {:?} current {}", self.sm_oid(w), self.current.is_some());
+            }
+            if self.sm_oid(w) != Some(oid) {
+                if age < 60 {
+                    JT_SMA_GOALS.lock().unwrap().push((oid, label, age + 1));
+                }
+                continue;
+            }
+            let Some((o, mut sma)) = self.sm.take() else { continue };
+            let before = sma.asega.clone();
+            if let Some(m) = self.sm_of(w, o) {
+                let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
+                sma.ee_sub_1f0660(&m, &mut self.rng, label, &len);
+                self.signals = sma.dispatch(&m, None, &mut []);
+            }
+            let changed = sma.asega != before;
+            if std::env::var_os("SLY2_R83IDLE").is_some() {
+                eprintln!("R84JTSMA sm {oid} label {label} -> cur {} goal {} asega {:?}", sma.cur, sma.goal, sma.asega.as_ref().map(|a| w.objects.get(a.aseg).map(|o| o.oid)));
+            }
+            self.sm = Some((o, sma));
+            if changed {
+                self.sm_play(w);
+            }
+        }
+    }
+
     pub fn sm_tick(&mut self, w: &World) {
         if !std::mem::take(&mut self.sm_due) {
             return;
@@ -629,8 +750,13 @@ impl JtAnimator {
             let b = bind_channels(w, self.rig.jt, a, &self.rig.index);
             self.rig.bindings.insert(p.aseg, b);
         }
+        if crate::engine::player::p15_anim::anim_log() {
+            let b = &self.rig.bindings[&p.aseg];
+            eprintln!("C4 sm_play: aseg {} oid {:#x} start {} svt {} flags {:#x} len {} cur {} next {} goal {} binding {:?}", p.aseg, w.objects[p.aseg].oid, p.start, p.svt, p.flags, a.length, sma.cur, sma.next, sma.goal, b.len());
+        }
         let mut pl = AsegaPlayer::new(Arc::new(a.clone()), p.flags, p.svt);
         pl.state.t = p.start;
+        self.guest.push((GUEST_SLOT_BODY, Some((p.start, p.svt, p.aseg, p.flags))));
         self.from = self.rig.pose.bones.iter().map(|b| b.local).collect();
         self.fade = BLEND_TIME;
         self.current = Some(JtPlay::Aseg(p.aseg, pl));
@@ -639,6 +765,10 @@ impl JtAnimator {
     /// Advance and pose (bone worlds in rest level space, `rig.pose.world()`). `jtbs` = JT +0x18d0.
     pub fn step(&mut self, dt: f32) {
         self.fired.clear();
+        // ANIM-ALL R15: animators no one drains (tests / headless) keep only the latest guest calls
+        if self.guest.len() > 64 {
+            self.guest.drain(..self.guest.len() - 64);
+        }
         let jtbs = self.jtbs;
         for b in &mut self.rig.pose.bones {
             b.motion = 0;
@@ -656,9 +786,15 @@ impl JtAnimator {
                     // WP-P19: 0x195fb8 case 0x14 plays JMP[0x6e] (jt+0x478, unbound for Sly): FUN_001305b8
                     // with no ASEG leaves the glide-open end pose in place
                     p.state.t = p.aseg.length;
+                } else if (p.ended || p.state.t >= p.aseg.length) && cane_hold_at_end(self.rig.field_of(*o)) {
+                    // FEEL R85 (USER 'double swing on one press'): the cane ASEGA jt+0x18e0 plays once; its end
+                    // (msg 3) ends the jtcs, which re-requests the state field (plugin.rs). Looping here showed a
+                    // second swing (+ sound 11) for the frames until the JT's jtcs end. SLY2_FEEL_R85CANE=0 = old.
+                    p.state.t = p.aseg.length;
                 } else if p.ended || p.state.t >= p.aseg.length {
                     let a = p.aseg.clone();
                     *p = AsegaPlayer::new(a, 0, 1.0);
+                    self.guest.push((GUEST_SLOT_BODY, Some((0.0, 1.0, *o, 0))));
                 }
                 let t = p.state.t;
                 let segments = bind_segments(&p.aseg, t);

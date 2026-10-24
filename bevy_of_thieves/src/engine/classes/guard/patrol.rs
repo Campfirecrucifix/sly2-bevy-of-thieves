@@ -63,8 +63,17 @@ pub const YAW_SMP: [f32; 4] = [25.0, 0.0, 0.25, 1.0];
 /// The guard state the tasks read / write (guard object fields).
 #[derive(Clone, Debug, Default)]
 pub struct Body {
+    /// CRAWL R97: guard +0xfc8 (alarm), copied by the guard layer each frame for FUN_00209098
+    pub f_fc8: i32,
     /// FUN_001a62e8 world position
     pub pos: V3,
+    /// BOSS: FUN_001c0d70(target, 1) of the brain target and whether it equals the guard's own region
+    /// (+0xe8 -> +0xdc -> +0x10; REPLACED: FUN_001c0d70(guard pos, 1)); set by the guard layer each frame
+    pub tgt_region: i32,
+    pub region_diff: bool,
+    /// BOSS: guard +0x31c / +0x324 (0xb3 reposition: goal distance range / keep range), set by the guard layer
+    pub f_31c: [f32; 2],
+    pub f_324: [f32; 2],
     /// current body yaw (atan2 of the vslot 0xfc matrix x row)
     pub yaw: f32,
     /// +0x1a8 target yaw (FUN_00204660)
@@ -79,6 +88,12 @@ pub struct Body {
     pub c3a: bool,
     /// K24: the REPLACED lift integrator is flying the body (`Guard::po`; +0x208 ground contact = !k24_air)
     pub k24_air: bool,
+    /// ANIM R27: guard +0x2cc / +0x2d0 routine run range (FUN_00205eb8: DAT_002a8600 = FLT_MAX) and +0x2d4 / +0x2d8
+    /// routine idle range (FUN_00179e80 / FUN_00179ef8; written by field 274 / 275 and routine kinds 1 / 2)
+    pub f_2cc: [f32; 2],
+    pub f_2d4: [f32; 2],
+    /// ANIM R27: FUN_0011d448 state (ClassSet::rng, lent to the guard for its tick)
+    pub rng: crate::engine::physics::driven::GameRng,
 }
 
 /// Per-call context.
@@ -179,9 +194,10 @@ impl Walk {
         }
         w
     }
-    /// FUN_00178d00: arrived
+    /// FUN_00178d00: arrived (ANIM R27: one vaddbc of the squared delta = x² + y², the flat distance; a rail
+    /// point above / below the ground position still counts as reached)
     pub fn ee_sub_178d00(&self, pos: V3) -> bool {
-        self.finite && len(sub(pos, self.b0)) <= self.r64
+        self.finite && len(flat(sub(pos, self.b0))) <= self.r64
     }
     /// FUN_00177ef0 start
     pub fn ee_sub_177ef0(&mut self, cx: &mut Cx) {
@@ -290,11 +306,20 @@ pub struct Goto {
     pub bc: bool,
     /// +0x18 child (0xa7)
     pub walk: Option<Walk>,
+    /// ANIM R27: +0x40 target path (an is-a-10 object of a kind-7 command); FUN_001c1ec0 resolves it to the
+    /// closest point to the guard (FUN_001e6f60) at every replan
+    pub f_40: Option<Path>,
 }
 
 impl Goto {
     pub fn new(bc: bool) -> Goto {
-        Goto { st: -1, f_50: [0.0; 3], a0: f32::MIN, bc, walk: None }
+        Goto { st: -1, f_50: [0.0; 3], a0: f32::MIN, bc, walk: None, f_40: None }
+    }
+    /// ANIM R27: FUN_0017dd38 with a path target (+0x40 = path, +0x50 unused)
+    pub fn ee_sub_17dd38_path(&mut self, cx: &mut Cx, p: Path) {
+        self.f_40 = Some(p);
+        self.a0 = f32::MIN;
+        self.ee_sub_17da28(cx);
     }
     /// FUN_0017dd38: retarget + force replan (+0xa0 = DAT_002a562c)
     pub fn ee_sub_17dd38(&mut self, cx: &mut Cx, p: V3) {
@@ -307,6 +332,10 @@ impl Goto {
     fn ee_sub_17da28(&mut self, cx: &mut Cx) {
         if cx.body.f_fe8 & 2 == 0 {
             return;
+        }
+        // ANIM R27: FUN_0017d8a8 -> FUN_001c1ec0(+0x40 target, guard pos): a path target is its closest point
+        if let Some(p) = &self.f_40 {
+            self.f_50 = FUN_001e6f60(p, cx.body.pos).cp;
         }
         // nav +0xe8 = 2, +0xf4 = {pos, goal}, FUN_001e6180 (zero-length path: already there, no walk child)
         if len(sub(self.f_50, cx.body.pos)) < 1e-3 {
@@ -420,9 +449,20 @@ pub enum Cmd {
     Rail(Option<Path>, i32, f32),
     /// kind 7: go to a point (object position / guard +0x300), then face yaw (None = keep)
     Goto(V3, Option<f32>),
+    /// ANIM R27: kind 7 on an is-a-10 object (FUN_00132b10(obj, 10)): target +0 = the path, goes to its closest point
+    GotoPath(Path),
+    /// ANIM R27: kinds 1 / 2: guard +0x2cc / +0x2d4 = entry +8 / +0xc (routine run / idle ranges)
+    Set2cc([f32; 2]),
+    Set2d4([f32; 2]),
     /// kind 9 label / kind 10 jump to label id
     Label(i32),
     Jump(i32),
+    /// kind 3: place the guard at an object (FUN_00171b60: position vslot +0xec, FUN_00204660 orientation)
+    Warp(V3, f32),
+    /// kind 0xf: FUN_001e0020(sequence handle, signal)
+    Signal(u32, i32),
+    /// ANIM R25: kind 0xe: play the ASEG oid (+4, FUN_0015e938 under the guard) with record flags (+8)
+    Anim(i32, u32),
     Other(i32),
 }
 
@@ -444,13 +484,16 @@ pub struct Script {
     pub f_48: Option<f32>,
     pub f_4c: bool,
     child: Child,
+    /// ANIM R25: kind 0xe anim command: (ASEG oid, record flags, start time) of the pushed 0x9d anim task
+    /// (vt 0x2d0ab0, +0x40 = the +0x50 record FUN_002090d0 / FUN_00209130)
+    pub anim: Option<(i32, u32, f32)>,
 }
 
 impl Script {
     /// FUN_00171258(t, routine, flag, cursor): start at the cursor or the first entry, execute it
     pub fn ee_sub_171258(cmds: Vec<Cmd>, flag: bool, cursor: Option<usize>, cx: &mut Cx) -> Script {
         let cur = cursor.or(if cmds.is_empty() { None } else { Some(0) });
-        let mut s = Script { cmds, cur, f_3c: 0.0, busy: false, f_48: None, f_4c: flag, child: Child::None };
+        let mut s = Script { cmds, cur, f_3c: 0.0, busy: false, f_48: None, f_4c: flag, child: Child::None, anim: None };
         if let Some(k) = s.cur {
             s.ee_sub_1715f0(k, cx);
         }
@@ -463,8 +506,15 @@ impl Script {
     /// FUN_001715f0: execute entry k (kinds 5, 6, 7, 9, 10)
     fn ee_sub_1715f0(&mut self, k: usize, cx: &mut Cx) {
         self.child = Child::None;
+        self.anim = None;
         self.f_3c = cx.now;
         match self.cmds[k].clone() {
+            // ANIM R25: case 0xe: +0x50 record {kind, oid +0x54, +0x5c = entry +8} (FUN_002090d0 / FUN_00209130),
+            // guard +0xf80 == -1: push 0x9d with +0x40 = record; +0x40 busy
+            Cmd::Anim(oid, fl) => {
+                self.anim = Some((oid, fl, cx.now));
+                self.busy = true;
+            }
             Cmd::Wait(_) => self.busy = true,
             Cmd::Rail(Some(p), dir, u) => {
                 // guard +0xf80 == -1 (init): task 0xc0, +0x58 = +0x4c
@@ -477,6 +527,32 @@ impl Script {
                 self.child = Child::Goto(Box::new(g));
                 self.f_48 = yaw;
                 self.busy = true;
+            }
+            Cmd::GotoPath(p) => {
+                let mut g = Goto::new(self.f_4c);
+                g.ee_sub_17dd38_path(cx, p);
+                self.child = Child::Goto(Box::new(g));
+                self.f_48 = None;
+                self.busy = true;
+            }
+            // ANIM R27: cases 1 / 2 (LAB_00171acc: not busy)
+            Cmd::Set2cc(r) => {
+                cx.body.f_2cc = r;
+                self.busy = false;
+            }
+            Cmd::Set2d4(r) => {
+                cx.body.f_2d4 = r;
+                self.busy = false;
+            }
+            Cmd::Warp(p, yaw) => {
+                cx.body.pos = p;
+                cx.body.yaw = yaw;
+                cx.body.f_1a8 = yaw;
+                self.busy = false;
+            }
+            Cmd::Signal(seq, sig) => {
+                cx.h.ee_sub_1e0020(seq, sig);
+                self.busy = false;
             }
             Cmd::Jump(id) => {
                 if let Some(j) = self.cmds.iter().position(|c| matches!(c, Cmd::Label(l) if *l == id)) {
@@ -495,8 +571,14 @@ impl Script {
         let Some(k) = self.cur else { return false };
         let run = match (&self.cmds[k], &self.child) {
             (Cmd::Wait(s), _) => cx.now - self.f_3c <= *s,
+            // ANIM R25: case 0xd / 0xe: FUN_00174fb8 (0x9d +0x30 == 1: FUN_00209430 -> FUN_00131968, the ASEGA left
+            // the live set = played to the end without a keep flag (SEGA_KEEP 0x38, e.g. 8 = loop))
+            (Cmd::Anim(oid, fl), _) => match cx.h.aseg_oid_len(cx.guard, *oid) {
+                Some((len, f78)) => *fl & crate::engine::anim::play::SEGA_KEEP != 0 || (cx.now - self.f_3c) * f78 < len,
+                None => false,
+            },
             (Cmd::Rail(..), Child::Rail(r)) => !r.ee_sub_17ee78(cx.body.pos),
-            (Cmd::Goto(..), Child::Goto(g)) => {
+            (Cmd::Goto(..) | Cmd::GotoPath(..), Child::Goto(g)) => {
                 if g.ee_sub_17dcb8(cx.body.pos) {
                     if let Some(y) = self.f_48 {
                         ee_sub_209818(cx.body, y);
@@ -511,6 +593,7 @@ impl Script {
         if !run {
             self.busy = false;
             self.child = Child::None;
+            self.anim = None;
         }
         run
     }
@@ -531,6 +614,14 @@ impl Script {
             }
         }
     }
+    /// debug: running rail / goto state (tests)
+    pub fn child_dbg(&self) -> String {
+        match &self.child {
+            Child::Rail(r) => format!("rail dir {} u {} min {} max {} looped {} f40 {:?} goto st {} f50 {:?} walk {:?}", r.dir, r.u, FUN_001e6620(&r.rail), FUN_001e6648(&r.rail), r.rail.looped, r.f_40, r.goto.st, r.goto.f_50, r.goto.walk.as_ref().map(|w| (w.st, w.b0, w.u, w.end_u))),
+            Child::Goto(g) => format!("goto st {} f50 {:?}", g.st, g.f_50),
+            Child::None => "none".into(),
+        }
+    }
     /// waypoint target of the running rail command (tests / debug)
     pub fn rail_u(&self) -> Option<f32> {
         match &self.child {
@@ -543,42 +634,99 @@ impl Script {
 /// 0xaa ROUTINE task (vt 0x2d0520, size 0x50).
 #[derive(Clone, Debug)]
 pub struct Routine {
-    /// +0x30 state (0 script, 1 idle, 2 done, 3 interrupted), +0x30 / +0x34 timers (FLT_MAX defaults)
+    /// +0x38 state (0 script, 1 idle, 2 done, 3 interrupted), +0x30 run end / +0x34 idle end (FLT_MAX defaults),
+    /// +0x40 routine, +0x18 child script (state 0; state 1's child is the 0x9e idle task)
     pub st: i32,
     pub t30: f32,
+    pub t34: f32,
+    pub f_40: Option<Vec<Cmd>>,
     pub script: Option<Script>,
+    /// guard +0x2dc (FUN_00171c18 on leaving state 0, read back by FUN_00171258)
+    pub f_2dc: Option<usize>,
+}
+
+/// FUN_00209098(g): +0xfc8 != 0 || FUN_0020f1b8(0x3dd490) (world +0x3d84 > 0). CRAWL R97 (opt-out SLY2_NO_R97_3D84 =
+/// the old host query, always false)
+fn ee_sub_209098(cx: &mut Cx) -> bool {
+    if std::env::var_os("SLY2_NO_R97_3D84").is_some() {
+        return cx.h.ee_sub_209098(cx.guard);
+    }
+    cx.body.f_fc8 != 0 || cx.h.ee_sub_20f1b8()
 }
 
 impl Routine {
-    /// FUN_00179aa0 start + FUN_00179d30(0): routine = +0x2e8 or (+0xfe8 & 2) +0x2ec, else state 2
-    pub fn ee_sub_179aa0(cmds: Option<Vec<Cmd>>, cursor: Option<usize>, t30: f32, cx: &mut Cx) -> Routine {
-        let mut r = Routine { st: 2, t30, script: None };
-        if let Some(c) = cmds {
-            if cx.h.ee_sub_209098(cx.guard) {
-                r.st = 3;
-            } else {
-                r.st = 0;
-                r.script = Some(Script::ee_sub_171258(c, false, cursor, cx));
-            }
-        }
+    /// FUN_00179aa0 start: +0x40 = +0x2e8 or (+0xfe8 & 2) +0x2ec, else state 2; FUN_00179d30(0 / 3)
+    pub fn ee_sub_179aa0(cmds: Option<Vec<Cmd>>, cursor: Option<usize>, cx: &mut Cx) -> Routine {
+        let mut r = Routine { st: -1, t30: f32::MAX, t34: f32::MAX, f_40: cmds, script: None, f_2dc: cursor };
+        let s = if r.f_40.is_none() { 2 } else if ee_sub_209098(cx) { 3 } else { 0 };
+        r.ee_sub_179d30(s, cx);
         r
     }
-    /// FUN_00179ba0 update (script child first)
+    /// FUN_00179d30(state): leaving 0 saves the cursor (FUN_00171c18), the child is popped; 0 = new script at
+    /// the cursor + FUN_00179e80, +0x34 = FLT_MAX; 1 = 0x9e idle + FUN_00179ef8, +0x30 = FLT_MAX
+    fn ee_sub_179d30(&mut self, s: i32, cx: &mut Cx) {
+        if s == self.st {
+            return;
+        }
+        if self.st == 0 {
+            self.f_2dc = self.script.as_ref().and_then(|x| x.cur);
+        }
+        self.script = None;
+        self.st = s;
+        match s {
+            0 => {
+                let c = self.f_40.clone().unwrap_or_default();
+                self.script = Some(Script::ee_sub_171258(c, false, self.f_2dc, cx));
+                // FUN_00179e80
+                if self.t30 >= f32::MAX {
+                    let r = cx.body.f_2cc;
+                    self.t30 = if r[0] == f32::MAX { f32::MAX } else { cx.now + cx.body.rng.FUN_0011d448(r[0], r[1]) };
+                }
+                self.t34 = f32::MAX;
+            }
+            1 => {
+                // FUN_00179ef8
+                if self.t34 >= f32::MAX {
+                    let r = cx.body.f_2d4;
+                    self.t34 = if r[0] == f32::MAX { f32::MAX } else { cx.now + cx.body.rng.FUN_0011d448(r[0], r[1]) };
+                }
+                self.t30 = f32::MAX;
+            }
+            _ => {}
+        }
+    }
+    /// FUN_00179ba0 update (child first, FUN_001eed10 leaf order), then the state loop
     pub fn tick(&mut self, cx: &mut Cx) {
         if let Some(s) = &mut self.script {
             s.tick(cx);
         } else {
             cx.body.f_190 = [0.0; 3];
         }
-        if self.st == 0 && cx.now >= self.t30 && self.script.as_ref().is_some_and(|s| s.ee_sub_171458()) {
-            self.st = 2;
-        }
-        if self.st == 0 && cx.h.ee_sub_209098(cx.guard) {
-            self.st = 3;
+        let busy = ee_sub_209098(cx);
+        for _ in 0..8 {
+            let st = self.st;
+            match st {
+                0 if busy => self.ee_sub_179d30(3, cx),
+                0 if cx.now <= self.t30 => {
+                    if self.script.as_ref().is_some_and(|s| s.ee_sub_171458()) {
+                        self.f_40 = None;
+                        self.ee_sub_179d30(2, cx);
+                    }
+                }
+                0 => self.ee_sub_179d30(1, cx),
+                1 if busy => self.ee_sub_179d30(3, cx),
+                1 if self.t34 < cx.now => self.ee_sub_179d30(0, cx),
+                2 if busy => self.ee_sub_179d30(3, cx),
+                3 if !busy => self.ee_sub_179d30(if self.f_40.is_some() { 1 } else { 2 }, cx),
+                _ => {}
+            }
+            if self.st == st {
+                break;
+            }
         }
     }
     /// FUN_00171c18: cursor saved into guard +0x2dc on leaving state 0
     pub fn cursor(&self) -> Option<usize> {
-        self.script.as_ref().and_then(|s| s.cur)
+        if self.st == 0 { self.script.as_ref().and_then(|s| s.cur) } else { self.f_2dc }
     }
 }

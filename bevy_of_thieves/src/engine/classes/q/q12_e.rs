@@ -95,10 +95,15 @@ pub fn ee_sub_207c48<M: QMem + ?Sized>(m: &mut M, o: u32, l: u32, p3: u32, p4: u
     let obj = m.call(0x0020_ca00, &[0xd0], &[]).0;
     m.w32(r + 4, obj);
     m.call(0x0020_c7d8, &[obj], &[]);
-    m.w32(obj, p3);
-    m.w32(obj + 0x30, p4);
-    m.w32(obj + 0x60, p5);
-    m.w32(obj + 0x90, p6);
+    // PART-R14: MIPS reloads [r+4] before every store
+    let o4 = m.r32(r + 4);
+    m.w32(o4, p3);
+    let o4 = m.r32(r + 4);
+    m.w32(o4 + 0x30, p4);
+    let o4 = m.r32(r + 4);
+    m.w32(o4 + 0x60, p5);
+    let o4 = m.r32(r + 4);
+    m.w32(o4 + 0x90, p6);
     m.w32(r + 0xc, 8);
 }
 pub fn ee_sub_207cf8<M: QMem + ?Sized>(m: &mut M, o: u32, l: u32, p3: u32, p4: u32, p5: u32, p6: u32) {
@@ -115,15 +120,17 @@ pub fn ee_sub_207d98<M: QMem + ?Sized>(m: &mut M, o: u32, l: u32, p3: u32) {
     let obj = m.call(0x0020_c010, &[0x40], &[]).0;
     m.w32(r + 4, obj);
     m.call(0x0020_bd78, &[obj], &[]);
+    let obj = m.r32(r + 4); // PART-R14: MIPS reloads [r+4] after the call
     m.w32(obj, p3);
     m.w32(r + 0xc, 0);
 }
-/// FUN_00207e08(p1..p7): record of (p5, mask(p6)); FUN_00207d98 gets the unchanged first args; FUN_00209130(rec, p5)
-pub fn ee_sub_207e08<M: QMem + ?Sized>(m: &mut M, p1: u32, p2: u32, p3: u32, p4: u32, p5: u32, p6: u32, p7: u32) {
-    let u = ee_sub_207b10(m, p6);
-    let r = ee_sub_209c18(m, p5, u);
-    ee_sub_207d98(m, p1, p2, p3);
-    ee_sub_209130(m, r, p5);
+/// FUN_00207e08(o, list, v0) (f12-f15 pass through unused): rec = FUN_00209c18(o, mask(list)),
+/// FUN_00207d98(o, list, v0), FUN_00209130(rec, o)
+pub fn ee_sub_207e08<M: QMem + ?Sized>(m: &mut M, o: u32, l: u32, p3: u32) {
+    let u = ee_sub_207b10(m, l);
+    let r = ee_sub_209c18(m, o, u);
+    ee_sub_207d98(m, o, l, p3);
+    ee_sub_209130(m, r, o);
 }
 /// FUN_00207eb8(o, mask, v4, v12, slots): reset the selected of 26 slots (stride 0x10) and set +4 / +0xc
 pub fn ee_sub_207eb8<M: QMem + ?Sized>(m: &mut M, o: u32, mask: u32, p3: u32, p4: u32, slots: u32) {
@@ -374,7 +381,8 @@ pub fn ee_sub_208bb0<M: QMem + ?Sized>(m: &mut M) {
 /// (float at [0], second word at [4]); *out = distance; result 4 (blocked), 3 (hit by FUN_00227c90), 2, 1, 0
 pub fn ee_sub_208e70<M: QMem + ?Sized>(m: &mut M, p1: u32, p2: u32, p3: u32) -> u32 {
     let loc = stack_push(m, 0x50);
-    m.call(0x0014_28d8, &[p1, p2, p3, loc], &[]);
+    // PART r17: asm 0x208e94..a4: FUN_001428d8(other, o, other + 0x10dc, sp, sp + 4)
+    m.call(0x0014_28d8, &[p2, p1, p2.wrapping_add(0x10dc), loc, loc + 4], &[]);
     if p3 != 0 {
         let d = m.r32(loc);
         m.w32(p3, d);
@@ -526,13 +534,14 @@ pub fn ee_sub_209130<M: QMem + ?Sized>(m: &mut M, s: u32, o: u32) {
     }
 }
 /// FUN_00209278(this, slot, o, p4): start the slot's object by kind (0 JtAnimator_request, 1 FUN_001f0198,
-/// 2 FUN_0020bf80 in o+0xdb0, 3 FUN_0020c948 in o+0xe20) and call its virtual +0xc
-pub fn ee_sub_209278<M: QMem + ?Sized>(m: &mut M, p1: u32, s: u32, p3: u32, p4: u32) {
+/// 2 FUN_0020bf80 in o+0xdb0, 3 FUN_0020c948 in o+0xe20) and call its virtual +0xc.
+/// PART r17 ABI (asm 0x209278): a0 = slot, a1 = o, a2 = p4, $f12 = blend (was a leading dummy int)
+pub fn ee_sub_209278<M: QMem + ?Sized>(m: &mut M, s: u32, p3: u32, p4: u32, f12: f32) {
     let a = m.r32(s + 4);
     let i1;
     match m.r32(s) {
         0 => {
-            m.call(0x0012_f9b8, &[p1, 0x3f80_0000, a, p3, p4, s + 8], &[]);
+            m.call(0x0012_f9b8, &[a, p3, p4, s + 8], &[super::q5util::f4(f12), super::q5util::f4(1.0)]);
             i1 = m.r32(s + 8);
         }
         1 => {
@@ -832,5 +841,40 @@ pub fn ee_sub_20a100<M: QMem + ?Sized>(m: &mut M, o: u32, id: u32, v: V4) {
             let w = m.r32(o + 0xf70 + 4 * k);
             m.w32(i1 + 0x40 + 4 * k, w);
         }
+    }
+}
+
+#[cfg(test)]
+mod part_r14_tests {
+    use super::*;
+    use crate::engine::classes::q::q2mem::FlatMem;
+
+    // FUN_00207e08(o, list, v0): two records of mask(list) on o; kind 2 object gets v0, then 0x209130(rec, o)
+    #[test]
+    fn rec_207e08_uses_o_list_v0() {
+        let mut m = FlatMem::default();
+        let o = 0x10_0000;
+        m.ret.insert(0x0020_c010, (0x20_0000, [0.0; 4]));
+        ee_sub_207e08(&mut m, o, 0, 0x1234);
+        let e = o + 0x4d0; // first (empty) table entry, key 0
+        assert_eq!(m.r32(o + 0x4c0), 1);
+        assert_eq!(m.r32(e), 2);
+        assert_eq!(m.r32(e + 4), 0x20_0000);
+        assert_eq!(m.r32(0x20_0000), 0x1234);
+        assert_eq!(m.r32(e + 0xc), 0);
+    }
+
+    // FUN_00207c48 reloads rec+4 before each store
+    #[test]
+    fn rec_207c48_stores_through_rec4() {
+        let mut m = FlatMem::default();
+        let o = 0x10_0000;
+        m.ret.insert(0x0020_ca00, (0x30_0000, [0.0; 4]));
+        ee_sub_207c48(&mut m, o, 0, 1, 2, 3, 4);
+        let e = o + 0x4d0;
+        assert_eq!(m.r32(e), 3);
+        assert_eq!(m.r32(e + 0xc), 8);
+        let obj = 0x30_0000;
+        assert_eq!([m.r32(obj), m.r32(obj + 0x30), m.r32(obj + 0x60), m.r32(obj + 0x90)], [1, 2, 3, 4]);
     }
 }

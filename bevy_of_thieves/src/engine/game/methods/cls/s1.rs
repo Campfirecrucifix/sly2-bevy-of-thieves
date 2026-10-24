@@ -28,6 +28,7 @@ pub const PORTED: &[(u32, u32)] = &[
     (0x0010_44b0, 0x0020_af88),
     (0x0011_0a28, 0x001c_8af0),
     (0x0010_5200, 0x0014_90c0),
+    (0x0011_0478, 0x001d_4e30),
 ];
 
 /// Row (thunk, engine callee) executed by S1 code.
@@ -114,6 +115,13 @@ fn s1_run(set: &mut ClassSet, h: &mut dyn ClassHost, thunk: u32, i: usize, raw: 
         0x0010_5200 => {
             let Some(c) = set.k15_83_get(i) else { return false };
             c.tg.ee_sub_1487a0(t, h);
+        }
+        // WIRE-E: 0x00110478: FUN_001d4e30(part) on the class-77 truck `i`'s part with key a0 (vm_state
+        // resolves the class-153 part handle to (truck, key)); FUN_001d3fa8 = the part by key
+        0x0011_0478 => {
+            let Some(c) = set.k20_77(i) else { return false };
+            let Some(k) = c.ee_sub_1d3fa8(int(a, 0)).filter(|&k| k < c.parts.len()) else { return false };
+            c.ee_sub_1d4e30(k);
         }
         _ => return false,
     }

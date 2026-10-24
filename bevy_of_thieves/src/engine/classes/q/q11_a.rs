@@ -238,11 +238,12 @@ pub fn c2d0020_v9<M: QMem + ?Sized>(m: &mut M, o: u32) {
                 let (y, xx) = (m.rf(ba0 + 4), m.rf(ba0));
                 let ang = fr(m.call(0x0024_58f0, &[], &[f(y), f(xx)]));
                 m.call(0x0020_9818, &[ow + 0xfd0], &[f(ang)]);
-                let a = m.r32(o + 0x38);
+                // PART r16 ABI: asm passes a0 = ((o+0x18)->0x40)->8, $f12 = o+0x38
+                let a = m.rf(o + 0x38);
                 let b = m.r32(o + 0x18);
                 let b = m.r32(b + 0x40);
                 let b = m.r32(b + 8);
-                m.call(0x0013_1a00, &[a, b], &[]);
+                m.call(0x0013_1a00, &[b], &[f(a)]);
             } else {
                 m.call(0x0017_cd00, &[o, 1], &[]);
             }
@@ -697,7 +698,7 @@ pub fn c2d03a0_v12<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32, p3: u32) -> u32
     if m.call(0x0020_9430, &[t], &[]).0 != 0 {
         m.call(0x0020_9360, &[t], &[]);
         let (ow, fl) = (m.r32(o + 0x10), m.r32(t + 0xc) | 1);
-        m.call(0x0020_9278, &[0, t, ow, fl], &[]);
+        m.call(0x0020_9278, &[t, ow, fl], &[f(0.0)]); // PART r16 ABI: $f12 = 0.0
     }
     let n = (m.r32(o + 0x58) as i32).wrapping_add(1);
     m.w32(o + 0x58, n as u32);
@@ -718,7 +719,7 @@ pub fn c2d03a0_v12<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32, p3: u32) -> u32
         }
     }
     let ptr = m.r32(t + 8);
-    m.call(0x0013_0d30, &[r, ptr, 0], &[f(1.0)]);
+    m.call(0x0013_0d30, &[ptr, 0], &[f(f32::from_bits(r)), f(1.0)]); // PART r16 ABI: $f12 = *p, $f13 = 1.0
     m.call(0x0017_b1a8, &[o, 0], &[]);
     let w = m.call(0x0015_e938, &[WORLD, 5, ro32(0x002b_e6e8 + off), 0], &[]).0;
     if w != 0 {

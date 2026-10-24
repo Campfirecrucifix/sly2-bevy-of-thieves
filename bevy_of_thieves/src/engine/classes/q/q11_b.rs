@@ -259,12 +259,17 @@ pub fn c2d7648_v3<M: QMem + ?Sized>(m: &mut M, o: u32) {
         let v90 = m.rv(o + 0x90);
         let a0 = m.rv(o + 0xa0);
         // ACC = (target - pos) * (1.5 / t) + v90 * -0.5 + (a0 * t) * 0.25
-        let inv = 1.5 / t;
-        let acc: V4 = std::array::from_fn(|i| (target[i] - p70[i]) * inv + v90[i] * -0.5 + (a0[i] * t) * 0.25);
+        let inv = crate::engine::math::ps2f::ps2_div(1.5, t);
+        // VU0 vsub / vmulx / vmulax / vmaddax / vmaddx, each result saturated
+        use crate::engine::math::vu0::fix;
+        let acc: V4 = std::array::from_fn(|i| {
+            let a = fix(fix(fix(target[i] - p70[i]) * inv) + fix(v90[i] * -0.5));
+            fix(a + fix(fix(a0[i] * t) * 0.25))
+        });
         m.call(0x0011_7120, &[o + 0x70, o + 0x90, 0], &[f(t), f(dt), f(1.0), p70, v90, target, acc]);
-        let k = (m.rf(o + 0x100) * t) / m.rf(o + 0x18);
+        let k = crate::engine::math::ps2f::ps2_div(crate::engine::math::ps2f::ps2_mul(m.rf(o + 0x100), t), m.rf(o + 0x18));
         let ax = m.rv(o + 0xf0);
-        m.call(0x0011_b500, &[ba0], &[f(k), ax]);
+        m.call(0x0011_b500, &[ba0], &[ax, f(k)]);
         let r = [m.rv(ba0), m.rv(ba0 + 0x10), m.rv(ba0 + 0x20)];
         let b0 = m.rv(b120);
         let b1 = m.rv(b120 + 0x10);

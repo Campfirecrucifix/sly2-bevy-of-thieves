@@ -37,7 +37,7 @@ const R_2BBB60: [f32; 2] = [0.0, 1.0];
 
 /// slot 5: FUN_001141a0
 pub fn ee_sub_1141a0() -> u32 {
-    0x2bb3ec
+    0x2bb45c
 }
 
 /// FUN_0011d948(x, range)
@@ -483,6 +483,10 @@ impl super::ClassSet {
     pub(super) fn frame_k22_121(&mut self, h: &mut dyn ClassHost) {
         let (now, dt) = (h.k22_music_1fe3f8(), self.g.dt);
         for (i, x) in &mut self.k22c {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K22C121(c) = x {
                 c.ee_sub_152970(*i, now, dt, &mut self.k21c, h);
                 c.ee_sub_152c58(now, dt);

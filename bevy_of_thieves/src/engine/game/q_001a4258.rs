@@ -295,6 +295,125 @@ pub fn ee_sub_1a53e0<M: QMem + ?Sized>(m: &mut M, o: u32) {
     m.w32(o + 0x14, 0);
 }
 
+fn w64<M: QMem + ?Sized>(m: &mut M, a: u32, v: u64) {
+    m.w32(a, v as u32);
+    m.w32(a + 4, (v >> 32) as u32);
+}
+
+/// FUN_001a5270 (C2c94e0 vtable +0x3c, init): +0x38 = 0x501502f9, +0x28 flags (bits 48..51 set,
+/// bits 52..55 cleared, bit 53 set), +0x2d = 0xff; with a parent +0x10: its +0x14 node and bit 60,
+/// else an own node (FUN_001a53a0) and bit 60 set; +0x40 = 0x21, +0x3c = parent +0x3c / DAT_003e139c;
+/// linked into the parent's child list before its cursor (FUN_001a5448 / FUN_0011a280)
+pub fn ee_sub_1a5270<M: QMem + ?Sized>(m: &mut M, o: u32) {
+    let f = m.r64(o + 0x28);
+    let p = m.r32(o + 0x10);
+    m.w32(o + 0x38, 0x5015_02f9);
+    w64(m, o + 0x28, ((f | 0xf000u64 << 36) & 0xff0f_ffff_ffff_ffff) | 0x8000u64 << 38);
+    m.w8(o + 0x2d, 0xff);
+    if p != 0 {
+        let n = m.r32(p + 0x14);
+        let f = m.r64(o + 0x28) & 0xefff_ffff_ffff_ffff;
+        m.w32(o + 0x14, n);
+        let b = (m.r64(p + 0x28) >> 60) & 1;
+        w64(m, o + 0x28, f | b << 60);
+    } else {
+        ee_sub_1a53a0(m, o);
+        let f = m.r64(o + 0x28);
+        w64(m, o + 0x28, f | 0x8000u64 << 45);
+    }
+    let p = m.r32(o + 0x10);
+    m.w32(o + 0x40, 0x21);
+    let k = if p != 0 { m.r32(p + 0x3c) } else { m.r32(0x003e_139c) };
+    m.w32(o + 0x3c, k);
+    let sp = stack_push(m, 0x10);
+    let p = m.r32(o + 0x10);
+    ee_sub_1a5448(m, p, sp, sp | 4);
+    let cur = m.r32(sp + 4);
+    let l = m.r32(sp);
+    let c = m.r32(cur);
+    m.call(0x0011_a280, &[l, c, o], &[]);
+    stack_pop(m, 0x10);
+}
+
+/// FUN_001a5630 (C2c94e0 vtable +0x4c, add to world): unless already in (+0x28 bit 56): root-set
+/// objects (FUN_001a61a0) run slot 21; parentless ones leave 0x3dd4bc (root set) and go through
+/// FUN_00147e20; then moved to the tail of the parent's child list (cursor set when empty), bit 56
+/// set, every attached object (slot 27 array) gets slot 8, and bit-60 objects run slot 11
+pub fn ee_sub_1a5630<M: QMem + ?Sized>(m: &mut M, o: u32) {
+    if m.r64(o + 0x28) & 0x8000u64 << 41 != 0 {
+        return;
+    }
+    let rs = m.call(0x001a_61a0, &[o], &[]).0 != 0;
+    if rs {
+        vslot(m, o, 21, &[], &[]);
+    }
+    if m.r32(o + 0x10) == 0 {
+        if rs {
+            let n = m.r32(o + 0x14);
+            m.call(0x0011_a2e8, &[0x003d_d4bc, n], &[]);
+        }
+        let n = m.r32(o + 0x14);
+        m.call(0x0014_7e20, &[0x003d_d490, n], &[]);
+    }
+    let s3 = (m.r64(o + 0x28) >> 60) & 1;
+    let sp = stack_push(m, 0x10);
+    let p = m.r32(o + 0x10);
+    ee_sub_1a5448(m, p, sp, sp | 4);
+    let l = m.r32(sp);
+    m.call(0x0011_a2e8, &[l, o], &[]);
+    let l = m.r32(sp);
+    m.call(0x0011_a220, &[l, o], &[]);
+    let cur = m.r32(sp + 4);
+    if m.r32(cur) == 0 {
+        m.w32(cur, o);
+    }
+    let f = m.r64(o + 0x28);
+    w64(m, o + 0x28, f | 0x8000u64 << 41);
+    let n = vslot(m, o, 27, &[sp + 8], &[]).0 as i32;
+    let mut i = 0;
+    while i < n {
+        let arr = m.r32(sp + 8);
+        let c = m.r32(arr + 4 * i as u32);
+        vslot(m, c, 8, &[], &[]);
+        i += 1;
+    }
+    stack_pop(m, 0x10);
+    if s3 != 0 {
+        vslot(m, o, 11, &[], &[]);
+    }
+}
+
+/// FUN_001a5c48 (C2c94e0 post-load): FUN_001a5d98, slot 2 (0, 1, 0, 0, 0); a named object whose
+/// FUN_00127db8(name, 1, 1) hits: kind-2 objects (+0x28 bits 52..55 == 2) run FUN_001a6ca8(o, 0), then
+/// +0x40 gets bit 1 (on the pointed word when +0x40 is a pointer, bit 0 clear); else +0x30 = DAT_002a6a40
+pub fn ee_sub_1a5c48<M: QMem + ?Sized>(m: &mut M, o: u32) {
+    m.call(0x001a_5d98, &[o], &[]);
+    vslot(m, o, 2, &[0, 1, 0, 0, 0], &[]);
+    let nm = m.r32(o);
+    if nm != 0 && m.call(0x0012_7db8, &[nm, 1, 1], &[]).0 != 0 {
+        if (m.r64(o + 0x28) << 8) as i64 >> 60 == 2 {
+            m.call(0x001a_6ca8, &[o, 0], &[]);
+        }
+        let v = m.r32(o + 0x40);
+        if (v ^ 1) & 1 != 0 {
+            let w = m.r32(v);
+            m.w32(v, w | 2);
+        } else {
+            m.w32(o + 0x40, v | 2);
+        }
+    } else {
+        let t = m.r32(0x002a_6a40);
+        m.w32(o + 0x30, t);
+    }
+}
+
+/// FUN_001a5e28 (C2c94e0 update): slot 2 (1, 1, 0, 0, 0) once +0x30 <= DAT_002dded0 (clock)
+pub fn ee_sub_1a5e28<M: QMem + ?Sized>(m: &mut M, o: u32) {
+    if m.rf(o + 0x30) <= m.rf(0x002d_ded0) {
+        vslot(m, o, 2, &[1, 1, 0, 0, 0], &[]);
+    }
+}
+
 /// FUN_001a5448: the child list / cursor of parent `p` (+0x64 / +0x70), or the world's (0x3dd4a0 /
 /// 0x3dd4ac)
 pub fn ee_sub_1a5448<M: QMem + ?Sized>(m: &mut M, p: u32, list: u32, cur: u32) {

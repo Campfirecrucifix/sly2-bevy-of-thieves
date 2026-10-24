@@ -279,6 +279,7 @@ impl Vault {
             0 => {
                 if self.f_190 != 0 {
                     g.w_3d84 += 1; // FUN_0020f198
+                    h.world_3d84_add(1); // CRAWL R97: the one world counter
                 }
             }
             3 => {
@@ -300,6 +301,7 @@ impl Vault {
                     h.vcall_arg(self.f_190, 0x27c, 1);
                     self.f_190 = 0;
                     g.w_3d84 -= 1; // FUN_0020f1a8
+                    h.world_3d84_add(-1); // CRAWL R97
                 }
             }
             1 => h.vcall_arg(me(obj), 0x27c, 1),
@@ -444,6 +446,10 @@ impl ClassSet {
     }
     pub(super) fn frame_k9(&mut self, h: &mut dyn ClassHost) {
         for (i, x) in &mut self.k9 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K9(c) = x {
                 c.ee_sub_1c8350(*i, &mut self.g, h);
             }

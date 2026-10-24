@@ -159,8 +159,9 @@ fn handler<M: QMem + ?Sized>(m: &mut M, p: u32, ev: u32, a: u32) {
                 } else {
                     if id < 0x162 {
                         if id == 0x15e {
-                            let t = m.r32(a + 4);
-                            let v = m.call(0x0020_4e38, &[t, p], &[]).1;
+                            // asm 0x141078/0x1410b4: a0 = p, a1 = *(a), $f12 = *(f32*)(a + 4)
+                            let (a1, t) = (m.r32(a), m.rf(a + 4));
+                            let v = m.call(0x0020_4e38, &[p, a1], &[[t, 0.0, 0.0, 0.0]]).1;
                             let neg = [-v[0], -v[1], -v[2], -v[3]];
                             let r0 = m.rv(p + 0x1b0);
                             let r1 = m.rv(p + 0x1c0);
@@ -269,7 +270,7 @@ fn handler<M: QMem + ?Sized>(m: &mut M, p: u32, ev: u32, a: u32) {
                 } else {
                     m.call(0x0014_1cd0, &[p], &[]);
                     let k = m.r32(p + 0x130c);
-                    m.call(0x0013_05b8, &[0, k, p, 8, p + 0x1310], &[[1.0, 0.0, 0.0, 0.0]]);
+                    m.call(0x0013_05b8, &[k, p, 8, p + 0x1310], &[[0.0; 4], [1.0, 0.0, 0.0, 0.0]]); // PART r16 ABI: $f12 = 0.0, $f13 = 1.0
                     let s = m.r32(p + 0x9bc);
                     m.w32(p + 0x1314, s);
                 }

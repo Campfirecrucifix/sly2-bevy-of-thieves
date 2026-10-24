@@ -88,6 +88,7 @@ impl ClassSet {
                 continue;
             }
             let props = w.objects.get(o.clone_of.unwrap_or(i)).and_then(object_props).unwrap_or(&[]);
+            let props = &*super::props_ov(w, i, props);
             let mut c = C2cb9f8::default();
             c.ee_sub_13ceb8(i, h);
             c.feed(props);

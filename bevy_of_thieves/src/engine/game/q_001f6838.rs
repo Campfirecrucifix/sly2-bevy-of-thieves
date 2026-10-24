@@ -419,19 +419,6 @@ pub fn ee_sub_1f7f48<M: QMem + ?Sized>(m: &mut M, o: u32, b: u32) {
     }
 }
 
-fn each_attached<M: QMem + ?Sized>(m: &mut M, o: u32, cid: u32, f: u32, pre: &[u32]) {
-    let mut i = 0;
-    while i < m.r32(o + 0xa4) as i32 {
-        let x = r32p(m, o + 0xa8, 4 * i as u32);
-        if isa(m, x, cid) {
-            let mut a = pre.to_vec();
-            a.push(x);
-            m.call(f, &a, &[]);
-        }
-        i += 1;
-    }
-}
-
 /// FUN_001f7fa0(o, a, b): FUN_001ee678(x, a, b) for every attached object (+0xa8, count +0xa4) of class 0x8f
 /// VFIX: ABI per asm: o = a0, a = $f12, b = $f13 (kept in f21/f20 across the loop)
 pub fn ee_sub_1f7fa0<M: QMem + ?Sized>(m: &mut M, o: u32, a: f32, b: f32) {
@@ -446,18 +433,35 @@ pub fn ee_sub_1f7fa0<M: QMem + ?Sized>(m: &mut M, o: u32, a: f32, b: f32) {
 }
 
 /// FUN_001f8038(a0, a1, o): as FUN_001f7fa0 with FUN_001edad8
-pub fn ee_sub_1f8038<M: QMem + ?Sized>(m: &mut M, a0: u32, a1: u32, o: u32) {
-    each_attached(m, o, 0x8f, 0x001e_dad8, &[a0, a1]);
+/// VER5: ABI per asm (as 1f7fa0): o = a0, a = $f12, b = $f13 -> FUN_001edad8(x, a, b) (floats in $f12/$f13)
+pub fn ee_sub_1f8038<M: QMem + ?Sized>(m: &mut M, o: u32, a: f32, b: f32) {
+    let mut i = 0;
+    while i < m.r32(o + 0xa4) as i32 {
+        let x = r32p(m, o + 0xa8, 4 * i as u32);
+        if isa(m, x, 0x8f) {
+            m.call(0x001e_dad8, &[x], &[[a, 0.0, 0.0, 0.0], [b, 0.0, 0.0, 0.0]]);
+        }
+        i += 1;
+    }
 }
 
 /// FUN_001f80d0(a0, o): FUN_001ee3b0(a0, x) for attached class-0x8e objects, then recursively for every
 /// class-0x30 child (+0x64 .. +0x70 sentinel, linked by +0x24)
-pub fn ee_sub_1f80d0<M: QMem + ?Sized>(m: &mut M, a0: u32, o: u32) {
-    each_attached(m, o, 0x8e, 0x001e_e3b0, &[a0]);
+/// ANIM-ALL R19: ABI per the callers (FUN_001a2388 passes 1.0 in $f12 with a0 kept, FUN_001fe0e8 / FUN_00210678
+/// the object in a0): f = $f12, o = a0 (it was read from a1 = 0 -> endless walk of address 0's child list)
+pub fn ee_sub_1f80d0<M: QMem + ?Sized>(m: &mut M, f: f32, o: u32) {
+    let mut i = 0;
+    while i < m.r32(o + 0xa4) as i32 {
+        let x = r32p(m, o + 0xa8, 4 * i as u32);
+        if isa(m, x, 0x8e) {
+            crate::engine::game::q_001ee100::ee_sub_1ee3b0(m, f, x);
+        }
+        i += 1;
+    }
     let mut c = m.r32(o + 0x64);
     while c != m.r32(o + 0x70) {
         if isa(m, c, 0x30) {
-            ee_sub_1f80d0(m, a0, c);
+            ee_sub_1f80d0(m, f, c);
         }
         c = m.r32(c + 0x24);
     }
@@ -704,4 +708,29 @@ pub fn ee_sub_1f8c40<M: QMem + ?Sized>(m: &mut M, init: u32, prio: u32) {
 /// FUN_001f8db8: FUN_001f8c40(1, 0xffff)
 pub fn ee_sub_1f8db8<M: QMem + ?Sized>(m: &mut M) {
     ee_sub_1f8c40(m, 1, 0xffff);
+}
+
+#[cfg(test)]
+mod feel_tests_1f7530 {
+    use super::*;
+    use crate::engine::classes::q::q2mem::FlatMem;
+
+    /// FUN_001f7530 (decomp text_001f0000.c): walk o, o+0x10, ... and return the first whose FUN_001f78d8
+    /// (OR of bytes +0x110+i for mask bit i, i < 26) is nonzero; 0 at the end of the chain.
+    #[test]
+    fn owner_1f7530_first_masked() {
+        fn route(m: &mut FlatMem, addr: u32, a: &[u32], _v: &[[f32; 4]]) -> Option<(u32, [f32; 4])> {
+            (addr == 0x001f_78d8).then(|| (crate::engine::game::q_wirew1h9::ee_sub_1f78d8(m, a[0], a[1]), [0.0; 4]))
+        }
+        let mut m = FlatMem { route: Some(route), ..Default::default() };
+        let (o, p, q) = (0x1000, 0x2000, 0x3000);
+        m.w32(o + 0x10, p);
+        m.w32(p + 0x10, q);
+        m.w8(p + 0x110 + 3, 1); // bit 3 on the parent
+        m.w8(o + 0x110 + 1, 1); // bit 1 on the child
+        assert_eq!(ee_sub_1f7530(&mut m, o, 1 << 3), p);
+        assert_eq!(ee_sub_1f7530(&mut m, o, 1 << 1), o);
+        assert_eq!(ee_sub_1f7530(&mut m, o, 1 << 5), 0);
+        assert_eq!(ee_sub_1f7530(&mut m, o, 1 << 26), 0);
+    }
 }

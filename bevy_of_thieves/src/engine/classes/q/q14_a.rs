@@ -256,7 +256,8 @@ pub fn c2c94e0_v39<M: QMem + ?Sized>(m: &mut M, o: u32) {
     vcall(m, o, 0xc, 0x14c, &[], &[]);
 }
 /// FUN_001a6b30 (slot 31): identity matrix into `p2` (when non-null); returns the matrix class descriptor
-pub fn c2c94e0_v31<M: QMem + ?Sized>(m: &mut M, p2: u32) -> u32 {
+/// VER5: slot method - a0 = this (unused), p2 = a1
+pub fn c2c94e0_v31<M: QMem + ?Sized>(m: &mut M, _this: u32, p2: u32) -> u32 {
     if p2 != 0 {
         m.call(0x0023_33b4, &[p2, 0, 0x40], &[]);
         m.w32(p2, 0x3f80_0000);

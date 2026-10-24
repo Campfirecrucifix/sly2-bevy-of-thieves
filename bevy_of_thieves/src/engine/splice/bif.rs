@@ -227,6 +227,9 @@ pub enum BifKind {
 pub fn bif_kind(idx: usize) -> Option<BifKind> {
     if idx >= BIF_TABLE.len() {
         None
+    } else if idx == 133 && std::env::var_os("SLY2_NO_R116_SUPER").is_none() {
+        // CRAWL R119: BIF 133 (`super`, 0x125510) is evaluated VM-side by call_bif (R116), never via the host.
+        Some(BifKind::Pure)
     } else if super::host::HOST_BIFS.contains(&idx) {
         Some(BifKind::Host)
     } else {
@@ -265,7 +268,67 @@ fn num(g: f32, int: bool) -> Ref {
 }
 
 /// Calls BIF `idx`.
+/// FUN_00120c48 (RefOpSetCar / RefOpSetCdr body): BIF 35 (tag 0x23 path) stores the value in the pair's
+/// car (FUN_00129658); otherwise the cdr becomes the value if it is a pair (tag 0x1f), else '(). Returns void (0x24).
+pub fn ee_sub_120c48(p: &PairRef, v: &Ref, car: bool) -> Ref {
+    if car {
+        p.borrow_mut().car = v.clone();
+    } else {
+        p.borrow_mut().next = v.pair();
+    }
+    Ref::Void
+}
+
+/// FUN_001224a8 (RefUfo): number (float or int) -> float through the unary math table DAT_002bbb70[k]
+/// (k 0..7 = sqrt sin cos tan asin acos atan RadNormalize, BIFs 54..61); result boxed as a float.
+pub fn ee_sub_1224a8(a: &Ref, k: usize) -> Ref {
+    let g = a.as_f32();
+    Ref::F32(match k {
+        0 => g.sqrt(),
+        1 => g.sin(),
+        2 => g.cos(),
+        3 => g.tan(),
+        4 => g.asin(),
+        5 => g.acos(),
+        6 => g.atan(),
+        _ => rad_normalize(g),
+    })
+}
+
+/// FUN_0011c1d8: 4x4 transpose (FUN_0011c8e8(4, 4, src, dst)).
+pub fn ee_sub_11c1d8(m: [f32; 16]) -> [f32; 16] {
+    transpose(m)
+}
+
+/// FUN_0011c3d0: dmat = affine_inverse(a) * b (inverse into a temp, FUN_0011c168 multiply, copy out).
+pub fn ee_sub_11c3d0(a: &[f32; 16], b: [f32; 16]) -> [f32; 16] {
+    mul(affine_inverse(a), b)
+}
+
 pub fn call_bif(vm: &mut Vm, host: &mut dyn SpliceHost, idx: usize, args: &[Ref], fr: &FrameRef) -> Result<Ref, SpliceError> {
+    // CRAWL R116: 0x00125510 BIF 133 (`super`): from the caller frame (single-parent chain, +8 == 1) to the
+    // nearest script-slot frame (+0x24), then FindBinding(its first parent, argv[0], 1); none -> Bifk 0x86 (the
+    // void no-op). The slot frame's first parent = the bound object's old frame (FUN_001c9b08 / FUN_00127b40).
+    // SLY2_NO_R116_SUPER=1 = old (always Bifk 0x86 via the host).
+    if idx == 133 && std::env::var_os("SLY2_NO_R116_SUPER").is_none() {
+        let mut cur = Some(fr.clone());
+        while let Some(f) = cur {
+            let (slot, parent, extra) = { let b = f.borrow(); (b.script_slot, b.parent.clone(), !b.extra_parents.is_empty()) };
+            if slot {
+                if let (Some(p), Some(a)) = (parent, args.first()) {
+                    if let Some(v) = super::frame::lookup(&p, a.payload(), true) {
+                        return Ok(v);
+                    }
+                }
+                break;
+            }
+            if extra {
+                break;
+            }
+            cur = parent;
+        }
+        return Ok(Ref::Bifk(0x86));
+    }
     if let Some(r) = dispatch_host(host, idx, args) {
         return r;
     }
@@ -339,15 +402,9 @@ pub fn call_bif(vm: &mut Vm, host: &mut dyn SpliceHost, idx: usize, args: &[Ref]
             let n = p.borrow().next.clone();
             list_ref(n)
         }
-        35 => {
+        35 | 36 => {
             let p = f(0)?.pair().ok_or(SpliceError::Type("pair", f(0)?.tagk()))?;
-            p.borrow_mut().car = f(1)?.clone();
-            Ref::Void
-        }
-        36 => {
-            let p = f(0)?.pair().ok_or(SpliceError::Type("pair", f(0)?.tagk()))?;
-            p.borrow_mut().next = f(1)?.pair();
-            Ref::Void
+            ee_sub_120c48(&p, f(1)?, idx == 35)
         }
         37 => Ref::S32(list_items(f(0)?.pair()).len() as i32),
         38 => {
@@ -390,20 +447,7 @@ pub fn call_bif(vm: &mut Vm, host: &mut dyn SpliceHost, idx: usize, args: &[Ref]
                 (lo, hi) => Ref::F32(vm.rand_float(lo.as_f32(), hi.as_f32())),
             }
         }
-        54..=61 => {
-            // 0x001224a8 RefUfo
-            let g = f(0)?.as_f32();
-            Ref::F32(match idx {
-                54 => g.sqrt(),
-                55 => g.sin(),
-                56 => g.cos(),
-                57 => g.tan(),
-                58 => g.asin(),
-                59 => g.acos(),
-                60 => g.atan(),
-                _ => rad_normalize(g),
-            })
-        }
+        54..=61 => ee_sub_1224a8(f(0)?, idx - 54),
         62 => Ref::F32(f(0)?.as_f32().atan2(f(1)?.as_f32())),
         63 => Ref::F32(dot(vec_of(f(0)?)?, vec_of(f(1)?)?)),
         64 => Ref::Vector(cross(vec_of(f(0)?)?, vec_of(f(1)?)?)),
@@ -444,10 +488,10 @@ pub fn call_bif(vm: &mut Vm, host: &mut dyn SpliceHost, idx: usize, args: &[Ref]
             let (ang, axis) = rad_between(vec_of(f(0)?)?, vec_of(f(1)?)?);
             list_from(vec![Ref::F32(ang), Ref::Vector(axis)])
         }
-        73 => Ref::Matrix(transpose(mat_of(f(0)?)?)),
+        73 => Ref::Matrix(ee_sub_11c1d8(mat_of(f(0)?)?)),
         74 => Ref::Matrix(invert(mat_of(f(0)?)?)),
         // 0x00122ea0 CalculateDmat: affine_inverse(a) * b (0x0011c318 then 0x0011c168).
-        75 => Ref::Matrix(mul(affine_inverse(&mat_of(f(0)?)?), mat_of(f(1)?)?)),
+        75 => Ref::Matrix(ee_sub_11c3d0(&mat_of(f(0)?)?, mat_of(f(1)?)?)),
         // 0x00122f00: t read as raw payload bits (an S32 is NOT converted).
         76 => Ref::Matrix(interpolate(mat_of(f(0)?)?, mat_of(f(1)?)?, f(2)?.raw_f32())),
         77 => {

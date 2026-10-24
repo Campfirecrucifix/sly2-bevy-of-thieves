@@ -26,7 +26,7 @@ const TAG_MASK: u32 = 0xff00_0000;
 /// FUN_001f0380 passes t0 = 4 as the SMA mask (+0x48), see npcdraw::NPC_SMA_MASK
 pub const SMA_MASK_1F0380: u32 = 4;
 /// FUN_0012f248 (ASEG init): +0x78 rate 1, +0x80 / +0x84 / +0x88 rate polynomial {1, 0, 0}, clamp +0x90 = 0 /
-/// +0x94 = 1 (no ASEG of the 43 levels overrides them through its property list in the port's loader)
+/// +0x94 = 1 (+0x78 is overridden by property field 109: Aseg::f78)
 pub const ASEG_78: f32 = 1.0;
 const ASEG_80: [f32; 3] = [1.0, 0.0, 0.0];
 const ASEG_90: f32 = 0.0;
@@ -62,6 +62,9 @@ pub struct SmaRt {
 
 #[derive(Default)]
 pub struct AnimRt {
+    /// ANIM-ALL: every FUN_0012f9b8 request (t, rate, anim handle, obj handle, flags), replayed into the live image
+    /// (`LiveQ::guest_anim_starts`) so the original ASEGA set world+0x3d88 plays them
+    pub guest_reqs: Vec<(f32, f32, u32, u32, u32)>,
     pub asegas: HashMap<u32, AsegaRt>,
     pub smas: HashMap<u32, SmaRt>,
     next: u32,
@@ -75,9 +78,26 @@ pub struct AnimRt {
     /// FUN_001f13a8 messages to deliver (SMA +0x28 owner handle, msg 10, {old, new} labels); drained by the host
     pub fired: Vec<(usize, usize, bool, u32)>,
     pub msgs: Vec<(u32, i32, crate::engine::anim::sm::SmaMsg)>,
+    /// POOL1: FUN_001f13a8 tail: SMA vt+0x1c = FUN_001331f8(sma, 8, 0, 2, {old, new}) = script message 8 in the
+    /// SM object's frame (FUN_00256ee0(sma, sm+0)); (SM object index, old label, new label)
+    pub script8: Vec<(usize, i32, i32)>,
+    /// POOL1 r36: (SMA handle, +0x28 owner handle) of each `script8` entry (same order)
+    pub script8_sma: Vec<(u32, u32)>,
+    /// POOL1 r30: FUN_0012f9b8 tail (ASEGA vt+0x1c msg 2, after FUN_00256ee0(asega, *aseg) bound the ASEG's frame)
+    /// and FUN_00130b18 (msg 3): (ASEG object index, ASEGA handle, ASEGA +0x1c owner handle, msg)
+    pub script_aseg: Vec<(usize, u32, u32, u32)>,
     /// ASEGAs / SMAs started (statistics for the tests)
     pub started: usize,
     pub sma_started: usize,
+    /// CRAWL R77: FUN_001333c0(sma, node) listeners (FUN_0020fff0 with an owner node): SMA handles whose
+    /// FUN_001f13a8 message 10 the sequence node receives (C2d8c08_v4 = FUN_001e1bc8), and the {sma, new label}
+    /// messages delivered to them since (consumed by the node's 0xd wait)
+    pub k22_listen: std::collections::HashSet<u32>,
+    pub k22_msg10: Vec<(u32, i32)>,
+    /// CRAWL R50: (target, ASEG) of ASEGAs dropped since the last K26 dispatch: an instant start (flags & 2,
+    /// FUN_00131100 from FUN_001f0948) fires its events and is retracted in the same call, as in the original where
+    /// FUN_00131290 runs inside FUN_00131100 while the ASEGA is still live
+    pub gone: HashMap<u32, (u32, usize)>,
 }
 
 impl std::fmt::Debug for AnimRt {
@@ -88,7 +108,7 @@ impl std::fmt::Debug for AnimRt {
 
 impl Clone for AnimRt {
     fn clone(&self) -> Self {
-        AnimRt { asegas: self.asegas.clone(), smas: self.smas.clone(), next: self.next, sms: self.sms.clone(), rng: self.rng.clone(), world: self.world, events: self.events, sma_msgs: self.sma_msgs, fired: self.fired.clone(), msgs: self.msgs.clone(), started: self.started, sma_started: self.sma_started }
+        AnimRt { k22_listen: self.k22_listen.clone(), k22_msg10: self.k22_msg10.clone(), guest_reqs: self.guest_reqs.clone(), asegas: self.asegas.clone(), smas: self.smas.clone(), next: self.next, sms: self.sms.clone(), rng: self.rng.clone(), world: self.world, events: self.events, sma_msgs: self.sma_msgs, fired: self.fired.clone(), msgs: self.msgs.clone(), script8: self.script8.clone(), script8_sma: self.script8_sma.clone(), script_aseg: self.script_aseg.clone(), started: self.started, sma_started: self.sma_started, gone: self.gone.clone() }
     }
 }
 
@@ -111,6 +131,14 @@ impl AsegaHost for Ends {
     fn ended(&mut self, _a: &mut Asega) {
         self.ended = true;
     }
+    /// R53: FUN_00130b18 from FUN_00130918 (finished, no loop): out of the live set, then FUN_00131290 on
+    /// each +0xa8 (retract) event (the bomb SM's 7 -> 8 ASEG 507: kind 8 (3931) removes the bomb copy)
+    fn retract(&mut self, a: &mut Asega) {
+        if a.alive {
+            self.fired.push((crate::engine::player::p23::RETRACT_EVENTS, false));
+        }
+        a.alive = false;
+    }
 }
 
 impl AnimRt {
@@ -118,7 +146,7 @@ impl AnimRt {
     fn for_world(&mut self, w: &Arc<World>) {
         let id = Arc::as_ptr(w) as usize;
         if self.world != id {
-            *self = AnimRt { world: id, next: self.next, ..Default::default() };
+            *self = AnimRt { world: id, next: self.next, guest_reqs: std::mem::take(&mut self.guest_reqs), ..Default::default() };
         }
     }
     fn id(&mut self, tag: u32) -> u32 {
@@ -155,7 +183,19 @@ impl AnimRt {
         self.start(w, ai, t, rate, obj, flags, None)
     }
 
+    /// The queued npcdraw starts of the level `world` (`anim_play::world_key`).
+    pub fn take_npc_reqs(world: usize) -> Vec<(f32, f32, u32, u32, u32)> {
+        let mut q = NPC_GUEST_REQS.lock().unwrap();
+        let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.0 == world);
+        *q = rest;
+        mine.into_iter().map(|e| e.1).collect()
+    }
+
     fn start(&mut self, w: &World, ai: usize, t: f32, rate: f32, obj: u32, flags: u32, sma: Option<u32>) -> u32 {
+        // ANIM-ALL: every start is a FUN_0012f9b8 call of the original (direct or from the SMA FUN_001f0d88)
+        if self.guest_reqs.len() < 4096 {
+            self.guest_reqs.push((t, rate, ai as u32 + 1, obj, flags));
+        }
         let aseg = aseg_of(w, ai).expect("ASEG object");
         // 0x0012f9b8: +0x48 = ASEG +0x78, +0x4c = clamp(+0x80 + v (+0x84 + v +0x88), +0x90, +0x94), v = FUN_00154c90
         let v = 0.0f32;
@@ -164,7 +204,7 @@ impl AnimRt {
         let mut st = Asega { t, t_event: t, flags, ..Default::default() };
         // FUN_00131a00(rate)
         st.svt2 = rate;
-        st.svt = rate * ASEG_78 * f4c;
+        st.svt = rate * aseg.f78() * f4c;
         // FUN_00230cf0 / flags & 2: FUN_00131100 (instant, events up to the end) else FUN_00130eb0 (event cursor)
         let mut ends = Ends { ended: false, events: 0, fired: vec![] };
         if flags & 2 == 0 {
@@ -174,8 +214,15 @@ impl AnimRt {
         }
         self.events += ends.events;
         let h = self.id(ASEGA_TAG);
+        // HEIST r16: 0x0012f9b8 fires FUN_00131290 on each ASEG +0x98 (start, no-time) event at creation, before
+        // FUN_00230cf0 / the event cursor (e.g. the EP2 chopper turret's barrel ASEG 119809: kind 0xc 30809 = fire)
+        if !aseg.events0.is_empty() {
+            self.fired.push((ai, crate::engine::player::p23::START_EVENTS, false, h));
+        }
         self.fired.extend(ends.fired.into_iter().map(|(i, rev)| (ai, i, rev, h)));
-        self.asegas.insert(h, AsegaRt { aseg: ai, obj, st, f48: ASEG_78, f4c, refs: 0, sma });
+        self.asegas.insert(h, AsegaRt { aseg: ai, obj, st, f48: aseg.f78(), f4c, refs: 0, sma });
+        // FUN_0012f9b8 tail: (vt+0x1c)(asega, 2, 0, 0, 0, 0) = script message 2 in the ASEG's frame
+        self.script_aseg.push((ai, h, obj, 2));
         self.started += 1;
         h
     }
@@ -187,6 +234,13 @@ impl AnimRt {
     /// FUN_00130b18: retract (out of 0x3e1218 / ASEG +0x50; the remaining no-time events are UNPORTED)
     pub fn ee_sub_130b18(&mut self, a: u32) {
         if let Some(x) = self.asegas.get_mut(&a) {
+            // 0x00130b18: (vt+0x1c)(asega, 3, 0, 0, 0, 0) = script message 3 when it leaves the live set
+            if x.st.alive {
+                self.script_aseg.push((x.aseg, a, x.obj, 3));
+                // R53: then FUN_00131290 on each +0xa8 (retract) event from +0x54 (e.g. the bomb SM's 7 -> 8
+                // ASEG 507: kind 8 (3931, 0) = FUN_00210338 remove the bomb copy from the world)
+                self.fired.push((x.aseg, crate::engine::player::p23::RETRACT_EVENTS, false, a));
+            }
             x.st.alive = false;
         }
         self.gc_asega(a);
@@ -212,7 +266,9 @@ impl AnimRt {
     }
     fn gc_asega(&mut self, a: u32) {
         if self.asegas.get(&a).is_some_and(|x| !x.st.alive && x.refs <= 0) {
-            self.asegas.remove(&a);
+            if let Some(x) = self.asegas.remove(&a) {
+                self.gone.insert(a, (x.obj, x.aseg));
+            }
         }
     }
     fn gc_sma(&mut self, s: u32) {
@@ -247,6 +303,10 @@ impl AnimRt {
             x.st.svt = x.st.svt2 * v * x.f4c;
         }
     }
+    /// FEEL R48: the live ASEGA's effective rate +0x40 (svt) (None: not live)
+    pub fn svt(&self, a: u32) -> Option<f32> {
+        self.asegas.get(&a).filter(|x| x.st.alive).map(|x| x.st.svt)
+    }
     /// FUN_00204e38(t = +0x1c, obj, asega): root-channel velocity at the effective rate (+0x40); zero when not live
     pub fn ee_sub_204e38(&self, w: &World, a: u32) -> [f32; 3] {
         let Some(x) = self.asegas.get(&a).filter(|x| x.st.alive) else { return [0.0; 3] };
@@ -265,6 +325,11 @@ impl AnimRt {
         self.sma_started += 1;
         self.sync(w, h);
         h
+    }
+    /// FUN_001f03c8(sm, obj): the live SMA of SM handle `sm` on actor `obj` (the SM +0x68 list, +0x28 == obj; 0 none)
+    pub fn ee_sub_1f03c8(&self, w: &World, sm: u32, obj: u32) -> u32 {
+        let Some(i) = obj_index(w, sm) else { return 0 };
+        self.smas.iter().find(|(_, x)| x.alive && x.sm == i && x.obj == obj).map_or(0, |(h, _)| *h)
     }
     /// FUN_001f0638: not in the live set 0x3e126c
     pub fn ee_sub_1f0638(&self, s: u32) -> bool {
@@ -297,6 +362,52 @@ impl AnimRt {
         let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
         sma.ee_sub_1f0660(&m, &mut self.rng, label, &len);
         self.put_sma(w, s, sma);
+    }
+    /// FUN_001f09d8(sma, label): jump to state `label` (the playing transition is retracted)
+    /// POOL1: FUN_001f0730(sma, label): unless FUN_001f0638(sma) or label == -1: idx = FUN_001f0400(+0x24, label);
+    /// if idx != -1 and FUN_001f0b80(+0x24, +0x48, cur, idx, 0) (cur = +0x38 if +0x30 else +0x34) then
+    /// FUN_001f0660(sma, label)
+    pub fn ee_sub_1f0730(&mut self, w: &Arc<World>, s: u32, label: i32) {
+        if self.ee_sub_1f0638(s) || label == -1 {
+            return;
+        }
+        let Some((m, sma)) = self.take_sma(s) else { return };
+        let idx = ee_sub_1f0400(&m.states, label);
+        let cur = if sma.asega.is_some() { sma.next } else { sma.cur };
+        let ok = idx != -1 && m.ee_sub_1f0b80(&mut self.rng, sma.mask, cur, idx).is_some();
+        self.put_sma(w, s, sma);
+        if ok {
+            self.ee_sub_1f0660(w, s, label);
+        }
+    }
+    /// CRAWL R50: FUN_001f67e0(obj, sm_oid): first live SMA (0x3e126c) whose actor (+0x28) is `obj` and whose SM
+    /// (+0x24) oid (+0x18) is `sm_oid` (-1: any) -> handle, 0 = none. REPLACED order: the live list is the handle
+    /// order (handles are never reused).
+    pub fn ee_sub_1f67e0(&self, w: &World, obj: u32, sm_oid: i32) -> u32 {
+        let mut hs: Vec<u32> = self.smas.iter().filter(|(_, x)| x.alive && x.obj == obj).map(|(&h, _)| h).collect();
+        hs.sort_unstable();
+        hs.into_iter().find(|h| sm_oid == -1 || self.smas[h].sm < w.objects.len() && w.objects[self.smas[h].sm].oid == sm_oid).unwrap_or(0)
+    }
+    /// CRAWL R50: FUN_001f0948(sma, label): unless FUN_001f0638: +0x3c goal = FUN_001f0438(SM, label), FUN_001f08d0
+    /// (a playing transition is cut: FUN_00130d30 + FUN_00130b18 + FUN_001f0fa0), FUN_001f0d88(sma, 1) (instant)
+    pub fn ee_sub_1f0948(&mut self, w: &Arc<World>, s: u32, label: i32) {
+        let Some((m, mut sma)) = self.take_sma(s) else { return };
+        sma.goal = ee_sub_1f0400(&m.states, label);
+        if sma.asega.is_some() {
+            sma.ee_sub_1f0fa0();
+        }
+        let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
+        sma.ee_sub_1f0d88(&m, &mut self.rng, true, &len);
+        self.put_sma(w, s, sma);
+    }
+    /// CRAWL R120 (debug): (+0x34 cur, +0x38 next, +0x3c goal) of a live SMA
+    pub fn sma_state(&self, s: u32) -> Option<(i32, i32, i32)> {
+        self.smas.get(&s).filter(|x| x.alive).map(|x| (x.sma.cur, x.sma.next, x.sma.goal))
+    }
+    /// CRAWL R50: FUN_001f07e8(sma) = FUN_001f04f8(SM, +0x34): label of the current state (-1: no live SMA)
+    pub fn ee_sub_1f07e8(&self, s: u32) -> i32 {
+        let Some(x) = self.smas.get(&s).filter(|x| x.alive) else { return -1 };
+        self.sms.get(&x.sm).map_or(-1, |m| crate::engine::anim::sm::ee_sub_1f04f8(m, x.sma.cur))
     }
     /// FUN_001f09d8(sma, label): jump to state `label` (the playing transition is retracted)
     pub fn ee_sub_1f09d8(&mut self, w: &Arc<World>, s: u32, label: i32) {
@@ -342,14 +453,28 @@ impl AnimRt {
     fn sync(&mut self, w: &World, s: u32) {
         let Some(x) = self.smas.get_mut(&s) else { return };
         self.sma_msgs += x.sma.changes.len();
+        let sma_h = s;
         // K26: FUN_001f13a8 data {sma, FUN_001f04f8(old), FUN_001f04f8(new)} for the owner's slot 4 (msg 10)
         if let Some(m) = self.sms.get(&x.sm) {
             for (old, new) in x.sma.changes.drain(..) {
                 let msg = crate::engine::anim::sm::SmaMsg { old: crate::engine::anim::sm::ee_sub_1f04f8(m, old), new: crate::engine::anim::sm::ee_sub_1f04f8(m, new) };
                 self.msgs.push((x.obj, crate::engine::anim::sm::MSGID_SMA_STATE, msg));
+                self.script8.push((x.sm, msg.old, msg.new));
+                self.script8_sma.push((sma_h, x.obj));
+                if self.k22_listen.contains(&sma_h) && self.k22_msg10.len() < 256 {
+                    self.k22_msg10.push((sma_h, msg.new));
+                }
             }
         }
         x.sma.changes.clear();
+        // CRAWL R50: instant transitions: start (fires the FUN_00131100 events) and retract at once
+        let inst = std::mem::take(&mut x.sma.instant);
+        let obj = x.obj;
+        for p in inst.into_iter().filter(|p| aseg_of(w, p.aseg).is_some()) {
+            let a = self.start(w, p.aseg, p.start, p.svt, obj, p.flags, Some(s));
+            self.ee_sub_130b18(a);
+        }
+        let Some(x) = self.smas.get_mut(&s) else { return };
         let want: Option<SmaPlay> = x.sma.asega.clone();
         let cur = x.asega;
         let obj = x.obj;
@@ -741,6 +866,13 @@ impl FieldRt {
         }
         match (obj_index(w, obj).and_then(|i| w.objects.get(i)), off) {
             (Some(o), 0x18) => o.oid as u32,
+            // POOL1 R55: LO +0x10 parent (handle) and +0x38 LOD radius (field 13; 1e10 from the LO init), as the
+            // class-29 emitters' camera-distance gate FUN_00159c80 reads them (rec11 285: 4000 / 3000 / 1e10)
+            (Some(o), 0x10) => o.owner.map_or(0, |p| p as u32 + 1),
+            (Some(o), 0x38) => crate::engine::game::fields::object_props(o)
+                .and_then(|p| p.iter().find(|p| p.field == 13))
+                .and_then(|p| crate::engine::classes::actor::c2caf88::prop_args(p).first().copied())
+                .unwrap_or(1.0e10f32.to_bits()),
             // K27: ALO +0x12c alpha, 1.0 after the ALO init (FUN_001f2d48)
             (Some(o), 0x12c) if crate::engine::world::class::ee_sub_15e988(o.class, 0x30) => 1f32.to_bits(),
             _ => 0,
@@ -759,3 +891,8 @@ pub fn ee_sub_1f4c58(w: &World, alo: u32, oid: i32, kind: i32) -> u32 {
         }
     }
 }
+
+/// ANIM-ALL: npcdraw's FUN_0012f9b8 stand-in starts (guards / NPCs), replayed into the guest like `guest_reqs`.
+/// ANIM-ALL R22: keyed by level (`anim_play::world_key`) like `GUEST_STARTS`; unkeyed, a parallel test level's
+/// guard starts (object handles of another level) were replayed into this level's image (sweep start fails).
+pub static NPC_GUEST_REQS: std::sync::Mutex<Vec<(usize, (f32, f32, u32, u32, u32))>> = std::sync::Mutex::new(Vec::new());

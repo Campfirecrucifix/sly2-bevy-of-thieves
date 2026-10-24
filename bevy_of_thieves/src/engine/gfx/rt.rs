@@ -88,6 +88,8 @@ fn len3(a: [f32; 3]) -> f32 {
 pub const RT_FILL: f32 = 1.6;
 /// WP-R2 default `RtTuning::sky`: share of the raster ambient used as the traced sky.
 pub const RT_SKY: f32 = 0.5;
+/// Option B: share of a light kept where its traced shadow ray is blocked (see `shader_patches`).
+pub const RT_SHADOW_FILL: f32 = 0.85;
 
 /// Solari WESL lines patched at shader load: (original line, replacement).
 /// - RAY_T_MIN / RECONNECTION_RELAX_DISTANCE: metres -> Sly units (WP-R). RAY_T_MIN is both the ray
@@ -97,14 +99,65 @@ pub const RT_SKY: f32 = 0.5;
 ///   `G-buffer base colour * fill` (nits, before exposure). The G-buffer base colour is the texture
 ///   times the PS2 vertex colours (the raster mesh keeps COLOR), so this is the original's
 ///   `vertex colour * ambient` term, like raster's GlobalAmbientLight but only on primary hits.
+/// - LOOK: unlit materials (Bevy deferred writes base 0 + emissive = base colour, e.g. the raster-baked
+///   PS2 per-vertex lit level prims, gfx::game::vu1_lit_grey) are shown at their raster value
+///   (emissive / exposure), so RT level surfaces get exactly the PS2 light model (linear falloff).
+/// - LOOK Option B (user decision): a level LIGHT never casts shadows on the PS2 (VU1 per-vertex
+///   lighting, no occlusion), so a traced shadow ray keeps `RT_SHADOW_FILL` of the light: shadows
+///   stay visible but shadowed areas sit near the PS2/raster brightness instead of going black.
+///   Lit areas are unchanged (visibility 1).
 pub fn shader_patches(fill_nits: [f32; 3]) -> Vec<(String, String)> {
     let [r, g, b] = fill_nits;
     vec![
+        (
+            "return f32(ray_hit.kind == RAY_QUERY_INTERSECTION_NONE);".into(),
+            format!("return max(f32(ray_hit.kind == RAY_QUERY_INTERSECTION_NONE), {RT_SHADOW_FILL:?});"),
+        ),
         ("const RAY_T_MIN = 0.001f;".into(), "const RAY_T_MIN = 0.5f;".into()),
         ("const RECONNECTION_RELAX_DISTANCE = 1.0;".into(), "const RECONNECTION_RELAX_DISTANCE = 100.0;".into()),
         (
             "pixel_color += surface.material.emissive;".into(),
-            format!("pixel_color += surface.material.emissive + surface.material.base_color * vec3<f32>({r:?}, {g:?}, {b:?});"),
+            format!("pixel_color += surface.material.emissive + surface.material.base_color * vec3<f32>({r:?}, {g:?}, {b:?});
+    pixel_color = select(pixel_color, surface.material.emissive / view.exposure, all(surface.material.base_color == vec3<f32>(0.0)));"),
+        ),
+        // LOOK: unlit pixels (raster-baked PS2 vertex light) show only their emissive: no traced
+        // direct / indirect radiance (the PS2 light model is already in the bake)
+        (
+            "pixel_color += textureLoad(view_output, global_id.xy).rgb;".into(),
+            "pixel_color += textureLoad(view_output, global_id.xy).rgb * f32(any(surface.material.base_color != vec3<f32>(0.0)));
+    pixel_color = select(pixel_color, surface.material.emissive / view.exposure, all(surface.material.base_color == vec3<f32>(0.0)));".into(),
+        ),
+        // LOOK R13 (perf, same image): those unlit pixels skip the ReSTIR work whose result the two
+        // patches above discard: no initial path / DI candidates / temporal merge (initial_and_temporal)
+        // and no spatial merge (spatial_and_shade); they write an empty reservoir and their emissive.
+        // At 5120x1440 RT High most of the frame is baked level geometry.
+        (
+            "    let initial = generate_initial_path(".into(),
+            "    if all(surface.material.base_color == vec3<f32>(0.0)) {
+        reservoirs_b[pixel_index] = empty_reservoir();
+        textureStore(view_output, global_id.xy, vec4(0.0));
+        return;
+    }
+    let initial = generate_initial_path(".into(),
+        ),
+        // same early-out in no_restir.wesl `initial_and_shade` (Medium / Low): identical output (the fill
+        // patch already replaces those pixels by their emissive), without the initial path.
+        (
+            "    let path = generate_initial_path(".into(),
+            "    if all(surface.material.base_color == vec3<f32>(0.0)) {
+        textureStore(view_output, global_id.xy, vec4(surface.material.emissive * view.exposure, 1.0));
+        return;
+    }
+    let path = generate_initial_path(".into(),
+        ),
+        (
+            "    let input_reservoir = reservoirs_b[pixel_index];".into(),
+            "    if all(surface.material.base_color == vec3<f32>(0.0)) {
+        reservoirs_a[pixel_index] = empty_reservoir();
+        textureStore(view_output, global_id.xy, vec4(surface.material.emissive, 1.0));
+        return;
+    }
+    let input_reservoir = reservoirs_b[pixel_index];".into(),
         ),
     ]
 }
@@ -234,8 +287,16 @@ mod bevy_rt {
     /// Solari's world-space tuning (ray epsilons, world-cache cells, GI ray length) assumes metres.
     pub const UNITS_PER_METER: f32 = 100.0;
 
+    /// WIRE-C3: direct-light samples multiplier over Solari's defaults (speckle reduction).
+    pub const RT_DI_SAMPLE_MUL: u32 = 4;
+
     /// `SolariLighting` with its metre-based distances converted to Sly units.
     pub fn solari_lighting() -> SolariLighting {
+        solari_lighting_q(RT_DI_SAMPLE_MUL)
+    }
+
+    /// WIRE-OPT: `solari_lighting` with the settings.toml `[graphics] rt_quality` sample multiplier.
+    pub fn solari_lighting_q(mul: u32) -> SolariLighting {
         let d = SolariLighting::default();
         SolariLighting {
             world_cache_max_gi_ray_distance: d.world_cache_max_gi_ray_distance * UNITS_PER_METER,
@@ -244,6 +305,12 @@ mod bevy_rt {
             // no denoiser in this build (DLSS RR not enabled): ReSTIR spatio-temporal reuse keeps the
             // many small light sources (point-light proxies) from rendering as sparse speckles
             restir: true,
+            // WIRE-C3 denoise: no DLSS-RR (needs the NVIDIA SDK `dlss` feature); more light samples per
+            // pixel + longer ReSTIR / world-cache history, then TAA accumulation (`RtTuning::taa`)
+            primary_di_samples: d.primary_di_samples * mul,
+            secondary_di_samples: d.secondary_di_samples * mul,
+            confidence_weight_cap: d.confidence_weight_cap * 2.0,
+            world_cache_max_temporal_samples: d.world_cache_max_temporal_samples * 2.0,
             ..d
         }
     }
@@ -321,7 +388,7 @@ mod bevy_rt {
     /// Point light -> its Solari emissive-sphere proxy (Solari 0.20 traces only directional lights and
     /// emissive meshes; the level's class-4 point LIGHTs would otherwise vanish in raytraced mode).
     #[derive(Component)]
-    pub struct RtLightProxy(pub Entity);
+    pub struct RtLightProxy(pub Entity, pub Handle<StandardMaterial>, pub f32);
 
     /// Proxy sphere radius (world units) when the light has no radius of its own.
     pub const PROXY_RADIUS: f32 = 10.0;
@@ -338,7 +405,7 @@ mod bevy_rt {
         mut commands: Commands,
         changed: Query<(Entity, &PointLight, Option<&RtLightProxy>), Changed<PointLight>>,
         mut removed: RemovedComponents<PointLight>,
-        proxies: Query<&RtLightProxy>,
+        proxies: Query<&RtLightProxy, Without<PointLight>>,
         mut meshes: ResMut<Assets<Mesh>>,
         mut mats: ResMut<Assets<StandardMaterial>>,
     ) {
@@ -349,23 +416,132 @@ mod bevy_rt {
             }
         }
         for (e, l, old) in &changed {
+            let r = if l.radius > 0.0 { l.radius } else { PROXY_RADIUS };
+            // RENDER: colour / intensity change -> update the proxy material in place (a new proxy entity
+            // = new BLAS instance + Solari light-list change; respawning on every light write made
+            // 6-10 frame bursts of 2-3x Solari lighting cost at RT High)
             if let Some(p) = old {
+                if p.2 == r {
+                    let emissive = LinearRgba::from(l.color) * proxy_radiance(l.intensity, r);
+                    if mats.get(&p.1).is_some_and(|m| m.emissive != emissive) {
+                        if let Some(mut m) = mats.get_mut(&p.1) {
+                            m.emissive = emissive;
+                        }
+                    }
+                    continue;
+                }
                 commands.entity(p.0).despawn();
             }
-            let r = if l.radius > 0.0 { l.radius } else { PROXY_RADIUS };
             let mut m = Sphere::new(r).mesh().ico(1).expect("ico sphere");
             m.generate_tangents().expect("sphere tangents");
             let Some(m) = raytracing_mesh(&m) else { continue };
             let emissive = LinearRgba::from(l.color) * proxy_radiance(l.intensity, r);
             let mat = mats.add(StandardMaterial { base_color: Color::BLACK, emissive, ..default() });
-            let p = commands.spawn((RaytracingMesh3d(meshes.add(m)), MeshMaterial3d(mat), Transform::default(), ChildOf(e))).id();
-            commands.entity(e).insert(RtLightProxy(p));
+            let p = commands.spawn((RaytracingMesh3d(meshes.add(m)), MeshMaterial3d(mat.clone()), Transform::default(), ChildOf(e))).id();
+            commands.entity(e).insert(RtLightProxy(p, mat, r));
         }
     }
 
-    /// Entity checked and kept out of the BLAS (skinned, blended, incompatible).
+    /// Entity checked and kept out of the BLAS (blended, incompatible).
     #[derive(Component)]
     pub struct RtExcluded;
+
+    /// WIRE-C3: skinned / animated mesh in the BLAS. Solari 0.20 has no GPU BLAS skinning; its
+    /// `prepare_raytracing_blas` rebuilds the BLAS of every modified mesh asset, so the RT copy `blas` is
+    /// re-skinned on the CPU (same linear blend skinning as Bevy's skinning.wgsl) whenever a joint moved.
+    #[derive(Component)]
+    pub struct RtSkin {
+        pub src: Handle<Mesh>,
+        pub blas: Handle<Mesh>,
+        /// joint matrices of the last refit (skip unchanged poses)
+        pub last: Vec<Mat4>,
+    }
+
+    /// Linear blend skinning of `pos`/`nrm` into the entity-local space of `inv_entity`.
+    pub fn skin_positions(pos: &[[f32; 3]], nrm: &[[f32; 3]], joints: &[[u16; 4]], weights: &[[f32; 4]], mats: &[Mat4], inv_entity: Mat4) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut po = Vec::with_capacity(pos.len());
+        let mut no = Vec::with_capacity(pos.len());
+        for i in 0..pos.len() {
+            let mut m = Mat4::ZERO;
+            for k in 0..4 {
+                let w = weights.get(i).map_or(0.0, |w| w[k]);
+                if w != 0.0 {
+                    m += *mats.get(joints[i][k] as usize).unwrap_or(&Mat4::IDENTITY) * w;
+                }
+            }
+            let m = inv_entity * m;
+            po.push(m.transform_point3(Vec3::from(pos[i])).into());
+            let n = nrm.get(i).map_or(Vec3::Z, |n| m.transform_vector3(Vec3::from(*n)).normalize_or_zero());
+            no.push(n.into());
+        }
+        (po, no)
+    }
+
+    /// LOOK R13: distance (Sly units) under which a skinned BLAS refits at the full `SLY2_RT_SKIN_DIV` rate.
+    pub const RT_SKIN_NEAR: f32 = 1500.0;
+
+    /// WIRE-C3: per-frame BLAS refit of skinned meshes (runs while RT is on).
+    pub fn rt_skin_refit(
+        mut commands: Commands,
+        mut q: Query<(Entity, &mut RtSkin, &SkinnedMesh, &GlobalTransform)>,
+        joints: Query<&GlobalTransform>,
+        cams: Query<&GlobalTransform, With<CmCamera>>,
+        ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        mut frame: Local<u32>,
+    ) {
+        use bevy::mesh::VertexAttributeValues as V;
+        let mut refits = 0u32;
+        let t0 = std::time::Instant::now();
+        // UPSCALE R2: animated skins refit on 1 of every `div` frames, staggered by entity (BLAS = GI/shadow
+        // geometry only; the drawn mesh is GPU-skinned every frame). env SLY2_RT_SKIN_DIV (default 2, 1 = every frame)
+        let div = std::env::var("SLY2_RT_SKIN_DIV").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(2).max(1);
+        *frame = frame.wrapping_add(1);
+        // LOOK R13 (perf): every refit is a new mesh asset + BLAS build (~266 per frame in t4 at div 2, the
+        // largest RT cost after the lighting pass). Skins farther than RT_SKIN_NEAR from the camera refit
+        // div x (1 + d / RT_SKIN_NEAR, max 4) frames apart (far shadows / GI lag <= 8 frames).
+        let cam = cams.iter().next().map(|c| c.translation());
+        for (e, mut s, sk, gt) in &mut q {
+            let lod = cam.map_or(1, |c| 1 + ((gt.translation().distance(c) / RT_SKIN_NEAR) as u32).min(3));
+            if !s.last.is_empty() && (e.index_u32().wrapping_add(*frame)) % (div * lod) != 0 {
+                continue;
+            }
+            let Some(ibp) = ibps.get(&sk.inverse_bindposes) else { continue };
+            // UPSCALE R2: compare the pose in entity-local space (what the BLAS stores), so a mesh that only
+            // moves/turns as a whole keeps its BLAS (TLAS instance transform covers that) instead of a rebuild
+            let inv = gt.to_matrix().inverse();
+            let mats: Vec<Mat4> = sk.joints.iter().zip(ibp.iter()).map(|(j, b)| inv * joints.get(*j).map_or(Mat4::IDENTITY, |g| g.to_matrix()) * *b).collect();
+            if mats.len() == s.last.len() && mats.iter().zip(&s.last).all(|(a, b)| a.abs_diff_eq(*b, 1e-4)) {
+                continue;
+            }
+            let Some(src) = meshes.get(&s.src) else { continue };
+            let (Some(V::Float32x3(p)), Some(V::Uint16x4(j)), Some(V::Float32x4(w))) =
+                (src.attribute(Mesh::ATTRIBUTE_POSITION), src.attribute(Mesh::ATTRIBUTE_JOINT_INDEX), src.attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT))
+            else {
+                continue;
+            };
+            let n = match src.attribute(Mesh::ATTRIBUTE_NORMAL) {
+                Some(V::Float32x3(n)) => n.clone(),
+                _ => Vec::new(),
+            };
+            let (po, no) = skin_positions(p, &n, j, w, &mats, Mat4::IDENTITY);
+            refits += 1;
+            // a NEW asset per refit: modifying the same mesh twice before Solari's compaction queue reaches
+            // it queues a second compaction of one BLAS ("Compaction is already being prepared"); the
+            // dropped old handle goes through Solari's deferred BLAS deletion instead
+            let Some(mut b) = meshes.get(&s.blas).cloned() else { continue };
+            b.insert_attribute(Mesh::ATTRIBUTE_POSITION, po);
+            if !n.is_empty() {
+                b.insert_attribute(Mesh::ATTRIBUTE_NORMAL, no);
+            }
+            s.blas = meshes.add(b);
+            commands.entity(e).insert(RaytracingMesh3d(s.blas.clone()));
+            s.last = mats;
+        }
+        if std::env::var_os("SLY2_RT_SKIN_LOG").is_some() {
+            eprintln!("rt_skin_refit: {refits} of {} meshes, {:.2} ms", q.iter().count(), t0.elapsed().as_secs_f64() * 1e3);
+        }
+    }
 
     /// A12: entity whose material look was switched to the RT variant (`rt_apply_look`); holds the raster
     /// material handle when the A8 blend split swapped it (restored by `rt_revert_look`).
@@ -414,8 +590,28 @@ mod bevy_rt {
             app.insert_resource(DefaultOpaqueRendererMethod::forward());
             app.add_systems(PreUpdate, patch_solari_shaders).add_systems(PostStartup, rt_init).add_systems(
                 PostUpdate,
-                (rt_switch, rt_revert_look.run_if(|c: Res<RtLookCache>| c.revert), (rt_apply_look, sync_point_light_proxies).run_if(|s: Res<RtState>| s.active)).chain(),
+                (rt_switch, rt_revert_look.run_if(|c: Res<RtLookCache>| c.revert), (rt_apply_look, sync_point_light_proxies, rt_skin_refit, rt_apply_quality).run_if(|s: Res<RtState>| s.active)).chain(),
             );
+        }
+    }
+
+    /// WIRE-OPT: settings.toml `[graphics] rt_quality` (Options > Graphics, live): the DI sample count of
+    /// every Solari camera follows `LiveGraphics::rt_quality` (Low x1, Medium x2, High x4 = WIRE-C3 default).
+    pub fn rt_apply_quality(live: Option<Res<crate::settings::LiveGraphics>>, mut cams: Query<(&mut SolariLighting, &Camera), With<CmCamera>>) {
+        for (mut c, cam) in cams.iter_mut() {
+            // LOOK: Auto resolves by the camera's render size
+            let sz = cam.physical_viewport_size().unwrap_or_default();
+            let q = live.as_ref().map(|l| l.rt_quality.resolve(sz.x, sz.y));
+            let mul = q.map_or(RT_DI_SAMPLE_MUL, |q| q.di_sample_mul());
+            let restir = q.map_or(true, |q| q.restir());
+            let want = solari_lighting_q(mul);
+            if c.restir != restir {
+                c.restir = restir;
+            }
+            if c.primary_di_samples != want.primary_di_samples {
+                c.primary_di_samples = want.primary_di_samples;
+                c.secondary_di_samples = want.secondary_di_samples;
+            }
         }
     }
 
@@ -671,9 +867,13 @@ mod bevy_rt {
             let Some(mesh) = meshes.get(&m.0) else { continue };
             let Some(mat) = mats.get(&mat_h) else { continue };
             let opaque = matches!(mat.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_));
-            match (!skinned && opaque).then(|| raytracing_mesh(mesh)).flatten() {
+            match (opaque).then(|| raytracing_mesh(mesh)).flatten() {
                 Some(rt) => {
                     let h = meshes.add(rt);
+                    if skinned {
+                        // WIRE-C3: skinned BLAS = CPU-skinned copy refitted every frame (`rt_skin_refit`)
+                        commands.entity(e).insert(RtSkin { src: m.0.clone(), blas: h.clone(), last: Vec::new() });
+                    }
                     commands.entity(e).insert(RaytracingMesh3d(h));
                     added += 1;
                 }

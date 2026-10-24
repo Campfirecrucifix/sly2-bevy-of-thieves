@@ -183,6 +183,15 @@ pub fn ee_sub_12f2a8(s: S) -> Result<Aseg, WorldError> {
 }
 
 impl Aseg {
+    /// ASEG +0x78 (rate): FUN_0012f248 default 1, overridden by the property list (field 109 = +0x78, e.g.
+    /// 0.8 on the EP2 guard walk ASEG oid 416; PCSX2 rec10 +0x48 of its ASEGA = 0.8)
+    pub fn f78(&self) -> f32 {
+        use crate::engine::world::props::PropValue;
+        self.props.iter().rev().find_map(|p| match &p.value {
+            PropValue::Scalar(v) if p.field == 109 && v.len() >= 4 => Some(f32::from_le_bytes([v[0], v[1], v[2], v[3]])),
+            _ => None,
+        }).unwrap_or(1.0)
+    }
     /// (channels, keys over all curves)
     pub fn stats(&self) -> (usize, usize) {
         let vk = |c: &VecCurve| match c {

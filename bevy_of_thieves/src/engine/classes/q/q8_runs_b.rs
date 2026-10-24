@@ -332,7 +332,7 @@ pub fn ee_sub_1b9d28<M: QMem + ?Sized>(m: &mut M, o: u32, q: crate::engine::clas
         if (m.r32(p + 0x2c) >> 28) & 1 == 0 {
             vcall(m, p, 0xc, 0xec, &[], &[q]);
             let (a, b) = (m.r32(o + 0x1ad4), m.r32(o + 0x1ad0));
-            m.call(0x0012_f9b8, &[0, 0x3f80_0000, a, b, 0, 0], &[]);
+            m.call(0x0012_f9b8, &[a, b, 0, 0], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
         }
     }
 }
@@ -342,7 +342,7 @@ pub fn ee_sub_1b9db8<M: QMem + ?Sized>(m: &mut M, o: u32) {
     if (m.r32(p + 0x2c) >> 28) & 1 == 0 {
         vcall(m, p, 0xc, 0xec, &[], &[]);
         let (a, b) = (m.r32(o + 0x1adc), m.r32(o + 0x1ad8));
-        m.call(0x0012_f9b8, &[0, 0x3f80_0000, a, b, 0, 0], &[]);
+        m.call(0x0012_f9b8, &[a, b, 0, 0], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
     }
 }
 /// FUN_001b9e28 (same body as FUN_0011ae88)
@@ -506,7 +506,9 @@ pub fn ee_sub_1d77d0<M: QMem + ?Sized>(m: &mut M, o: u32, mut step: i64) {
     if m.r32(o + 0x188) == 0 {
         return;
     }
-    let u = m.call(0x001f_07e8, &[], &[]).0;
+    // WIRE-UI: Ghidra dropped the register args: a0 = +0x188 (FUN_001f07e8), a1 = the matched entry (FUN_001f0660)
+    let l = m.r32(o + 0x188);
+    let u = m.call(0x001f_07e8, &[l], &[]).0;
     let c = m.r32(o + 0x184);
     let start = m.call(0x001f_0438, &[c, u], &[]).0 as i32;
     let mut i = start;
@@ -524,7 +526,7 @@ pub fn ee_sub_1d77d0<M: QMem + ?Sized>(m: &mut M, o: u32, mut step: i64) {
             for k in 0..n {
                 if m.r32(o + 0x224 + 4 * k as u32) == e {
                     let t = m.r32(o + 0x188);
-                    m.call(0x001f_0660, &[t], &[]);
+                    m.call(0x001f_0660, &[t, e], &[]);
                     return;
                 }
             }
@@ -593,8 +595,9 @@ pub fn ee_sub_1fcc30<M: QMem + ?Sized>(m: &mut M, p1: u64, o: u32) {
     vcall(m, o, 0xc, 0x14, &[], &[]);
 }
 /// FUN_001fccf0: FUN_0011ccc0(0x3dd074)
-pub fn ee_sub_1fccf0<M: QMem + ?Sized>(m: &mut M) {
-    m.call(0x0011_ccc0, &[0x003d_d074], &[]);
+pub fn ee_sub_1fccf0<M: QMem + ?Sized>(m: &mut M) -> u32 {
+    // ANIM-ALL: tail call of FUN_0011ccc0 returns the pool block (was dropped)
+    m.call(0x0011_ccc0, &[0x003d_d074], &[]).0
 }
 /// FUN_001fcd38: constructor
 pub fn ee_sub_1fcd38<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
@@ -713,8 +716,9 @@ pub fn ee_sub_20f2f8<M: QMem + ?Sized>(m: &mut M, f: f32, o: u32) {
     m.call(0x0020_f1c8, &[o], &[]);
 }
 /// FUN_002296a0: FUN_0011ccc0(o + 0x40e8)
-pub fn ee_sub_2296a0<M: QMem + ?Sized>(m: &mut M, o: u32) {
-    m.call(0x0011_ccc0, &[o + 0x40e8], &[]);
+pub fn ee_sub_2296a0<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
+    // ANIM-ALL: tail call of FUN_0011ccc0 returns the pool block (was dropped)
+    m.call(0x0011_ccc0, &[o + 0x40e8], &[]).0
 }
 /// FUN_00212158: constructor
 pub fn ee_sub_212158<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
@@ -825,9 +829,10 @@ pub fn ee_sub_1e79a0<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
     m.r32(n.wrapping_mul(4).wrapping_add(t).wrapping_sub(4))
 }
 /// FUN_001e79f0: FUN_001e95b0(p1, FUN_001e7840(p2, 1))
-pub fn ee_sub_1e79f0<M: QMem + ?Sized>(m: &mut M, p1: u32, p2: u32) {
-    let u = m.call(0x001e_7840, &[p2, 1], &[]).0;
-    m.call(0x001e_95b0, &[p1, u], &[]);
+pub fn ee_sub_1e79f0<M: QMem + ?Sized>(m: &mut M, o: u32, f: f32) {
+    // VFIX3 1:1 per asm: FUN_001e7840(a0, 1); FUN_001e95b0(v0, f12 = f)
+    let u = m.call(0x001e_7840, &[o, 1], &[]).0;
+    m.call(0x001e_95b0, &[u], &[[f, 0.0, 0.0, 0.0]]);
 }
 /// FUN_001e7a28: p2 == -1: FUN_001a6ca8(o, 0), flags |= 0x20, &= ~0xc; else FUN_001e7840(o, 1), FUN_001a6ca8(o, 0),
 /// &= ~0x20, |= 0xc; then (+0x17c)->+0x4c = p2

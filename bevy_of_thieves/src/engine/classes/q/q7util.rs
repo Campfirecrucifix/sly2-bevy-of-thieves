@@ -19,18 +19,21 @@ pub fn f(x: f32) -> V4 {
 pub fn fr(r: (u32, V4)) -> f32 {
     r.1[0]
 }
+// VU0 / FPU lane ops: results saturate like the PS2 (no inf / NaN, denormals flush), see math::vu0::fix
+use crate::engine::math::vu0::fix;
 pub fn sub(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|i| a[i] - b[i])
+    std::array::from_fn(|i| fix(a[i] - b[i]))
 }
 pub fn add(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|i| a[i] + b[i])
+    std::array::from_fn(|i| fix(a[i] + b[i]))
 }
 pub fn scale(a: V4, s: f32) -> V4 {
-    a.map(|x| x * s)
+    a.map(|x| fix(x * s))
 }
 /// `vmulax/vmadday/vmaddz` with rows r0..r2: r0*v.x + r1*v.y + r2*v.z (lanes xyz; w kept from `w`)
 pub fn mul3(r: &[V4; 3], v: V4, w: f32) -> V4 {
-    let mut o: V4 = std::array::from_fn(|i| r[0][i] * v[0] + r[1][i] * v[1] + r[2][i] * v[2]);
+    let mut o: V4 =
+        std::array::from_fn(|i| fix(fix(fix(r[0][i] * v[0]) + fix(r[1][i] * v[1])) + fix(r[2][i] * v[2])));
     o[3] = w;
     o
 }

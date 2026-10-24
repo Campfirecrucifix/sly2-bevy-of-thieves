@@ -628,7 +628,7 @@ pub fn ee_sub_1dc260<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32) {
     }
     if old == -1 {
         // opening: FUN_0014d1d0(0, clock, 0), FUN_0020efc0(world, 0), vtable +0x54, FUN_00212a70(scr, 1)
-        m.call(0x0014_d1d0, &[0, 0x002d_ded0, 0], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 0], &[super::q5util::f4(0.0)]);
         m.call(0x0020_efc0, &[0x003d_d490, 0], &[]);
         // vtable slot dispatch +0x54: vslot(m, o, ..) — skip (screen show; cosmetic)
         m.call(0x0021_2a70, &[scr, 1], &[]);
@@ -653,7 +653,7 @@ pub fn ee_sub_1dc260<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32) {
         // closing
         let scr = m.r32(o + 0x24);
         // vtable +0x194 on screen, FUN_0014d1d0(1.0), FUN_0020f030, vtable +0x5c
-        m.call(0x0014_d1d0, &[0x3f80_0000, 0x002d_ded0, 0], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 0], &[super::q5util::f4(1.0)]);
         m.call(0x0020_f030, &[0x003d_d490, 0], &[]);
         if m.r32(scr + 0x58) >= 1 {
             m.call(0x0021_2a50, &[scr, 1], &[]);

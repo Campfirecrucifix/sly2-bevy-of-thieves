@@ -124,7 +124,8 @@ pub fn ee_sub_16fca8<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32, c: u32, d: u32
     m.call(0x0015_74b8, &[pk2], &[]);
     m.call(0x0022_7148, &[pk2, a, b, 0], &[]);
     m.call(0x0022_6ca8, &[pk2, 0, 0], &[]);
-    m.call(0x0022_6f28, &[w], &[]);
+    // VFIX3 per asm: FUN_00226f28(pk2, 0xc, 2, w, 0xb) (a0 = s0, a1 = 0xc, a2 = 2, a3 = s1, t0 = 0xb)
+    m.call(0x0022_6f28, &[pk2, 0xc, 2, w, 0xb], &[]);
     m.call(0x0015_76f0, &[pk2], &[]);
     m.call(0x0015_7620, &[pk2], &[]);
     stack_pop(m, 0x90);

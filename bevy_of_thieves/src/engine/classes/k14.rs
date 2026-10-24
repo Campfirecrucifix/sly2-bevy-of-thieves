@@ -700,8 +700,15 @@ impl ClassSet {
         })?;
         if let Some(k) = self.k13.iter().position(|x| x.0 == proj) {
             if let Inst::K13(c) = &mut self.k13[k].1 {
-                if !c.p.in_play {
+                if !c.p.in_play || h.pool_take_place(handle(proj)) {
                     c.p.phys.pos = h.ee_sub_1a62e8(handle(launcher));
+                    // HEIST: a frameless launcher record (the EP3 spotlight's 9070) starts the shot at its owner
+                    // (spawner and launcher sit on the same owner). REPLACED: the owner's loaded world position.
+                    if l.f_60 == 0 {
+                        if let Some(&p) = self.launcher_owner.get(&launcher) {
+                            c.p.phys.pos = p;
+                        }
+                    }
                 }
             }
         }
@@ -759,6 +766,10 @@ impl ClassSet {
     pub(super) fn frame_k14(&mut self, h: &mut dyn ClassHost) {
         let (t, dt) = (self.g.t, self.g.dt);
         for (i, x) in &mut self.k14 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K14(c) = x {
                 let mut cx = Cx { t, dt, rng: &mut self.rng, h: &mut *h };
                 c.ee_sub_181f60(*i, &mut cx);

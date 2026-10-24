@@ -94,6 +94,9 @@ pub struct LootSys {
     /// WP-K33: HUD countdown requests of this system for ui::hud_slots: Some(secs) = FUN_001618f8(secs, world),
     /// None = FUN_00161958(world)
     pub hud: Vec<Option<f32>>,
+    /// FEEL R38: loot objects claimed from the pool (FUN_001cb250 Adds the copy, vtable +0x44); drained by
+    /// `player::plugin::loot_link` into the class host's FUN_001cb250(DAT_003e1ac8, ..)
+    pub added: Vec<u32>,
     fx_seq: u32,
 }
 
@@ -131,9 +134,12 @@ impl LootSys {
         lo.def = lo.defs.iter().position(|d| d.id == id).or(if lo.defs.is_empty() { None } else { Some(0) });
     }
 
-    /// 0x001cb250 FUN_001cb250 (REPLACED): a free loot of the pool.
-    pub fn ee_sub_1cb250(&self) -> Option<usize> {
-        self.loots.iter().position(|l| l.state == 0 && l.def.is_none() && !l.active)
+    /// 0x001cb250 FUN_001cb250 (REPLACED): a free loot of the pool. FEEL R38: FUN_001cade0 keeps the LAST copy of
+    /// equal score (`min <= s`), so the free copies go from the end (rec5 210: 6435 copies 7, 6, 5 claimed).
+    pub fn ee_sub_1cb250(&mut self) -> Option<usize> {
+        let l = self.loots.iter().rposition(|l| l.state == 0 && l.def.is_none() && !l.active)?;
+        self.added.push(self.loots[l].obj);
+        Some(l)
     }
 
     fn fx(&mut self, l: usize, from: [f32; 3], to: [f32; 3]) {
@@ -567,23 +573,32 @@ impl LootSys {
     /// +0x190 alert), their field-1168 FUN_0013d328 calls (fed at load), then the slot-22 deferred call
     /// FUN_00149ab8(DAT_002a4bb0) = PMF {0, -1, 0x13cf38}: FUN_0013cf38 hands every holder its loot.
     pub fn from_class_set(classes: impl IntoIterator<Item = u16>, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], defs: &[LootDef], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
-        Self::from_objects(classes.into_iter().enumerate().map(|(i, c)| (i as u32 + 1, c)), defs).load_post(k31, pos)
+        Self::from_objects(classes.into_iter().enumerate().map(|(i, c)| (i as u32 + 1, c)), defs).load_post(k31, pos, &|_| None)
     }
     /// WP-K33: `from_class_set` with every class-103 object's own def rows (`defs_of_props` of its load props).
     pub fn from_world(w: &crate::engine::world::World, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
+        Self::from_world_saved(w, k31, pos, &|_| None)
+    }
+    /// FEEL R39: `from_world` with the save store (FUN_0013d248's FUN_002581c0 read of the level path
+    /// FUN_002109b8(DAT_003e1110) ++ "booty" / "aoidAssembly" / holder +0x180): `saved(idx)` = the stored id
+    /// (rec5: episode/nightclub/level/exterior/booty/aoidAssembly/3 = -1, so hub holder 3 gets no loot)
+    pub fn from_world_saved(w: &crate::engine::world::World, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3], saved: &dyn Fn(i32) -> Option<i32>) -> Self {
         let mut s = Self::from_objects(w.objects.iter().enumerate().map(|(i, o)| (i as u32 + 1, o.class as u16)), &[]);
         for l in &mut s.loots {
             let i = l.obj as usize - 1;
             let o = w.objects.get(w.objects[i].clone_of.unwrap_or(i));
             l.defs = defs_of_props(o.and_then(crate::engine::game::fields::object_props).unwrap_or(&[]));
         }
-        s.load_post(k31, pos)
+        s.load_post(k31, pos, saved)
     }
-    fn load_post(mut self, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3]) -> Self {
+    fn load_post(mut self, k31: &[(usize, crate::engine::classes::k31::C2cb9f8)], pos: &dyn Fn(u32) -> [f32; 3], saved: &dyn Fn(i32) -> Option<i32>) -> Self {
         let s = &mut self;
         for g in &mut s.guards {
             if let Some((_, c)) = k31.iter().find(|x| x.0 as u32 + 1 == g.obj) {
                 (g.idx, g.booty, g.kind, g.alert, g.timer) = (c.f_180, c.f_184, c.f_188, c.f_190, c.f_18c);
+            }
+            if let Some(v) = saved(g.idx) {
+                s.guard_save.insert(g.idx, v);
             }
         }
         for gi in 0..s.guards.len() {

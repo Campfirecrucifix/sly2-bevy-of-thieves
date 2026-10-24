@@ -358,6 +358,10 @@ impl ClassSet {
         let t = self.g.t;
         let dt = self.g.dt;
         for (i, x) in &mut self.k20 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K20Truck(c) = x {
                 c.dt = dt;
                 // K21 slot 18: the forward speed = the velocity (vtable +0x10c) in the object frame

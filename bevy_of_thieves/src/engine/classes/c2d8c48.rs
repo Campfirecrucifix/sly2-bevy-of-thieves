@@ -28,6 +28,9 @@ pub struct C2d8c48 {
     /// action-0x55 wait (FUN_00171da8) reads (refreshed by `ClassSet` before the update)
     pub k27_ops: Vec<super::k22_seq::GuardOp>,
     pub k27_running: Vec<(u32, u32)>,
+    /// ANIM-ALL R35: object (handle) -> binocucom HUD state (+0xf28) for the action-0x3b / 0x3c waits
+    /// (refreshed by `ClassSet` before the update)
+    pub binoc_huds: Vec<(u32, i32)>,
     /// K27: action-0x12 world states released by FUN_001e5628 (flags; FUN_0020f030 + FUN_0020f0f0 by the set)
     pub k27_world: Vec<u32>,
 }

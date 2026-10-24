@@ -211,22 +211,50 @@ pub fn level_targets(w: &World) -> Vec<P5Target> {
         if !isa(c, 10) || o.disabled {
             continue;
         }
-        let Some(path) = path_of(w, i) else { continue };
+        // CRAWL R66: a copy (FUN_0013e510, vtable +0x144 copies the source's state) has the source's path and
+        // properties, placed under its own owner (row 6 pipes 6213 / 6219 = copies of 2425 under the class-48
+        // bodies 2428 / 2429: the user capture's grabs at f5c 0xf81c70 / 0xf840b0, oid 4510)
+        let src = if matches!(o.payload, crate::engine::world::objects::Payload::Clone) { o.clone_of.unwrap_or(i) } else { i };
+        if src != i && std::env::var("SLY2_NO_CLONE_PATH").is_ok() {
+            continue;
+        }
+        let Some(mut path) = path_of(w, src) else { continue };
+        // CRAWL R66: the path frame is the object's vtable +0xfc world matrix (owner chain composed,
+        // classes::shared::path10::world_xf); a copy = the source's load xform under the copy's own owner
+        // (row 6 pipes 2425 under 2420, copies 6207 / 6213 / 6219 under the class-48 bodies 2427..2429)
+        if std::env::var("SLY2_NO_PATH_WORLD").is_err() {
+            use crate::engine::classes::shared::path10::world_xf;
+            let m = if src != i {
+                let local = crate::engine::gfx::attach::affine_from_bytes(&match &w.objects[src].payload {
+                    Payload::Loaded(LoadData::B4(bx)) => match &**bx { B4Load::L1e5df8 { xform, .. } => xform.xform, _ => continue },
+                    _ => continue,
+                });
+                o.owner.and_then(|ow| world_xf(w, ow, None)).map_or(local, |p| crate::engine::gfx::scene::mul(&local, &p))
+            } else {
+                world_xf(w, i, None).unwrap_or([path.rot[0], path.rot[1], path.rot[2], path.pos])
+            };
+            path.rot = [m[0], m[1], m[2]];
+            path.pos = m[3];
+        }
         let mut tg = AttachTarget::new(c, path.pts[0]);
         tg.pos = [path.pos[0], path.pos[1], path.pos[2]];
         let tp = super::target_path(&path);
         tg.path = Some(path);
-        let (mask, range) = target_mask_range(w, i, c);
+        let (mask, range) = target_mask_range(w, src, c);
         // class 0xd +0x1bc (edge / wall-hug flag of the kind-3 attach, moved by 0x194170) / +0x1c0 / +0x1c4:
         // props 858 / 859 / 860 over the FUN_001cb908 constructor defaults (+0x1c0 = 1000, +0x1c4 = 1)
         let geom = if isa(c, 0xd) {
-            tg.f_1bc = prop_u32(w, i, 858).unwrap_or(0);
-            tg.f_1c0 = prop_f32(w, i, 859).unwrap_or(1000.0);
-            tg.f_1c4 = prop_f32(w, i, 860).unwrap_or(1.0);
+            tg.f_1bc = prop_u32(w, src, 858).unwrap_or(0);
+            tg.f_1c0 = prop_f32(w, src, 859).unwrap_or(1000.0);
+            tg.f_1c4 = prop_f32(w, src, 860).unwrap_or(1.0);
             TargetGeom::Rope { path: tp }
         } else if isa(c, 0xc) {
             TargetGeom::Rail { path: tp, member: MemberGeom::PathArc }
         } else if isa(c, 0xb) {
+            // FEEL R95: class 11 (C2d56f8) +0x1c0 axis = prop 838 over the FUN_001c3390 default (1, 0, 0)
+            if let Some(b) = prop_bytes(w, src, 838).filter(|b| b.len() >= 12) {
+                tg.axis_1c0 = [0, 4, 8].map(|k| f32::from_le_bytes([b[k], b[k + 1], b[k + 2], b[k + 3]]));
+            }
             TargetGeom::PathBody { path: tp }
         } else {
             continue;

@@ -342,56 +342,46 @@ pub fn fun_001b1b18<M: QMem + ?Sized>(m: &mut M, o: u32, i: u64, v: u32, w: i64)
     }
 }
 
-fn walk_records<M: QMem + ?Sized>(m: &mut M, p1: u32, o: u32, key: u32, all_fn: u32, rec_fn: u32) {
+fn walk_records<M: QMem + ?Sized>(m: &mut M, o: u32, key: u32, f: f32, all_fn: u32, rec_fn: u32) {
+    // VER4: 1:1 from asm (o = a0, key = a1, f = f12; rec_fn(rec, idx, 0, f), all_fn(o+0x84, f))
     if key == 0x314 {
         let a = m.r32(o + 0x84);
-        m.call(all_fn, &[a], &[]);
+        m.call(all_fn, &[a], &[[f, 0.0, 0.0, 0.0]]);
         return;
     }
     let mut i = 0u32;
-    if m.r16(o + 0x80) as i16 == 0 {
-        return;
-    }
-    loop {
-        let rec = m.r32(o + 0x84).wrapping_add(i * 0x30);
+    while i < m.r16(o + 0x80) as u32 {
+        let rec = m.r32(o + 0x84).wrapping_add(i.wrapping_mul(0x30));
         i += 1;
-        if m.r16(rec) != 0 {
-            let mut j = 0u32;
-            loop {
-                j += 1;
-                let mut idx = -1i32;
-                let off = (j - 1) * 0x18;
-                let tp = m.r32(rec + 4).wrapping_add(off).wrapping_add(0x14);
-                if key == m.r32(tp) {
-                    let n = m.r16(rec + 2) as u32;
-                    let mut ps = m.r32(rec + 8) + 8;
-                    for k in 0..n {
-                        if m.r16(ps) as i16 != -1 {
-                            idx = k as i32;
-                        }
-                        ps += 0x18;
-                    }
-                    if idx >= 0 {
-                        m.call(rec_fn, &[p1, rec, idx as u32, 0], &[]);
-                    }
+        let mut j = 0u32;
+        while j < m.r16(rec) as u32 {
+            let tp = m.r32(rec + 4).wrapping_add(j.wrapping_mul(0x18));
+            j += 1;
+            if key != m.r32(tp.wrapping_add(0x14)) {
+                continue;
+            }
+            let n = m.r16(rec + 2) as u32;
+            let mut idx = -1i32;
+            let mut ps = m.r32(rec + 8).wrapping_add(8);
+            for k in 0..n {
+                if m.r16(ps) as i16 != -1 {
+                    idx = k as i32;
                 }
-                if j >= m.r16(rec) as u32 {
-                    break;
-                }
+                ps = ps.wrapping_add(0x18);
+            }
+            if idx >= 0 {
+                m.call(rec_fn, &[rec, idx as u32, 0], &[[f, 0.0, 0.0, 0.0]]);
             }
         }
-        if i >= m.r16(o + 0x80) as u32 {
-            break;
-        }
     }
 }
-/// FUN_00212e40(a0, o, key)
-pub fn fun_00212e40<M: QMem + ?Sized>(m: &mut M, a0: u32, o: u32, key: u32) {
-    walk_records(m, a0, o, key, 0x0021_7fb8, 0x0021_7fe0)
+/// FUN_00212e40(o, key, f)
+pub fn fun_00212e40<M: QMem + ?Sized>(m: &mut M, o: u32, key: u32, f: f32) {
+    walk_records(m, o, key, f, 0x0021_7fb8, 0x0021_7fe0)
 }
-/// FUN_00212f80(a0, o, key)
-pub fn fun_00212f80<M: QMem + ?Sized>(m: &mut M, a0: u32, o: u32, key: u32) {
-    walk_records(m, a0, o, key, 0x0021_8038, 0x0021_8060)
+/// FUN_00212f80(o, key, f)
+pub fn fun_00212f80<M: QMem + ?Sized>(m: &mut M, o: u32, key: u32, f: f32) {
+    walk_records(m, o, key, f, 0x0021_8038, 0x0021_8060)
 }
 /// FUN_0015e380(base, k) = base + ((k * 0x95675) & 0x1ff) * 0xc + 0x38
 pub fn fun_0015e380(base: u32, k: u32) -> u32 {

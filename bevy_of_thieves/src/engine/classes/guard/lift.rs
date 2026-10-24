@@ -116,6 +116,11 @@ impl C2d0420 {
     }
 }
 
+/// BOSS: ground probe span / step height of `k24_ground`
+pub const GROUND_UP: f32 = 50.0;
+pub const GROUND_DOWN: f32 = 5000.0;
+pub const GROUND_STEP: f32 = 40.0;
+
 /// gravity of a guard PO (`*(+0xe8) + 0x80`; physics::driver::GRAVITY_Z, the default the game sets)
 pub const GRAVITY: [f32; 3] = [0.0, 0.0, crate::engine::physics::driver::GRAVITY_Z];
 
@@ -132,6 +137,27 @@ pub struct GuardPo {
 }
 
 impl super::c56::Guard {
+    /// BOSS: ground contact (+0x208) of the guard's SO: the surface under the body (FUN_00173610 from +GROUND_UP
+    /// down to -GROUND_DOWN). Walking (no PO): steps within GROUND_STEP follow the surface; a larger drop
+    /// (warped / walked off a ledge) starts the PO free fall (vel 0, ALO gravity) that lands on that surface.
+    /// POOL1 R67: `moved` = the body's x/y changed this frame. A guard standing still (staggered / knocked out:
+    /// SO velocity 0) keeps its height like the original's resting SO; re-snapping it to the FUN_00173610 hit
+    /// (whose rounding depends on the probe start height) drifted z by ~3e-5 per frame.
+    pub fn k24_ground(&mut self, h: &mut dyn super::super::ClassHost, moved: bool) -> Option<f32> {
+        let p = self.body.pos;
+        let z = h.k21_ground_173610(GROUND_UP, -GROUND_DOWN, p).map(|q| q[2])?;
+        if self.po.is_none() && self.f_138.is_empty() {
+            if (z - p[2]).abs() <= GROUND_STEP {
+                if !moved {
+                    return Some(z);
+                }
+                self.body.pos[2] = z;
+            } else if z < p[2] {
+                self.k24_set_vel([0.0; 3]);
+            }
+        }
+        Some(z)
+    }
     /// K24: guard fields the 0xb0 component wrote (FUN_0017a8c8 +0x32c, FUN_00209970 bits)
     pub fn k24_sync(&mut self) {
         if let Some(b) = self.brain.b0.as_mut() {
@@ -228,7 +254,7 @@ impl super::c56::Guard {
     /// one frame of the PO (after the guard's slot 15). K27: the E8 xfLin path of FUN_001f3980 on a kind-2
     /// (PO) `AloPhys`: accel reset, slot 69 = ALO gravity FUN_001f9b20 + the accumulated FUN_001fac30
     /// accelerations, FUN_0022de88 integration. The ground landing stays REPLACED (see `GuardPo`).
-    pub fn k24_po_step(&mut self, dt: f32) {
+    pub fn k24_po_step(&mut self, dt: f32, ground: Option<f32>) {
         use crate::engine::physics::driver::{AloPhys, FUN_001f9b20, FUN_001fac30, FUN_0022de88};
         let held = !self.f_138.is_empty();
         let Some(p) = self.po.as_mut() else { return };
@@ -240,6 +266,9 @@ impl super::c56::Guard {
         p.vel = b.v;
         self.body.pos = b.pos;
         p.acc = [0.0; 3];
+        if let Some(z) = ground {
+            p.ground_z = z;
+        }
         if !held && self.body.pos[2] <= p.ground_z && p.vel[2] <= 0.0 {
             self.body.pos[2] = p.ground_z;
             self.po = None;

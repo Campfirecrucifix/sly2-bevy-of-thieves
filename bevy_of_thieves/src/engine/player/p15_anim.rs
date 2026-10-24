@@ -66,6 +66,8 @@ pub fn jt_blends_drive(an: &mut JtAnimator, jt: &super::Jt) {
                 b.ee_sub_1384c0(std::slice::from_mut(t));
             }
         }
+        // FEEL: 0x18b7e8 case 0xc: FUN_0020bb58(joy +0x1c, jt+0x1c30) walk blend weights
+        (crate::engine::playerdraw::FIELD_RUN2, 0xc) => b.ee_sub_20bb58(jt.joy.mag, std::slice::from_mut(t)),
         (FIELD_ATT_HIDE, 7) => b.ee_sub_20bb58(jt.att.hide_blend.w[1], std::slice::from_mut(t)),
         (FIELD_ATT_ROPE, 7) => b.ee_sub_20bb58(jt.att.rope_blend.w[1], std::slice::from_mut(t)),
         (crate::engine::playerdraw::FIELD_RUN2, 7) => b.ee_sub_20bb58(jt.att.gadget_blend.w[1], std::slice::from_mut(t)),

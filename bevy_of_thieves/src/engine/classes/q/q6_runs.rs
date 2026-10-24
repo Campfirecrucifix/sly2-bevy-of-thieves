@@ -38,7 +38,7 @@ pub fn ee_sub_131270<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
 /// FUN_0012f8c0: thunk JtAnimator_request(p[0], p[1], a0, 0, p[2], 0)
 pub fn ee_sub_12f8c0<M: QMem + ?Sized>(m: &mut M, a0: u32, p: u32) {
     let (x, y, z) = (m.r32(p), m.r32(p + 4), m.r32(p + 8));
-    m.call(0x0012_f9b8, &[x, y, a0, 0, z, 0], &[]);
+    m.call(0x0012_f9b8, &[a0, 0, z, 0], &[super::q5util::f4(f32::from_bits(x)), super::q5util::f4(f32::from_bits(y))]);
 }
 
 // ---------------------------------------------------------------- run_00163430
@@ -262,7 +262,7 @@ pub fn ee_sub_1e6330<M: QMem + ?Sized>(m: &mut M, o: u32) {
 /// above); with +0xe4 set FUN_001e66c8()
 pub fn ee_sub_1e6728<M: QMem + ?Sized>(m: &mut M, t: f32, o: u32) -> f32 {
     if m.r32(o + 0xe4) != 0 {
-        return callf(m, 0x001e_66c8, &[], &[]);
+        return callf(m, 0x001e_66c8, &[o], &[s(t)]); // asm: a0 = o and $f12 = t passed through untouched
     }
     let lo = callf(m, 0x001e_6620, &[o], &[]);
     let hi = callf(m, 0x001e_6648, &[o], &[]);
@@ -518,7 +518,7 @@ pub fn ee_sub_178cd8<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32) {
         m.w32(o + 0x50, t);
     }
 }
-/// FUN_00178d90: start following track `tr`: +0x38 = dir, +0x30 = tr; from the owner (+0x10) position:
+/// FUN_00178d90 (PART-R5: a1 = pos qword slot, was missing): start following track `tr`: +0x38 = dir, +0x30 = tr; from the owner (+0x10) position:
 /// with +0x48 >= 0 track_1e7380(tr, pos, 0x3dd020, 0, 0, 0, this + 0x34) and +0x48 = -1, else
 /// track_1e6f60(tr, pos, 0x3dd020, 0, 0, 0, this + 0x34); an open track (+0xe4 == 0) sets +0x3c = 1, end
 /// +0x44 = dir ? FUN_001e6620 : FUN_001e6648, FUN_001e6f10(end); closed: +0x3c = 0
@@ -528,10 +528,10 @@ pub fn ee_sub_178d90<M: QMem + ?Sized>(m: &mut M, o: u32, tr: u32, dir: u32) {
     let ow = m.r32(o + 0x10);
     let p = m.call(0x001a_62e8, &[ow], &[]).1;
     if 0.0 <= m.rf(o + 0x48) {
-        m.call(0x001e_7380, &[tr, 0x003d_d020, 0, 0, 0, o + 0x34], &[p]);
+        m.call(0x001e_7380, &[tr, 0, 0x003d_d020, 0, 0, 0, o + 0x34], &[p]);
         m.wf(o + 0x48, -1.0);
     } else {
-        m.call(0x001e_6f60, &[tr, 0x003d_d020, 0, 0, 0, o + 0x34], &[p]);
+        m.call(0x001e_6f60, &[tr, 0, 0x003d_d020, 0, 0, 0, o + 0x34], &[p]);
     }
     if m.r32(tr + 0xe4) == 0 {
         m.w32(o + 0x3c, 1);
@@ -788,7 +788,7 @@ pub fn ee_sub_1f08d0<M: QMem + ?Sized>(m: &mut M, o: u32) {
     }
     m.w32(o + 0x30, 0);
     let k = if m.rf(c + 0x40) < 0.0 { 0 } else { 2 };
-    m.call(0x0013_0d30, &[c, k], &[]);
+    { let f40 = m.rf(c + 0x40); m.call(0x0013_0d30, &[c, k], &[super::q5util::f4(0.0), super::q5util::f4(f40)]); }
     m.call(0x0013_0b18, &[c], &[]);
     m.call(0x001f_0fa0, &[o], &[]);
 }
@@ -994,10 +994,10 @@ pub fn ee_sub_170be0<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32) {
 pub fn ee_sub_170c00<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32) {
     cmd(m, l, 4, a);
 }
-/// FUN_00170c20: kind 5 node on list `l` (second argument!), +8 = v
-pub fn ee_sub_170c20<M: QMem + ?Sized>(m: &mut M, v: u32, l: u32) {
+/// FUN_00170c20: kind 5 node on list `l` (a0), +8 = v ($f12) - VER5: ABI per asm
+pub fn ee_sub_170c20<M: QMem + ?Sized>(m: &mut M, l: u32, v: f32) {
     let n = cmd(m, l, 5, u32::MAX);
-    m.w32(n + 8, v);
+    m.wf(n + 8, v);
 }
 /// FUN_00170c50: kind 6 node (arg), +8 = b, +0xc = c
 pub fn ee_sub_170c50<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32, b: u32, c: u32) {
@@ -1005,11 +1005,11 @@ pub fn ee_sub_170c50<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32, b: u32, c: u32
     m.w32(n + 0xc, c);
     m.w32(n + 8, b);
 }
-/// FUN_00170c90: kind 7 node on list `l` (second argument), +0x10 = c, +0x14 = v (first argument)
-pub fn ee_sub_170c90<M: QMem + ?Sized>(m: &mut M, v: u32, l: u32, a: u32, c: u32) {
+/// FUN_00170c90: kind 7 node on list `l` (a0, arg a1), +0x10 = c (a2), +0x14 = v ($f12) - VER5: ABI per asm
+pub fn ee_sub_170c90<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32, c: u32, v: f32) {
     let n = cmd(m, l, 7, a);
     m.w32(n + 0x10, c);
-    m.w32(n + 0x14, v);
+    m.wf(n + 0x14, v);
 }
 /// FUN_00170cd0: kind 8 node (arg)
 pub fn ee_sub_170cd0<M: QMem + ?Sized>(m: &mut M, l: u32, a: u32) {
@@ -1427,7 +1427,7 @@ pub fn ee_sub_218710<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
 /// FUN_00218738: slot 0 +0x10
 pub fn ee_sub_218738<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
     let b = m.r32(o + 8);
-    m.r32(b + 0x10)
+    m.r32(b.wrapping_add(0x10))
 }
 
 // ---------------------------------------------------------------- run_00258898 / run_00259330 (variant field
@@ -1437,7 +1437,7 @@ pub fn ee_sub_218738<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
 /// variant 0 / 1 block: with `force` 1 and the record unset, select variant `v` and copy its 0x40-byte
 /// template (0x2bde10 / 0x2bde70) into +0xc0 (FUN_00258898 / FUN_00258920 / FUN_00259330 / FUN_002593b8)
 fn variant<M: QMem + ?Sized>(m: &mut M, rec_fn: u32, o: u32, force: u32, v: u32) -> u32 {
-    let r = m.call(rec_fn, &[o], &[]).0;
+    let r = m.call(rec_fn, &[o, force], &[]).0; // a1 (force) is still live into FUN_00258658(o, n)
     if force == 1 && m.r32(r + 4) == u32::MAX {
         m.w32(r + 4, v);
         let tpl = if v == 0 { 0x002b_de10 } else { 0x002b_de70 };
@@ -2721,9 +2721,11 @@ pub fn ee_sub_1cfd30<M: QMem + ?Sized>(m: &mut M, o: u32) {
     let t = m.rf(o + 0x18);
     m.call(0x0023_09e8, &[a, 0, sp, 0], &[s(t)]);
     let t = m.rf(o + 0x18);
-    let (k1, k2) = (1.0 / t, t * -0.5);
+    let (k1, k2) = (crate::engine::math::ps2f::ps2_div(1.0, t), crate::engine::math::ps2f::ps2_mul(t, -0.5));
     let (q, b, v) = (m.rv(sp + 0x30), m.rv(o + 0x70), m.rv(o + 0xa0));
-    let r: V4 = std::array::from_fn(|i| (q[i] - b[i]) * k1 + v[i] * k2);
+    // VU0: vsub / vmulabc / vmaddbc, each result saturated (no inf / NaN on the VU)
+    use crate::engine::math::vu0::fix;
+    let r: V4 = std::array::from_fn(|i| fix(fix(fix(q[i] - b[i]) * k1) + fix(v[i] * k2)));
     m.wv(o + 0x90, r);
     m.call(0x0011_bc00, &[sp + 0x80, sp, o + 0x40], &[]);
     for k in 0..3 {
@@ -3136,7 +3138,7 @@ pub fn ee_sub_1c3a88<M: QMem + ?Sized>(m: &mut M, o: u32, pos: u32, dir: u32, t:
 pub fn ee_sub_1c3bb0<M: QMem + ?Sized>(m: &mut M, o: u32, out: u32) -> u32 {
     let b = m.r32(o + 0xe4) != 0;
     if b {
-        let a = m.call(0x001e_6620, &[o], &[]).0;
+        let a = m.call(0x001e_6620, &[o], &[]).1[0].to_bits();
         m.w32(out, a);
         let a = m.call(0x001e_6648, &[o], &[]).0;
         m.w32(out + 4, a);
@@ -3773,8 +3775,9 @@ pub fn ee_sub_18d620<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
     }
 }
 /// FUN_0018de80 (C2d2e98_v95): base C2cb230_v95 (FUN_00143220); states 0, 1, 5, 10, 12 -> *out = 1
-pub fn ee_sub_18de80<M: QMem + ?Sized>(m: &mut M, o: u32, out: u32) {
-    m.call(0x0014_3220, &[o, out], &[]);
+pub fn ee_sub_18de80<M: QMem + ?Sized>(m: &mut M, o: u32, out: u32, f12: f32) {
+    // PART r16 ABI: $f12 is passed through untouched to FUN_00143220 (asm 0x18de94)
+    m.call(0x0014_3220, &[o, out], &[s(f12)]);
     if matches!(m.r32(o + 0x18c8), 0 | 1 | 5 | 10 | 0xc) {
         m.w32(out, 1);
     }
@@ -4066,6 +4069,9 @@ fn at_origin<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
 /// FUN_001fb0c0 (C2d9c70_v6): k = 0x1f1 (0x1f3 while playing, +0x4e > 0), | 0x200 unless at the origin;
 /// FUN_001fb658(this, k, k)
 pub fn ee_sub_1fb0c0<M: QMem + ?Sized>(m: &mut M, o: u32) {
+    if !idle(m, o) {
+        return; // VER4: asm 0x1fb0e0..0x1fb110 gate
+    }
     let mut k = if 0 < m.r16(o + 0x4e) as i16 { 0x1f3 } else { 0x1f1 };
     if !at_origin(m, o) {
         k |= 0x200;
@@ -4436,7 +4442,7 @@ pub fn ee_sub_11c3d0<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32, out: u32) {
 /// f = (n + fr) / (n - fr): [10] = f, [14] = n * (1 - f)
 pub fn ee_sub_11c448<M: QMem + ?Sized>(m: &mut M, out: u32, sx: f32, sy: f32, cx: f32, cy: f32, n: f32, fr: f32) {
     m.call(0x0023_33b4, &[out, 0, 0x40], &[]);
-    let f = (n + fr) / (n - fr);
+    let f = crate::engine::math::ps2f::ps2_div(n + fr, n - fr); // PS2 div.s
     m.wf(out, sx);
     m.wf(out + 0x2c, 1.0);
     m.wf(out + 0x20, cx);
@@ -4560,15 +4566,16 @@ pub fn ee_sub_155530<M: QMem + ?Sized>(m: &mut M, o: u32, a: u32, b: u32, c: u32
     m.w32(p + 0x10, c);
 }
 /// FUN_0012fde8: +0xb0 = new {a, b, c} (FUN_001ae1d0 {0xc, 0x10})
-pub fn ee_sub_12fde8<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32, o: u32, c: u32) {
+/// VER5: ABI per asm: o = a0, c = a1, a = $f12, b = $f13
+pub fn ee_sub_12fde8<M: QMem + ?Sized>(m: &mut M, o: u32, c: u32, a: f32, b: f32) {
     let sp = stack_push(m, 0x10);
     m.w32(sp, 0xc);
     m.w32(sp + 4, 0x10);
     let p = m.call(0x001a_e1d0, &[sp], &[]).0;
     m.w32(o + 0xb0, p);
     m.w32(p + 8, c);
-    m.w32(p, a);
-    m.w32(p + 4, b);
+    m.wf(p, a);
+    m.wf(p + 4, b);
     stack_pop(m, 0x10);
 }
 /// FUN_00130010: *obj = FUN_0015e938(world, owner ? 1 : 4, rec[1], owner ? owner : ctx); *out = obj ?
@@ -4721,10 +4728,11 @@ pub fn ee_sub_19a4a0<M: QMem + ?Sized>(
 }
 /// FUN_0019aa58 (cost callback): FUN_00193a68(p[0], p[2], &from, &v); FUN_0019a4a0(p[1], p+0x10, p[2],
 /// from, v, cost); returns the cost
-pub fn ee_sub_19aa58<M: QMem + ?Sized>(m: &mut M, p: u32) -> f32 {
+pub fn ee_sub_19aa58<M: QMem + ?Sized>(m: &mut M, p: u32, f12: f32) -> f32 {
     let sp = stack_push(m, 0x30);
     let (a, c) = (m.r32(p), m.r32(p + 8));
-    m.call(0x0019_3a68, &[a, c, sp, sp + 0x10], &[]);
+    // PART r16 ABI: the callback's $f12 reaches FUN_00193a68 untouched (asm 0x19aa74)
+    m.call(0x0019_3a68, &[a, c, sp, sp + 0x10], &[s(f12)]);
     let (o, to, f, v) = (m.r32(p + 4), m.rv(p + 0x10), m.rv(sp), m.rv(sp + 0x10));
     ee_sub_19a4a0(m, o, to, c, f, v, 0, sp + 0x20, 0, 0);
     let r = m.rf(sp + 0x20);
@@ -4764,10 +4772,11 @@ pub fn ee_sub_19abb8<M: QMem + ?Sized>(m: &mut M, f: f32, p: u32) -> f32 {
 }
 /// FUN_0019abf0: FUN_001e6f10(p[1], &m, 0); ctx = {p[0], p[1], FUN_001a6f00(0, p[1], m)}; FUN_0011d9e0(
 /// FUN_0019abb8, &ctx, 0, &r, 0.5, 0.25, 0.25, 3.0); returns r
-pub fn ee_sub_19abf0<M: QMem + ?Sized>(m: &mut M, p: u32) -> f32 {
+pub fn ee_sub_19abf0<M: QMem + ?Sized>(m: &mut M, p: u32, f12: f32) -> f32 {
     let sp = stack_push(m, 0x40);
     let x = m.r32(p + 4);
-    m.call(0x001e_6f10, &[x, sp, 0], &[]);
+    // PART r16 ABI: the callback's $f12 reaches FUN_001e6f10 untouched (asm 0x19ac10)
+    m.call(0x001e_6f10, &[x, sp, 0], &[s(f12)]);
     let a = m.r32(p);
     let q = m.rv(sp);
     m.w32(sp + 0x14, x);
@@ -4862,7 +4871,7 @@ pub fn ee_sub_15bfd8<M: QMem + ?Sized>(m: &mut M, out: u32, p: u32) -> u32 {
     if rate != 0.0 {
         let ax = m.rv(p + 0x10);
         let dt = m.rf(0x002d_ded4);
-        m.call(0x0011_b500, &[sp + 0x80], &[s(rate * dt), ax]);
+        m.call(0x0011_b500, &[sp + 0x80], &[ax, s(rate * dt)]);
         for i in 0..3 {
             let q = m.rv(sp + 0x80 + 0x10 * i);
             m.wv(sp + 0x40 + 0x10 * i, q);
@@ -5251,10 +5260,22 @@ pub fn ee_sub_205008<M: QMem + ?Sized>(m: &mut M, o: u32, fl: u32, a2: u32, from
 /// (FUN_001f49c8); else M = vslot +0xfc(x): vslot +0xec(this, M * -(+0x240) (xyz, w row 3)), vslot +0xf4(this,
 /// M); skill 0x34 -> +0x1060 = M row 3 + w1 + DAT_002a2dc0 * +0x1048; vslot +0x11c / +0x124(this,
 /// DAT_002a2dd0); +0x208 = 0
+thread_local! {
+    /// CRAWL R107: (object, target) guest addresses of this thread's slot-37 MoveToObject calls, for the port's
+    /// run-time owners of the PO bodies (`player::p22::apply_po_placements`, drained by `game::app::tick_scripts`)
+    pub static PO_MOVES: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub fn ee_sub_2052e0<M: QMem + ?Sized>(m: &mut M, o: u32, x: u32) {
     if x == 0 {
         return;
     }
+    PO_MOVES.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() < 64 {
+            v.push((o, x));
+        }
+    });
     if m.call(0x0013_2b10, &[x, 3], &[]).0 == 0 {
         m.call(0x001f_49c8, &[o, x], &[]);
         return;
@@ -5351,7 +5372,7 @@ pub fn ee_sub_1d2490<M: QMem + ?Sized>(m: &mut M, o: u32) {
     let sp = stack_push(m, 0x30);
     let pos = m.call(0x001a_62e8, &[o], &[]).1;
     let (t, f) = (m.r32(o + 0x5ac), m.rf(o + 0x5b0));
-    m.call(0x001e_7380, &[t, 0, sp, sp + 0x10, 0, o + 0x5b0], &[pos, s(f)]);
+    m.call(0x001e_7380, &[t, 0, 0, sp, sp + 0x10, 0, o + 0x5b0], &[pos, s(f)]);
     let (pt, dir) = (m.rv(sp), m.rv(sp + 0x10));
     let d = dxy(pos, pt);
     let mut k = m.rf(0x002c_20d0) + d * (m.rf(0x002c_20d4) + d * m.rf(0x002c_20d8));
@@ -6180,8 +6201,8 @@ pub fn ee_sub_1bb400<M: QMem + ?Sized>(m: &mut M, o: u32) {
     }
     let base = m.r32(o + 0x164);
     let cur = base.wrapping_add(m.r32(o + 0x15c) << 4);
-    ee_sub_1bb648(m, o, base.wrapping_sub(0x10));
-    ee_sub_1bb648(m, o, cur);
+    m.call(0x001b_b648, &[o, base.wrapping_sub(0x10)], &[]);
+    m.call(0x001b_b648, &[o, cur], &[]);
     let t = m.r32(o + 0x16c);
     let quiet = t != 0
         && m.call(0x0013_2b10, &[t, 0x38], &[]).0 != 0
@@ -6492,7 +6513,9 @@ pub fn ee_sub_1300b8<M: QMem + ?Sized>(m: &mut M, an: u32, a1: u32, from: u32, t
         }
     };
     let mut b = from;
-    while b != to {
+    // ANIM-ALL R16: the walk ends at `to` (an ancestor via +0xa0); a chain that runs out (b == 0: the guest
+    // image misses a link the original's load sets) stops there instead of spinning on address 0
+    while b != to && b != 0 {
         let n = m.r32(an + 0x5c) as i32;
         let mut hit = false;
         for i in 0..n.max(0) as u32 {

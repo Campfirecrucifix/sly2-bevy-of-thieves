@@ -134,14 +134,47 @@ pub struct LevelAnims {
 fn aseg_of(w: &World, i: usize) -> Option<&Aseg> {
     match &w.objects.get(i)?.payload {
         Payload::Loaded(LoadData::Aseg(a)) => Some(a),
+        // POOL1 r39: a FUN_001f66f0 clone child ASEG shares its source's data
+        Payload::Clone => aseg_of(w, w.objects[i].clone_of?),
         _ => None,
     }
+}
+
+/// ANIM-ALL R17: LevelAnims starts queued for `LiveQ::guest_anim_starts` (t, rate, aseg handle, obj handle, flags).
+static GUEST_STARTS: std::sync::Mutex<Vec<(usize, (f32, f32, u32, u32, u32))>> = std::sync::Mutex::new(Vec::new());
+
+/// The level ASEG starts are mirrored into the guest (`SLY2_GUEST_LEVEL_ANIMS=0` turns it off). ANIM-ALL R19: on by
+/// default; the R18 cellar overrun (>1e8 ops per no-target start) was the FUN_001f80d0 ABI bug, not the search.
+pub fn guest_level_anims() -> bool {
+    std::env::var("SLY2_GUEST_LEVEL_ANIMS").map_or(true, |v| v != "0")
+}
+
+/// Queue key of a level: its level bytes (shared by the World clones of the game / class / LiveQ sides;
+/// parallel test levels share the queue).
+pub fn world_key(w: &World) -> usize {
+    Arc::as_ptr(&w.level_data.0) as usize
+}
+
+/// The queued starts of the level `world_key`.
+pub fn take_guest_starts(world: usize) -> Vec<(f32, f32, u32, u32, u32)> {
+    let mut q = GUEST_STARTS.lock().unwrap();
+    let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.0 == world);
+    *q = rest;
+    mine.into_iter().map(|e| e.1).collect()
 }
 
 impl LevelAnims {
     /// FUN_0012f9b8 (play `obj` at speed `svt`, flags 0): a running ASEGA of that object restarts.
     pub fn play(&mut self, w: &World, obj: usize, svt: f32) -> bool {
         let Some(a) = aseg_of(w, obj) else { return false };
+        // ANIM-ALL R17: the same start in the guest image (FUN_0012f9b8(t 0, svt, aseg, no target, flags 0)), which
+        // links the ASEGA into world+0x3d88 for the guest pass; the native player below keeps the event effects
+        if guest_level_anims() {
+            let mut q = GUEST_STARTS.lock().unwrap();
+            if q.len() < 4096 {
+                q.push((world_key(w), (0.0, svt, obj as u32 + 1, 0, 0)));
+            }
+        }
         let state = Asega { svt, svt2: svt, real_clock: false, ..Default::default() };
         self.players.retain(|p| p.object != obj);
         self.players.push(LevelAnim { object: obj, aseg: Arc::new(a.clone()), state });

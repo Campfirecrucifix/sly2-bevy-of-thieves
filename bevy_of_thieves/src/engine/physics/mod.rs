@@ -14,6 +14,7 @@ pub mod island;
 pub mod motor;
 pub mod point;
 pub mod query;
+pub mod so_image;
 pub mod sphere;
 
 pub use query::CollisionWorld;

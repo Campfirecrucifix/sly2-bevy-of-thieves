@@ -5,6 +5,8 @@
 
 pub const HUD_W: f32 = 640.0;
 pub const HUD_H: f32 = 448.0;
+/// LOOK R14: text-space units across the 4:3 TV picture at the 448-line height (640 * 448/480 = 597.3 HUD units).
+pub const TEXT_TV_W: f32 = 480.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -94,9 +96,15 @@ impl HudLayout {
 
     /// WP-I2: map a box of FUN_0015f480 text space (640 x 492.8, the 512x224 GS field) into window pixels
     /// through `map_rect` (text y scaled by 448 / 492.8 so glyphs keep the PS2 aspect).
+    /// LOOK R14: x is scaled by 448/480 about the centre. FUN_0015f480 text space goes to the 512x224 GS field
+    /// (x * 0.8, y * 224/492.8) shown on a 4:3 TV, so one text unit is h/480 wide and h/492.8 tall there; the
+    /// old uniform h/448 x scale drew the HUD / menus 7% (448/480) horizontally stretched at every aspect.
     pub fn map_text_rect(&self, x0: f32, y0: f32, x1: f32, y1: f32, anchor: Anchor) -> Rect {
         let k = HUD_H / 492.80002;
-        self.map_rect(x0, y0 * k, x1 - x0, (y1 - y0) * k, anchor)
+        let kx = HUD_H / TEXT_TV_W;
+        let w = (x1 - x0) * kx;
+        let x0 = HUD_W * 0.5 + (x0 - HUD_W * 0.5) * kx;
+        self.map_rect(x0, y0 * k, w, (y1 - y0) * k, anchor)
     }
 
     /// Map a 640x492.8 projected point (FUN_001cd780 label space) into window pixels relative to the

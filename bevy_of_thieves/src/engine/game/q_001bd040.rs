@@ -472,9 +472,16 @@ pub fn ee_sub_1be378<M: QMem + ?Sized>(m: &mut M) {
 }
 
 /// FUN_001be990 / FUN_001be9e8: refresh projector 0x3e1a78 / 0x3e1aa0 (FUN_001be6f0) then FUN_0016e1a8
-pub fn ee_sub_1be990<M: QMem + ?Sized>(m: &mut M, projector: u32, a: u32, b: u32, c: u32) {
-    m.call(0x001b_e6f0, &[projector, a], &[]);
-    m.call(0x0016_e1a8, &[a, b, c], &[]);
+pub fn ee_sub_1be990<M: QMem + ?Sized>(m: &mut M, obj: u32, a: u32, b: u32) {
+    // VFIX3 1:1 per asm: FUN_001be6f0(&DAT_003e1a78, obj); FUN_0016e1a8(obj, a, b)
+    m.call(0x001b_e6f0, &[0x003e_1a78, obj], &[]);
+    m.call(0x0016_e1a8, &[obj, a, b], &[]);
+}
+
+/// FUN_001be9e8: same as FUN_001be990 with projector DAT_003e1aa0
+pub fn ee_sub_1be9e8<M: QMem + ?Sized>(m: &mut M, obj: u32, a: u32, b: u32) {
+    m.call(0x001b_e6f0, &[0x003e_1aa0, obj], &[]);
+    m.call(0x0016_e1a8, &[obj, a, b], &[]);
 }
 
 /// FUN_001bee10: projector `obj +0x128` (0x3e1a78 + 0x28k) -> table PTR_DAT_002c0bf8[k][i], else -1

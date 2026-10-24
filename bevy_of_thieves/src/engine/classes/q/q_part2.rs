@@ -35,7 +35,7 @@ pub fn ee_sub_1c6fd8<M: QMem + ?Sized>(m: &mut M, world: u32, kind: u32, pos: V4
 
 fn run_1c6fd8<M: QMem + ?Sized>(m: &mut M, sp: u32, world: u32, kind: u32, pos: V4, n: u32) {
     let k = m.rf(0x002a_775c);
-    if m.call(0x001c_6de8, &[0, 0, sp], &[f4(0.0), f4(300.0), f4(k), pos]).0 == 0 {
+    if m.call(0x001c_6de8, &[0, 0, sp], &[pos, f4(0.0), f4(300.0), f4(k)]).0 == 0 {
         return;
     }
     let s0 = m.call(0x001c_4840, &[world], &[]).0;
@@ -65,7 +65,7 @@ fn run_1c6fd8<M: QMem + ?Sized>(m: &mut M, sp: u32, world: u32, kind: u32, pos: 
     if (d[0] * d[0] + d[1] * d[1]).sqrt() > m.rf(0x002c_0e80) {
         return;
     }
-    if m.call(0x001c_6de8, &[0, 0, sp + 0x10], &[f4(-250.0), f4(1500.0), f4(k), p]).0 == 0 {
+    if m.call(0x001c_6de8, &[0, 0, sp + 0x10], &[p, f4(-250.0), f4(1500.0), f4(k)]).0 == 0 {
         return;
     }
     m.call(0x001a_e478, &[sp + 0x20], &[]);
@@ -119,7 +119,7 @@ fn place_1c6fd8<M: QMem + ?Sized>(m: &mut M, sp: u32, sw: u32, buf: u32, cnt: i3
         let clear = m.call(0x001c_0980, &[sw, 0], &[v5, tgt]).0 == 0 && m.call(0x001c_0980, &[sw, 0], &[tgt, v5]).0 == 0;
         if clear {
             let (a1, a2) = (m.r32(sp + 0x70), m.r32(sp + 0x74));
-            if m.call(0x001c_6de8, &[a1, a2, sp + 0x50], &[f4(-300.0), f4(300.0), f4(0.7), v5]).0 != 0 {
+            if m.call(0x001c_6de8, &[a1, a2, sp + 0x50], &[v5, f4(-300.0), f4(300.0), f4(0.7)]).0 != 0 {
                 let obj = m.r32(ptr);
                 let lift = m.rf(obj + 0x1d8) - 1.0;
                 let hit = madd1(m.rv(sp + 0x50), upu, lift);
@@ -404,9 +404,9 @@ fn run_1d3450<M: QMem + ?Sized>(m: &mut M, sp: u32, obj: u32, prm: u32, mesh: u3
 
 /// virtual call through the vtable at obj+0xc: this-adjust (lh vt+off), fn (lw vt+off+4)
 fn vcall<M: QMem + ?Sized>(m: &mut M, obj: u32, off: u32, a: &[u32], v: &[V4]) -> (u32, V4) {
-    let vt = m.r32(obj + 0xc);
-    let adj = m.r16(vt + off) as i16 as i32;
-    let f = m.r32(vt + off + 4);
+    let vt = m.r32(obj.wrapping_add(0xc));
+    let adj = m.r16(vt.wrapping_add(off)) as i16 as i32;
+    let f = m.r32(vt.wrapping_add(off).wrapping_add(4));
     let mut args = vec![(obj as i32 + adj) as u32];
     args.extend_from_slice(a);
     m.call(f, &args, v)
@@ -446,7 +446,7 @@ fn run_21f418<M: QMem + ?Sized>(m: &mut M, sp: u32, p: u32) -> bool {
                 let v = m.rv(p + 0x110);
                 m.wv(p + 0xe0, v);
             } else {
-                let t = (f4_ - f3) / (f2 - f3);
+                let t = crate::engine::math::ps2f::ps2_div(f4_ - f3, f2 - f3);
                 let (a, b) = (m.rv(p + 0x100), m.rv(p + 0x110));
                 m.wv(p + 0xe0, add(scale(a, 1.0 - t), scale(b, t)));
             }
@@ -492,7 +492,7 @@ fn run_21f418<M: QMem + ?Sized>(m: &mut M, sp: u32, p: u32) -> bool {
                 } else if a < -lim {
                     m.call(0x0022_06c8, &[p, 1], &[]);
                 } else {
-                    let t = a / lim * 0.5 + 0.5;
+                    let t = crate::engine::math::ps2f::ps2_div(a, lim) * 0.5 + 0.5;
                     m.wf(p + 0x4c, t);
                     m.wf(p + 0x40, 1.0 - t);
                     let an = m.r32(p + 0x58);
@@ -777,14 +777,12 @@ pub fn ee_sub_221818<M: QMem + ?Sized>(m: &mut M, o: u32, key: u32) {
         for i in 0..n.max(0) as u32 {
             let e = arr + i * 0x90;
             if m.r32(e) == key {
-                m.w32(o + 0x118, e);
-                let cur = m.r32(o + 0x118);
-                m.w32(cur, key);
+                m.w32(o + 0x118, e); // found: no key store (asm b 0x22192c)
                 return;
             }
         }
         if m.r32(o + 0x11c) != 0 {
-            m.w32(o + 0x118, arr);
+            m.w32(o + 0x118, arr); // pinned: no key store
         } else {
             let e = arr + n as u32 * 0x90;
             m.w32(o + 0x110, (n + 1) as u32);
@@ -794,10 +792,10 @@ pub fn ee_sub_221818<M: QMem + ?Sized>(m: &mut M, o: u32, key: u32) {
                 let v = m.rv(src + j * 0x10);
                 m.wv(e + j * 0x10, v);
             }
+            let cur = m.r32(o + 0x118);
+            m.w32(cur, key);
         }
     }
-    let cur = m.r32(o + 0x118);
-    m.w32(cur, key);
 }
 
 /// FUN_00221a18(o, tgt, track): CplcyFollow activate: FUN_0014fcc8 base, pick the track-params entry
@@ -1281,13 +1279,13 @@ pub fn ee_sub_22faa0<M: QMem + ?Sized>(m: &mut M, o: u32) {
         let first = m.r32(o + 0x54);
         let last = first.wrapping_add((n as u32) << 8).wrapping_sub(0x100);
         let p = m.r32(first + 0xa0);
-        let mut par = m.rm(if p != 0 { p + 0x40 } else { 0x002a_2d30 });
+        let mut par = m.rm(if p != 0 { p.wrapping_add(0x40) } else { 0x002a_2d30 });
         let mut b = first;
         while b <= last {
             let w = vu_mul60(par, m.rm(b));
             let p = m.r32(b + 0xa0);
             if p != 0 {
-                let pa = m.r32(p + 0xa4) as i32;
+                let pa = m.r32(p.wrapping_add(0xa4)) as i32;
                 if (m.r32(b + 0xa4) as i32) < pa {
                     m.w32(b + 0xa4, pa as u32);
                 }
@@ -1295,7 +1293,7 @@ pub fn ee_sub_22faa0<M: QMem + ?Sized>(m: &mut M, o: u32) {
             m.wm(b + 0x40, w);
             if b < last {
                 let np = m.r32(b + 0x1a0);
-                par = if np == b { w } else { m.rm(np + 0x40) };
+                par = if np == b { w } else { m.rm(np.wrapping_add(0x40)) };
             }
             b += 0x100;
         }
@@ -1336,7 +1334,9 @@ pub fn ee_sub_1f21b8<M: QMem + ?Sized>(m: &mut M, o: u32, par: u32, bone: u32, f
         m.wv(sp + 0x80, v);
     }
     let t = m.r32(o + 0x10);
-    let (cnt, base) = if t != 0 { (m.r32(t + 0x50) as i32, m.r32(t + 0x54)) } else { (1, 0) };
+    // BOSS R24: the image's top-level objects carry +0x10 = the world (0x3dd490) where the original has 0
+    // (rec11: dispensers / barrel copies +0x10 = 0): no owner bones then
+    let (cnt, base) = if t != 0 && t != super::live::WORLD { (m.r32(t + 0x50) as i32, m.r32(t + 0x54)) } else { (1, 0) };
     let np = if bone != 0 {
         bone
     } else if par != 0 {
@@ -1828,7 +1828,7 @@ pub fn ee_sub_136530<M: QMem + ?Sized>(m: &mut M, o: u32, mode: u32) {
             stack_pop(m, 0xd0);
             return;
         }
-        1 => m.w32(o + 0x1a4, 1),
+        1 => m.w32(o + 0x1a4, u32::MAX), // PART r17: asm 0x136620 beq delay slot li v0, -1
         _ => {}
     }
     m.call(0x001f_15b8, &[o + 0x1034], &[]);
@@ -1960,8 +1960,8 @@ pub fn ee_sub_1375d0<M: QMem + ?Sized>(m: &mut M, s0: u32, mode: u32) {
         ];
         vcall(m, actor, 0x118, &[], &[w]);
         m.wv(actor + 0x190, scale(r, -1.0));
+        m.w32(s0 + 0xc, mode); // VER3: only modes 0 / 1 store +0xc (asm 0x137738; others branch to 0x137740)
     }
-    m.w32(s0 + 0xc, mode);
     m.call(0x001f_15b8, &[actor + 0x1034], &[]);
     let a = m.r32(s0);
     m.call(0x0013_05b8, &[s2, a, 1, a + 0x1030], &[f4(0.0), f4(1.0)]);
@@ -3245,7 +3245,7 @@ pub fn ee_sub_1477d8<M: QMem + ?Sized>(m: &mut M, o: u32) {
     m.call(0x0015_74b8, &[G], &[]);
     m.call(0x0016_6bd8, &[G, 0, 1, 0xe], &[]);
     let reg = |m: &mut M, r: u32, v: u64| {
-        m.call(0x0016_6e90, &[G, r, v as u32, (v >> 32) as u32], &[]);
+        crate::engine::game::q_00166008::ee_sub_166e90(m, G, r as u64, v); // VER3: full 64-bit data
     };
     reg(m, 0x47, 0x31001);
     let tex = ((m.r64(0x002d_ece0) & 0x1ff) << 5) | (((m.r64(0x002d_ecd0) & 0xffff_ffff) >> 16 & 0x3f) << 14) | 0x6_a800_0000;
@@ -3280,10 +3280,10 @@ pub fn ee_sub_1477d8<M: QMem + ?Sized>(m: &mut M, o: u32) {
                 let v = m.call(0x0011_c1a8, &[0x002b_d410], &[v]).1;
                 m.wv(tmp, v);
                 m.call(0x0011_d9d8, &[tmp], &[]);
-                let w = 1.0 / v[3];
+                let w = crate::engine::math::ps2f::ps2_div(1.0, v[3]); // DIV.S: x/0 = max float
                 m.wf(sp + 0xc0, w);
                 m.wv(sp + 0x90, [w, 0.0, 0.0, 0.0]);
-                m.wv(tmp, scale(v, w));
+                m.wv(tmp, v.map(|e| crate::engine::math::ps2f::ps2_mul(e, w)));
                 m.call(0x0011_d9d8, &[sp + 0xc0], &[]);
                 m.call(0x0011_d9d8, &[tmp], &[]);
                 let x = (m.rf(tmp) + 0.5) * 512.0 + 0.5;
@@ -3291,8 +3291,8 @@ pub fn ee_sub_1477d8<M: QMem + ?Sized>(m: &mut M, o: u32) {
                 m.wf(tmp, x);
                 m.wf(tmp + 4, y);
                 m.call(0x0011_d9d8, &[tmp], &[]);
-                let s = w * (m.rf(0x002b_d3f0 + 8 * j) + m.rf(0x002b_d398 + 8 * side));
-                let t = w * (m.rf(0x002b_d3f4 + 8 * j) + m.rf(0x002b_d39c + 8 * side));
+                let s = crate::engine::math::ps2f::ps2_mul(w, m.rf(0x002b_d3f0 + 8 * j) + m.rf(0x002b_d398 + 8 * side));
+                let t = crate::engine::math::ps2f::ps2_mul(w, m.rf(0x002b_d3f4 + 8 * j) + m.rf(0x002b_d39c + 8 * side));
                 m.call(0x0016_6d38, &[G], &[f4(s), f4(t), f4(w)]);
                 m.call(0x0016_6c70, &[G, 0x8080_8080], &[]);
                 let (xi, yi) = (x as i32, y as i32);

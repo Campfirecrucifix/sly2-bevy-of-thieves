@@ -174,6 +174,13 @@ pub fn scan_thunk(img: &Image, start: u32) -> ThunkScan {
 /// The vtable a class ctor installs: the LAST constant stored to `+0xc` of any register before its `jr`
 /// (many ctors store the base vtable 0x2d9978 first and then the real subclass vtable). 0 = none.
 pub fn ctor_vtable(img: &Image, ctor: u32) -> u32 {
+    ctor_vtable_d(img, ctor, 1)
+}
+
+/// ANIM-ALL R16: a ctor that stores no vtable itself (FUN_001116d8 (JT): `FUN_002563e8(FUN_001ae4f8(0x2060))`)
+/// installs the one of its last `jal` callee that does (0x2d2e98); `depth` bounds that descent.
+fn ctor_vtable_d(img: &Image, ctor: u32, depth: u32) -> u32 {
+    let mut jals: Vec<u32> = Vec::new();
     let mut r: [Option<u32>; 32] = [None; 32];
     r[0] = Some(0);
     let mut found = 0;
@@ -195,7 +202,7 @@ pub fn ctor_vtable(img: &Image, ctor: u32) -> u32 {
             0x09 | 0x19 => r[rt] = r[rs].map(|v| (v as i64 + sx(imm)) as u32),
             0x0d => r[rt] = r[rs].map(|v| v | imm),
             0x2b if imm == 0xc && rt != 0 && r[rt].is_some() => found = r[rt].unwrap(),
-            0x03 => {}
+            0x03 => jals.push((pc & 0xf000_0000) | (i & 0x03ff_ffff) << 2),
             0 if matches!(fu, 0x25 | 0x2d | 0x21) => {
                 r[rd] = match (r[rs], r[rt]) {
                     (Some(a), Some(b)) => Some(if fu == 0x25 { a | b } else { a.wrapping_add(b) }),
@@ -207,6 +214,9 @@ pub fn ctor_vtable(img: &Image, ctor: u32) -> u32 {
             _ => {}
         }
         pc += 4;
+    }
+    if found == 0 && depth > 0 {
+        found = jals.iter().rev().map(|&t| ctor_vtable_d(img, t, depth - 1)).find(|&v| v != 0).unwrap_or(0);
     }
     found
 }

@@ -15,11 +15,13 @@ pub fn ee_sub_17b1a8<M: QMem + ?Sized>(m: &mut M, obj: u32, new: u32) -> u32 {
     }
     let owner = m.r32(obj + 0x10);
     if old == 0xffff_ffff {
-        let f = { let p = m.r32(owner + 0xe8); let a = m.rf(p + 0xd0); let b = m.rf(0x002b_e6fc); a * b };
-        m.call(0x001f_35c8, &[], &[[f, 0.0, 0.0, 0.0]]);
+        // VFIX3 per asm: FUN_001f35c8(owner, f) (a0 = this +0x10, f12 = DAT_002be6fc * owner->e8 +0xd0)
+        let f = { let p = m.r32(owner + 0xe8); let a = m.rf(p + 0xd0); let b = m.rf(0x002b_e6fc); crate::engine::math::ps2f::ps2_mul(b, a) };
+        m.call(0x001f_35c8, &[owner], &[[f, 0.0, 0.0, 0.0]]);
     } else if old == 3 && new != 0xffff_ffff {
+        // VFIX3 per asm: FUN_00130d30(a0 = (+0x40)->8, a1 = 0, f12 = 0.0, f13 = 1.0)
         let t = rr(m, obj + 0x40, 8);
-        m.call(0x0013_0d30, &[0, 0x3f80_0000, t], &[]);
+        m.call(0x0013_0d30, &[t, 0], &[[0.0; 4], [1.0, 0.0, 0.0, 0.0]]);
     }
     let cur = m.r32(obj + 0x50);
     if cur < 2 && new >= 2 {
@@ -71,12 +73,12 @@ pub fn ee_sub_17b1a8<M: QMem + ?Sized>(m: &mut M, obj: u32, new: u32) -> u32 {
                     let dy = cp[1] - ow[1];
                     let dz = cp[2] - ow[2];
                     let dw = cp[3] - ow[3];
-                    // _DAT_002a2dc0 is the zero vector (VU0 accumulator init)
-                    // result = dir * scale + 0 * bias = dir * scale
-                    let rx = dx * scale;
-                    let ry = dy * scale;
-                    let rz = dz * scale;
-                    let rw = dw * scale;
+                    // VFIX3: vmulax + vmaddx: result = dir * scale + q DAT_002a2dc0 * bias
+                    let k = m.rv(0x002a_2dc0);
+                    let rx = dx * scale + k[0] * bias;
+                    let ry = dy * scale + k[1] * bias;
+                    let rz = dz * scale + k[2] * bias;
+                    let rw = dw * scale + k[3] * bias;
                     let ovt = m.r32(owner + 0xc);
                     let ofs = m.r16(ovt + 0x118) as i16 as i32 as u32;
                     let fp  = m.r32(ovt + 0x11c);
@@ -106,14 +108,15 @@ pub fn ee_sub_17b1a8<M: QMem + ?Sized>(m: &mut M, obj: u32, new: u32) -> u32 {
                 if aux != r {
                     return aux;
                 }
-                return m.call(0x0018_7e28, &[0x3e19_999a, 0x002d_fc00, 3], &[]).0;
+                return m.call(0x0018_7e28, &[0x002d_fc00, 3], &[[f32::from_bits(0x3e19_999a), 0.0, 0.0, 0.0]]).0; // PART r16 ABI: $f12 = 0.15
             }
             3 => {
                 let a1 = rr(m, obj + 0x40, 4);
                 let r = m.call(0x0012_f938, &[a1, 0x3c], &[]).0;
                 if r != 0 {
-                    let (a, t) = ({ let x = m.r32(r); x }, rr(m, obj + 0x40, 8));
-                    return m.call(0x0013_0d30, &[a, 0x3f80_0000, t, 0], &[]).0;
+                    // VFIX3 per asm: FUN_00130d30(a0 = (+0x40)->8, a1 = 0, f12 = *r, f13 = 1.0)
+                    let (a, t) = (m.rf(r), rr(m, obj + 0x40, 8));
+                    return m.call(0x0013_0d30, &[t, 0], &[[a, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]).0;
                 }
             }
             4 | 5 => {
@@ -123,13 +126,15 @@ pub fn ee_sub_17b1a8<M: QMem + ?Sized>(m: &mut M, obj: u32, new: u32) -> u32 {
                 let a1 = rr(m, obj + 0x40, 4);
                 let r = m.call(0x0012_f938, &[a1, 0x173], &[]).0;
                 if r != 0 {
-                    let (a, t) = ({ let x = m.r32(r); x }, rr(m, obj + 0x40, 8));
-                    m.call(0x0013_0d30, &[a, 0x3f80_0000, t, 0], &[]);
+                    let (a, t) = (m.rf(r), rr(m, obj + 0x40, 8));
+                    m.call(0x0013_0d30, &[t, 0], &[[a, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]);
                 }
             }
             -1 => {
-                let f = { let p = m.r32(owner + 0xe8); let a = m.rf(p + 0xd0); let b = m.rf(0x002b_e6fc); a / b };
-                m.call(0x001f_35c8, &[], &[[f, 0.0, 0.0, 0.0]]);
+                // VFIX3 per asm: owner re-read (lw a0, 0x10(s1)); div.s (PS2); FUN_001f35c8(owner, f)
+                let owner = m.r32(obj + 0x10);
+                let f = { let p = m.r32(owner + 0xe8); let a = m.rf(p + 0xd0); let b = m.rf(0x002b_e6fc); crate::engine::math::ps2f::ps2_div(a, b) };
+                m.call(0x001f_35c8, &[owner], &[[f, 0.0, 0.0, 0.0]]);
                 return m.call(0x0017_49c0, &[obj, 1], &[]).0;
             }
             _ => {}

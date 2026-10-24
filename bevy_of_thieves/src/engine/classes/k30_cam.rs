@@ -371,6 +371,8 @@ impl Cplcy for CplcyZoom {
         z.f_bc = cm.rad_fov_target;
         crate::engine::camera::cm::FUN_0014f610(cm, 49.0, clk);
         z.ee_sub_150ef0(cm);
+        // DAT_003e1be0 = clk (LOOK R36: K12 marker fade)
+        crate::engine::classes::k12::stamp_look_t();
     }
 
     /// 0x00151130
@@ -432,6 +434,8 @@ impl Cplcy for CplcyZoom {
             let f = if z.f_b8 == z.f_bc { 0.0 } else { (z.f_70 - z.f_b8) / (z.f_bc - z.f_b8) };
             z.f_ac = crate::engine::camera::math::FUN_0011d948(f, [0.0, 1.0]);
         }
+        // DAT_003e1be0 = clk (LOOK R36: K12 marker fade)
+        crate::engine::classes::k12::stamp_look_t();
     }
 
     /// 0x00150de8: drops the two sounds (not modelled)

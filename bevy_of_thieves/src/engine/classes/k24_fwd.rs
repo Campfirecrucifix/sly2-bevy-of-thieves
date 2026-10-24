@@ -84,6 +84,9 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_149a50(&mut self, obj: usize, pmf: u32, arg: i32) {
         self.h.ee_sub_149a50(obj, pmf, arg)
     }
+    fn lo_rt(&mut self, obj: usize, on: bool) {
+        self.h.lo_rt(obj, on)
+    }
     fn vcall_f4_1a6318(&mut self, obj: usize, src: u32) {
         self.h.vcall_f4_1a6318(obj, src)
     }
@@ -101,6 +104,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn vcall_1c(&mut self, obj: usize, a: i32, b: i32) {
         self.h.vcall_1c(obj, a, b)
+    }
+    fn k27_script_msg(&mut self, obj: u32, msg: u32, args: &[u32]) {
+        self.h.k27_script_msg(obj, msg, args)
     }
     fn ee_sub_228170(&mut self, warp: u32) {
         self.h.ee_sub_228170(warp)
@@ -145,7 +151,7 @@ impl ClassHost for K24Host<'_> {
         self.r_ee_sub_1a62e8(obj)
     }
     fn obj_i32(&mut self, obj: u32, off: u32) -> i32 {
-        self.h.obj_i32(obj, off)
+        self.r_obj_i32(obj, off)
     }
     fn obj_f32(&mut self, obj: u32, off: u32) -> f32 {
         self.h.obj_f32(obj, off)
@@ -191,6 +197,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_1a6f00(&mut self, obj: usize, pos: [f32; 3]) -> [f32; 3] {
         self.h.ee_sub_1a6f00(obj, pos)
+    }
+    fn vol_contains(&mut self, obj: usize, pos: [f32; 3]) -> bool {
+        self.h.vol_contains(obj, pos)
     }
     fn ee_sub_118fb0(&mut self, obj: usize, pos: [f32; 3]) -> bool {
         self.h.ee_sub_118fb0(obj, pos)
@@ -411,6 +420,9 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_20f1b8(&mut self) -> bool {
         self.h.ee_sub_20f1b8()
     }
+    fn world_3d84_add(&mut self, d: i32) {
+        self.h.world_3d84_add(d)
+    }
     fn ee_sub_118668_blockers(&mut self, eye: [f32; 3], tp: [f32; 3]) -> bool {
         self.h.ee_sub_118668_blockers(eye, tp)
     }
@@ -427,7 +439,7 @@ impl ClassHost for K24Host<'_> {
         self.h.ee_sub_209618(guard, anim, t, rate)
     }
     fn ee_sub_1f7598(&mut self, hit: &guard::slots::GuardHit) {
-        self.h.ee_sub_1f7598(hit)
+        self.r_ee_sub_1f7598(hit);
     }
     fn contacts(&mut self, guard: usize) -> Vec<guard::slots::Contact> {
         self.h.contacts(guard)
@@ -470,6 +482,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_1cb4b8(&mut self, host: u32, obj: u32) {
         self.h.ee_sub_1cb4b8(host, obj)
+    }
+    fn so_set_v_124(&mut self, obj: u32, v: [f32; 3]) {
+        self.h.so_set_v_124(obj, v)
     }
     fn ee_sub_1f0598(&mut self, obj: usize) {
         self.h.ee_sub_1f0598(obj)
@@ -534,6 +549,9 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_1e0020(&mut self, seq: u32, ev: i32) {
         self.h.ee_sub_1e0020(seq, ev)
     }
+    fn take_seq_signals(&mut self) -> Vec<(u32, i32)> {
+        self.h.take_seq_signals()
+    }
     fn ee_sub_1daf38(&mut self, id: i32, on: bool) {
         self.h.ee_sub_1daf38(id, on)
     }
@@ -573,11 +591,17 @@ impl ClassHost for K24Host<'_> {
     fn k22_release_1e5410(&mut self, owner: u32) {
         self.h.k22_release_1e5410(owner)
     }
+    fn k22_sma_msg10(&mut self, sma: u32, label: i32) -> bool {
+        self.h.k22_sma_msg10(sma, label)
+    }
     fn ee_sub_161f48_list(&mut self, obj: usize, entries: &[[u32; 2]]) {
         self.h.ee_sub_161f48_list(obj, entries)
     }
     fn ee_sub_1b7000(&mut self, user: u32, point: u32) {
         self.h.ee_sub_1b7000(user, point)
+    }
+    fn take_1b7000(&mut self) -> Vec<(u32, u32)> {
+        self.h.take_1b7000()
     }
     fn vol_centre_110(&mut self, obj: usize) -> [f32; 3] {
         self.h.vol_centre_110(obj)
@@ -612,8 +636,14 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_15c198(&mut self, emitter: u32, kind: i32, pos: [f32; 3]) {
         self.h.ee_sub_15c198(emitter, kind, pos)
     }
+    fn so_hit_parts(&mut self, obj: usize) -> Vec<(i32, i16)> {
+        self.h.so_hit_parts(obj)
+    }
+    fn alo_110(&mut self, obj: u32) -> [u8; 26] {
+        self.h.alo_110(obj)
+    }
     fn ee_sub_1f7598_ok(&mut self, hit: &guard::slots::GuardHit) -> bool {
-        self.h.ee_sub_1f7598_ok(hit)
+        self.r_ee_sub_1f7598(hit)
     }
     fn ee_sub_1a5ee8(&mut self, model: u32, m: &[[f32; 4]; 4]) {
         self.h.ee_sub_1a5ee8(model, m)
@@ -629,6 +659,18 @@ impl ClassHost for K24Host<'_> {
     }
     fn in_world_28(&mut self, obj: u32) -> bool {
         self.r_in_world_28(obj)
+    }
+    fn ee_sub_210ae0(&mut self) -> i32 {
+        self.h.ee_sub_210ae0()
+    }
+    fn ee_sub_14cc58(&mut self, parts: &[k8::K8Part], a: [f32; 3], b: [f32; 3]) -> Option<crate::engine::physics::bsp::Lsg> {
+        self.h.ee_sub_14cc58(parts, a, b)
+    }
+    fn ee_sub_1c0940(&mut self, region: i32, p: [f32; 3]) -> Option<[f32; 3]> {
+        self.h.ee_sub_1c0940(region, p)
+    }
+    fn ee_sub_1c0980(&mut self, region: i32, a: [f32; 3], b: [f32; 3]) -> bool {
+        self.h.ee_sub_1c0980(region, a, b)
     }
     fn ee_sub_154c90(&mut self) -> f32 {
         self.h.ee_sub_154c90()
@@ -654,20 +696,26 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_1f0730(&mut self, snd: u32, id: i32) {
         self.h.ee_sub_1f0730(snd, id)
     }
+    fn ee_sub_15e9c8_505(&mut self, class: i32, max: usize) -> Vec<u32> {
+        self.h.ee_sub_15e9c8_505(class, max)
+    }
     fn query_15e9c8(&mut self, class: i32) -> Vec<u32> {
         self.r_query_15e9c8(class)
     }
     fn so_contacts_57(&mut self, obj: usize) -> Vec<k15_101::Contact57> {
         self.h.so_contacts_57(obj)
     }
-    fn explode_224bf8(&mut self, obj: u32, pos: [f32; 3], radius: f32, damage: i32) {
-        self.h.explode_224bf8(obj, pos, radius, damage)
+    fn explode_224bf8(&mut self, obj: u32, kind: u32, pos: [f32; 3], radius: f32, damage: i32) {
+        self.r_explode_224bf8(obj, kind, pos, radius, damage)
     }
-    fn proj_contacts_13aeb0(&mut self, obj: usize) -> Vec<k15_79::ProjContact> {
-        self.h.proj_contacts_13aeb0(obj)
+    fn proj_contacts_13aeb0(&mut self, obj: usize, pos: [f32; 3]) -> Vec<k15_79::ProjContact> {
+        self.r_proj_contacts_13aeb0(obj, pos)
+    }
+    fn proj_sweep_13aeb0(&mut self, obj: usize, p0: [f32; 3], p1: [f32; 3]) -> Option<k15_79::ProjContact> {
+        self.r_proj_sweep_13aeb0(obj, p0, p1)
     }
     fn proj_victims_13b5e8(&mut self, obj: u32, pos: [f32; 3], r: f32, r_obj: f32, r_34: f32) -> Vec<u32> {
-        self.h.proj_victims_13b5e8(obj, pos, r, r_obj, r_34)
+        self.r_proj_victims_13b5e8(obj, pos, r, r_obj, r_34)
     }
     fn proj_los_13ac18(&mut self, obj: u32, prev: &[k15_79::Los]) -> Vec<k15_79::Los> {
         self.h.proj_los_13ac18(obj, prev)
@@ -729,6 +777,9 @@ impl ClassHost for K24Host<'_> {
     fn k27_po_step(&mut self, obj: usize, m: crate::engine::physics::motor::PoMotor, dt: f32) {
         self.h.k27_po_step(obj, m, dt)
     }
+    fn k27_grounded(&mut self, obj: usize) -> bool {
+        self.h.k27_grounded(obj)
+    }
     fn po_part(&mut self, addr: u32, obj: usize, off: u32) {
         self.h.po_part(addr, obj, off)
     }
@@ -746,6 +797,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_221268(&mut self, vol: u32, s: i32) {
         self.h.ee_sub_221268(vol, s)
+    }
+    fn atk_msg18(&mut self, guard: usize, cands: &[(usize, i32)]) -> Option<usize> {
+        self.h.atk_msg18(guard, cands)
     }
     fn vcall_1c_query(&mut self, obj: usize, k: i32, msg: (i32, i32)) -> (i32, i32) {
         self.h.vcall_1c_query(obj, k, msg)
@@ -812,6 +866,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_136530(&mut self, obj: usize, s: i32) {
         self.h.ee_sub_136530(obj, s)
+    }
+    fn take_136530(&mut self) -> Vec<(usize, i32)> {
+        self.h.take_136530()
     }
     fn anim_slot_phase(&mut self, slot: u32) -> f32 {
         self.h.anim_slot_phase(slot)
@@ -897,6 +954,9 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_1f09d8(&mut self, sm: u32, label: i32) {
         self.h.ee_sub_1f09d8(sm, label)
     }
+    fn ee_sub_1f07e8(&mut self, sma: u32) -> i32 {
+        self.h.ee_sub_1f07e8(sma)
+    }
     fn ee_sub_1f0638(&mut self, sm: u32) -> bool {
         self.h.ee_sub_1f0638(sm)
     }
@@ -920,6 +980,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn ee_sub_136ed0(&mut self, obj: usize, msg: i32, args: &[u32]) {
         self.h.ee_sub_136ed0(obj, msg, args)
+    }
+    fn po_jtbs(&self, obj: usize) -> Option<i32> {
+        self.h.po_jtbs(obj)
     }
     fn ee_sub_1eeed0_of(&mut self, x: u32) {
         self.h.ee_sub_1eeed0_of(x)
@@ -954,6 +1017,9 @@ impl ClassHost for K24Host<'_> {
     fn ee_sub_1a28b0_push(&mut self, obj: usize, other: u32, p: [f32; 3]) {
         self.h.ee_sub_1a28b0_push(obj, other, p)
     }
+    fn sw_focus_po(&mut self) -> u32 {
+        self.h.sw_focus_po()
+    }
     fn ee_sub_1c4940(&mut self, obj: u32) {
         self.h.ee_sub_1c4940(obj)
     }
@@ -969,6 +1035,24 @@ impl ClassHost for K24Host<'_> {
     fn vcall_11c_v(&mut self, obj: u32, v: [f32; 3]) {
         self.r_vcall_11c_v(obj, v)
     }
+    fn so_carry(&mut self, x: u32, carrier: u32) {
+        self.h.so_carry(x, carrier)
+    }
+    fn so_fly_step(&mut self, dt: f32) -> Vec<(u32, [f32; 3], u32)> {
+        self.h.so_fly_step(dt)
+    }
+    fn so_carried_pos(&mut self, x: u32) -> Option<[f32; 3]> {
+        self.h.so_carried_pos(x)
+    }
+    fn so_land(&mut self, x: u32) {
+        self.h.so_land(x)
+    }
+    fn so_bsphere(&mut self, obj: u32) -> Option<([f32; 3], f32)> {
+        self.h.so_bsphere(obj)
+    }
+    fn so_touch(&mut self, x: u32, p: [f32; 3], other: u32) -> Option<bool> {
+        self.h.so_touch(x, p, other)
+    }
     fn list_3e13b4(&mut self) -> Vec<u32> {
         self.h.list_3e13b4()
     }
@@ -976,13 +1060,13 @@ impl ClassHost for K24Host<'_> {
         self.h.root_track_12ff10(anim, obj)
     }
     fn ee_call(&mut self, addr: u32, args: &[u32]) -> i64 {
-        self.h.ee_call(addr, args)
+        self.r_ee_call(addr, args)
     }
     fn ee_sub_1f5860(&mut self, obj: u32) -> [f32; 3] {
         self.h.ee_sub_1f5860(obj)
     }
     fn ee_sub_1eeee0_rec(&mut self, obj: u32, k: i32) -> Option<(u32, i32, u32)> {
-        self.h.ee_sub_1eeee0_rec(obj, k)
+        self.r_ee_sub_1eeee0_rec(obj, k)
     }
     fn g_2e0cb4(&mut self) -> u32 {
         self.h.g_2e0cb4()
@@ -998,6 +1082,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn k21_cam_pos(&mut self) -> Option<[f32; 3]> {
         self.h.k21_cam_pos()
+    }
+    fn k21_cam_sphere(&mut self, c: [f32; 3], r: f32) -> Option<bool> {
+        self.h.k21_cam_sphere(c, r)
     }
     fn k21_global(&mut self, addr: u32) -> u32 {
         self.h.k21_global(addr)
@@ -1022,6 +1109,12 @@ impl ClassHost for K24Host<'_> {
     }
     fn k22_vcall_ec_pos(&mut self, obj: u32, p: [f32; 3]) {
         self.h.k22_vcall_ec_pos(obj, p)
+    }
+    fn k6_live_pos(&mut self, live: &[(u32, [f32; 3])]) {
+        self.h.k6_live_pos(live)
+    }
+    fn k6_live_yaw(&mut self, live: &[(u32, f32)]) {
+        self.h.k6_live_yaw(live)
     }
     fn k22_vcall_i(&mut self, obj: u32, off: u32, k: i32) {
         self.h.k22_vcall_i(obj, off, k)
@@ -1059,6 +1152,36 @@ impl ClassHost for K24Host<'_> {
     fn k22_seq_action(&mut self, owner: u32, subj: u32, rec: &[u32; 20]) {
         self.h.k22_seq_action(owner, subj, rec)
     }
+    fn k22_jt_live(&mut self) -> bool {
+        self.h.k22_jt_live()
+    }
+    fn k22_npc_walk_1e46a0(&mut self, subj: u32, goal: [f32; 3], speed: f32) {
+        self.h.k22_npc_walk_1e46a0(subj, goal, speed)
+    }
+    fn k22_walkto_1448f0(&mut self, subj: u32, pos: [f32; 3], speed: f32) {
+        self.h.k22_walkto_1448f0(subj, pos, speed)
+    }
+    fn k22_walk_r1_1e46a0(&mut self, subj: u32) {
+        self.h.k22_walk_r1_1e46a0(subj)
+    }
+    fn k22_autowalk_1938c0(&mut self, subj: u32, mask: u32, target: u32) {
+        self.h.k22_autowalk_1938c0(subj, mask, target)
+    }
+    fn k22_teleport_1e1e30_16(&mut self, subj: u32, loc: u32, rec5: u32) {
+        self.h.k22_teleport_1e1e30_16(subj, loc, rec5)
+    }
+    fn k22_hop_1e1e30_2a(&mut self, subj: u32, target: u32, rec5: u32) {
+        self.h.k22_hop_1e1e30_2a(subj, target, rec5)
+    }
+    fn k22_hop_done_2a(&mut self, subj: u32) -> Option<bool> {
+        self.h.k22_hop_done_2a(subj)
+    }
+    fn k22_on_path_1a(&mut self, subj: u32) -> Option<bool> {
+        self.h.k22_on_path_1a(subj)
+    }
+    fn k22_climb_1a(&mut self, subj: u32, pos: [f32; 3]) -> Option<f32> {
+        self.h.k22_climb_1a(subj, pos)
+    }
     fn k22_pose_143ee0(&mut self, subj: u32, oid: i32, flags: u32, idx: u32) {
         self.h.k22_pose_143ee0(subj, oid, flags, idx)
     }
@@ -1067,6 +1190,9 @@ impl ClassHost for K24Host<'_> {
     }
     fn k22_po_switch(&mut self, po: u32) {
         self.h.k22_po_switch(po)
+    }
+    fn live_vcall(&mut self, off: u32, obj: u32, arg: u32) {
+        self.h.live_vcall(off, obj, arg)
     }
     fn k22_take_po_switches(&mut self) -> Vec<u32> {
         self.h.k22_take_po_switches()
@@ -1101,11 +1227,17 @@ impl ClassHost for K24Host<'_> {
     fn k26_take_msgs(&mut self) -> Vec<(u32, i32, crate::engine::anim::sm::SmaMsg)> {
         self.h.k26_take_msgs()
     }
+    fn k26_take_msg9(&mut self) -> Vec<(u32, [u32; 3])> {
+        self.h.k26_take_msg9()
+    }
     fn k26_handled(&mut self, n: usize) {
         self.h.k26_handled(n)
     }
     fn k23_world_1c6fd8(&mut self, kind: i32, pos: [f32; 3], src: u32, k: i32) {
         self.h.k23_world_1c6fd8(kind, pos, src, k)
+    }
+    fn k8_take_drops(&mut self) -> Vec<(i32, [f32; 3], u32, i32)> {
+        self.h.k8_take_drops()
     }
     fn k23_clock_14d1d0(&mut self, v: f32, index: usize) {
         self.h.k23_clock_14d1d0(v, index)

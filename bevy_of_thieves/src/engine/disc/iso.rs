@@ -133,6 +133,25 @@ pub fn cd_stream_chunk(buffer: u32) -> u32 {
     if c > 0x8000 { c & 0xffff8000 } else { c & 0xfffff800 }
 }
 
+/// FUN_00184d98(st, a1, a2): CD stream state init (1:1); nbuf = max(2, size(+0x34) / 1 MiB) -> +0x54, +0x60 = nbuf - 1
+pub fn ee_sub_184d98<M: crate::engine::classes::q::q2mem::QMem + ?Sized>(m: &mut M, st: u32, a1: u32, a2: u32) -> u32 {
+    let size = m.r32(st + 0x34) as i32;
+    m.w32(st + 0x50, a1);
+    m.w32(st + 0x48, a2);
+    let v = m.r32(st + 0x38);
+    m.w32(st + 0x10, v);
+    m.w32(st + 0x40, 0);
+    m.w32(st + 0x4c, 0);
+    m.w32(st + 0x44, 0);
+    let size = if size < 0 { size.wrapping_add(0xfffff) } else { size };
+    m.w32(st + 0x58, 0);
+    let nbuf = (size >> 0x14).max(2);
+    m.w32(st + 0x5c, 0);
+    m.w32(st + 0x54, nbuf as u32);
+    m.w32(st + 0x60, nbuf.wrapping_sub(1) as u32);
+    1
+}
+
 impl<S: SectorSource> DiscSource<S> {
     pub fn new(disc: std::sync::Arc<S>, lsn: u32, size: u32) -> Self {
         Self { disc, lsn, left: size, chunk: cd_stream_chunk(0xd8000) }

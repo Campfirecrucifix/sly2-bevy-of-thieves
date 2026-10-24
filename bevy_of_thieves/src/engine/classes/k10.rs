@@ -488,6 +488,8 @@ impl C2d2978 {
     pub fn ee_sub_21d358(&mut self, obj: usize, g: &mut ClassGlobals, h: &mut dyn ClassHost) {
         h.base(0x1a6178, obj);
         g.list(L_3E13B4).push(handle(obj));
+        g.l3e13b4_e8.insert(handle(obj), self.base.f_e8 as u32);
+        g.l3e13b4_f4.insert(handle(obj), self.base.f_f4);
     }
     /// slot 40 FUN_0021d390: FUN_002311b0 keeping +0xe0
     pub fn ee_sub_21d390(&mut self, obj: usize, h: &mut dyn ClassHost) {
@@ -889,6 +891,7 @@ impl ClassSet {
                     c.ee_sub_183fb8(i, g, h);
                 }
                 K10::C2d1d00(c) => {
+                    g.pt_19c.insert(i as u32 + 1, c.f_19c);
                     c.base.resolve(i, h);
                     c.ee_sub_1842b0(i, h);
                     c.ee_sub_183fb8(i, g, h);
@@ -942,6 +945,10 @@ impl ClassSet {
     /// K10 per frame: class 12 inherited class-10 slot 16 (FUN_001e6340)
     pub(super) fn frame_k10(&mut self, h: &mut dyn ClassHost) {
         for (i, x) in &mut self.k10 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K10(k) = x {
                 if let K10::C2d2738(c) = k.as_mut() {
                     c.base.ee_sub_1e6340(*i, h);

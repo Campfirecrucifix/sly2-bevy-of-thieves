@@ -118,9 +118,14 @@ pub fn setup_npc_draw(
     mut nd: ResMut<NpcDraw>,
     roots: Query<Entity, With<LevelGeometryRoot>>,
     objs: Query<(Entity, &AloObject, Option<&Children>)>,
-    meshes: Query<(Option<&InkOutline>, Option<&SkinnedMesh>, &Mesh3d, &MeshMaterial3d<StandardMaterial>, &Transform)>,
+    meshes: Query<(Option<&InkOutline>, Option<&SkinnedMesh>, &Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>, &Transform, Option<&crate::engine::gfx::twolayer::TwoLayerSwapped>)>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
     tfs: Query<&Transform>,
+    // LOOK (K2): the WIRE-C3 colour pass child of a two-layer prim (gfx::game ColourPass)
+    colour: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &Transform), With<crate::engine::gfx::game::ColourPass>>,
+    kids: Query<&Children>,
+    // ANIM R74: per-frame VU1 light of skinned prims (gfx::game::DynLit), per copy
+    dyn_lit: Query<&crate::engine::gfx::game::DynLit>,
 ) {
     let (Some(w), Some(data)) = (level.0.clone(), data) else { return };
     let key = Arc::as_ptr(&w) as usize;
@@ -221,13 +226,21 @@ pub fn setup_npc_draw(
                 e
             };
             ent_of.insert(so.object, e);
-            let ents: Vec<_> = children.iter().filter_map(|&c| meshes.get(c).ok()).collect();
+            // PERF2: merged two-layer prims report their WIRE-C3 originals (gfx::twolayer)
+            let ents: Vec<_> = children
+                .iter()
+                .filter_map(|&c| meshes.get(c).ok().map(|m| (c, m)))
+                .filter_map(|(c, (ink, sm, mesh, mat, t, sw))| match sw {
+                    Some(s) => Some((ink, sm, &s.mesh, &s.mat, t, None)),
+                    None => Some((ink, sm, mesh, mat?, t, Some(c))),
+                })
+                .collect();
             let prims = so.prims.iter().filter(|p| matches!(p.prim.role, MeshRole::Surface | MeshRole::InkEdges));
             let all: Vec<_> = prims.zip(ents).collect();
             // records drawn skinned: their ink edges cannot follow the skin (as playerdraw)
             let skinned: HashSet<(usize, Option<usize>)> =
                 all.iter().filter(|(_, (ink, sm, ..))| ink.is_none() && sm.is_some()).map(|(p, _)| (p.record, p.instance)).collect();
-            for (p, (ink, sm, mesh, mat, t)) in all {
+            for (p, (ink, sm, mesh, mat, t, src)) in all {
                 let rec = &alo.mesh.records[p.record];
                 if !shown(so.object, rec, p.record, p.instance) {
                     continue;
@@ -261,22 +274,79 @@ pub fn setup_npc_draw(
                             }
                             js.push(j);
                         }
-                        commands.spawn((
+                        // ANIM R74: DynLit copies own their mesh assets (lit per copy), two draws (no merge)
+                        let orig = children.iter().copied().find(|&c| meshes.get(c).is_ok_and(|m| m.2.0 == mesh.0 || m.5.is_some_and(|s| s.mesh.0 == mesh.0)));
+                        if let Some(d) = orig.and_then(|c| dyn_lit.get(c).ok()) {
+                            let Some(m) = mesh_assets.get(&mesh.0).cloned() else { continue };
+                            let main = commands
+                                .spawn((
+                                    Mesh3d(mesh_assets.add(m)),
+                                    mat.clone(),
+                                    SkinnedMesh { inverse_bindposes: sm.inverse_bindposes.clone(), joints: js.clone() },
+                                    bevy::camera::visibility::DynamicSkinnedMeshBounds,
+                                    *t,
+                                    ChildOf(e),
+                                ))
+                                .id();
+                            let mut d = d.clone();
+                            d.skin.joints = js.clone();
+                            d.root = root;
+                            commands.entity(main).insert(d);
+                            for k in orig.and_then(|c| kids.get(c).ok()).into_iter().flat_map(|k| k.iter()) {
+                                if let Ok((cm, cmat, ct)) = colour.get(k) {
+                                    let Some(m) = mesh_assets.get(&cm.0).cloned() else { continue };
+                                    commands.spawn((
+                                        crate::engine::gfx::game::ColourPass,
+                                        Mesh3d(mesh_assets.add(m)),
+                                        cmat.clone(),
+                                        SkinnedMesh { inverse_bindposes: sm.inverse_bindposes.clone(), joints: js.clone() },
+                                        bevy::camera::visibility::DynamicSkinnedMeshBounds,
+                                        *ct,
+                                        ChildOf(main),
+                                    ));
+                                }
+                            }
+                            continue;
+                        }
+                        let main = commands.spawn((
                             mesh.clone(),
                             mat.clone(),
-                            SkinnedMesh { inverse_bindposes: sm.inverse_bindposes.clone(), joints: js },
+                            SkinnedMesh { inverse_bindposes: sm.inverse_bindposes.clone(), joints: js.clone() },
                             // A10: posed culling bounds (mesh asset carries the per-joint bounds, gfx::game)
                             bevy::camera::visibility::DynamicSkinnedMeshBounds,
                             *t,
                             ChildOf(e),
-                        ));
+                        )).id();
+                        // LOOK (K2): copy the unlit colour pass too (FUN_001eb960 draws both passes); without
+                        // it the guards showed only the dark lit grey layer (solid black in the cellar)
+                        for k in src.and_then(|c| kids.get(c).ok()).into_iter().flat_map(|k| k.iter()) {
+                            if let Ok((cm, cmat, ct)) = colour.get(k) {
+                                commands.spawn((
+                                    crate::engine::gfx::game::ColourPass,
+                                    cm.clone(),
+                                    cmat.clone(),
+                                    SkinnedMesh { inverse_bindposes: sm.inverse_bindposes.clone(), joints: js.clone() },
+                                    bevy::camera::visibility::DynamicSkinnedMeshBounds,
+                                    *ct,
+                                    ChildOf(main),
+                                ));
+                            }
+                        }
                     }
                     None => {
                         let pe = commands.spawn((mesh.clone(), mat.clone(), *t, ChildOf(e))).id();
-                        let (pre, r) = match p.instance {
+                        let (mut pre, r) = match p.instance {
                             Some(ii) => (rec.instances[ii].xform, rec.instances[ii].r#ref),
                             None => (IDENTITY, rec.r#ref),
                         };
+                        // ANIM-ALL R76: translucent prims carry their vertices shifted by the record sort centre c
+                        // (gfx::game WP-C8: mesh - c, Transform = local x T(c)); the rigid pose below replaces the
+                        // Transform, so put T(c) first or the mesh collapses onto the bone origin (the guard
+                        // flashlight cone, centred ~640 ahead of bone 2, sat on the guard). Opt-out SLY2_R76NOSORTC.
+                        let c = affine_to_transform(&p.local).compute_affine().inverse().transform_point3(t.translation);
+                        if c.length() > 0.01 && std::env::var_os("SLY2_R76NOSORTC").is_none() {
+                            pre = mul(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], c.to_array()], &pre);
+                        }
                         if let Some(&b) = (r >= 0).then(|| rig.index.get(&(so.object, r as usize))).flatten() {
                             rigid.push((pe, pre, b, so.object));
                         }
@@ -301,6 +371,117 @@ pub const HIT_STAR_Z: f32 = 140.0;
 
 /// Every frame after the class update: anims from the class state, pose, transforms.
 #[allow(clippy::too_many_arguments)]
+/// ANIM-ALL: env `SLY2_NPCDRAW=0` disables [`drive_npcs`].
+pub fn npcdraw_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("SLY2_NPCDRAW").is_ok_and(|v| v == "0"))
+}
+
+/// ANIM-ALL: env `SLY2_GUEST_POSE=1` draws the bone postures the guest pose step (FUN_0022de88 / FUN_0022faa0,
+/// `LiveQ::pose_pass`) wrote into the ALO bone arrays (+0x54, stride 0x100, world +0x40) instead of the native pose.
+pub fn guest_pose_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SLY2_GUEST_POSE").map_or(true, |v| v != "0"))
+}
+
+/// ANIM-ALL R15/R16: the JT rig (Sly/Bentley/Murray) and its po props take the guest locals
+/// ([`guest_locals_overlay`]); on by default with SLY2_GUEST_POSE, `SLY2_GUEST_JT=0` keeps the native JT pose.
+/// R16: the JT got its class-53 vtable (FUN_001116d8 installs 0x2d2e98 through its last callee, exe_scan), so its
+/// load / postload set the record modes (FUN_002303a0); DrivenXf::FUN_0022c8c0 keeps the xf rows like the
+/// original memcpy (wired_anim_all_jt_guest_pose_matches_native: native vs guest within 0.003).
+pub fn guest_jt_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| guest_pose_on() && std::env::var("SLY2_GUEST_JT").map_or(true, |v| v != "0"))
+}
+
+/// ANIM-ALL R15: the guest bone locals (+0 of the 0x100-byte records at ALO +0x54, written by the act evaluators
+/// FUN_00131cd8 / FUN_00131d68 in the FUN_0022de88 pose step) replace the native locals of every bone that carries
+/// a guest act (+0x90); other bones keep the native pose (fallback). The guest +0x40 world is not used: the JT's
+/// records never get one (the world chain of FUN_0022faa0 does not run for them), the native parent walk
+/// (`ActorPose::recompose`) builds the worlds. Returns the number of replaced locals.
+/// `only` (non-empty): the top act must belong to one of these ASEGAs (act +0x24), so ASEGAs another driver
+/// started on the same bones (and the native animator does not play) do not take the bones over.
+pub fn guest_locals_overlay(lq: &mut crate::engine::classes::q::live::LiveMem, keys: &[(usize, usize)], pose: &mut crate::engine::anim::actor::ActorPose, only: &[u32]) -> usize {
+    use crate::engine::classes::q::q2mem::QMem;
+    let mut n = 0;
+    for (i, &(o, k)) in keys.iter().enumerate() {
+        let Some(&a) = lq.obj_addr.get(o) else { continue };
+        if a == 0 {
+            continue;
+        }
+        let (nb, bp) = (lq.r32(a + 0x50) as i32, lq.r32(a + 0x54));
+        if nb <= 0 || nb > 512 || k as i32 >= nb || bp == 0 {
+            continue;
+        }
+        let r = bp + ((k as u32) << 8);
+        let act = lq.r32(r + 0x90);
+        // ANIM-ALL R78: a FUN_0021cb18 spring bone (xf +0x98 == 0x10, Sly's mask tail) is posed by the guest pose
+        // pass itself (its act is the kind-3 holder, not an anim slot): take its local too
+        let spring = lq.r16(r + 0x98) == 0x10 && std::env::var_os("SLY2_R78TAILOFF").is_none();
+        if act == 0 || (!spring && !only.is_empty() && !only.contains(&lq.r32(act + 0x24))) {
+            continue;
+        }
+        let m = lq.rm(r);
+        if !m.iter().flatten().all(|v| v.is_finite()) || (m[3][3] - 1.0).abs() > 1e-3 {
+            continue;
+        }
+        if let Some(b) = pose.bones.get_mut(i) {
+            b.local = m;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// LOOK R18: a guest bone world (ALO +0x54 record +0x40, 3x4 affine stored as 4 qw) as a Mat4 with the
+/// .w lanes forced to (0, 0, 0, 1).
+pub fn guest_affine(mut m: [[f32; 4]; 4]) -> bevy::math::Mat4 {
+    (0..3).for_each(|r| m[r][3] = 0.0);
+    m[3][3] = 1.0;
+    bevy::math::Mat4::from_cols_array_2d(&m)
+}
+
+/// Per object: keep the native (object, 0) world as the frame, put the guest posture relative to the guest
+/// bone 0 on top (row-vector: W[k] = G[k] * inv(G[0]) * W[0]); objects without guest acts are left native.
+pub fn guest_pose_overlay(lq: &mut crate::engine::classes::q::live::LiveMem, keys: &[(usize, usize)], worlds: &mut [Mat4]) {
+    use crate::engine::classes::q::q2mem::QMem;
+    use bevy::math::Mat4 as G;
+    // LOOK R18: the guest bone world (+0x40) is a 3x4 affine; the .w lanes are not part of it (row 3 .w held
+    // 5.0 for the cellar guards -> inverse(G0) became projective and scaled the posed bones 5..15x: the giant
+    // guard over the same-camera cellar view). Read it as affine (w lanes 0, 0, 0, 1).
+    let gm = |lq: &mut crate::engine::classes::q::live::LiveMem, a: u32| -> G { guest_affine(lq.rm(a)) };
+    let mut root: HashMap<usize, usize> = HashMap::new();
+    for (i, &(o, k)) in keys.iter().enumerate() {
+        if k == 0 {
+            root.insert(o, i);
+        }
+    }
+    for (i, &(o, k)) in keys.iter().enumerate() {
+        let Some(&r) = root.get(&o) else { continue };
+        let Some(&a) = lq.obj_addr.get(o) else { continue };
+        if a == 0 {
+            continue;
+        }
+        let (nb, bp) = (lq.r32(a + 0x50) as i32, lq.r32(a + 0x54));
+        if nb <= 0 || nb > 512 || k as i32 >= nb || bp == 0 {
+            continue;
+        }
+        if !(0..nb as u32).any(|j| lq.r32(bp + (j << 8) + 0x90) != 0) {
+            continue;
+        }
+        if k == 0 || i == r {
+            continue;
+        }
+        let (g0, gk) = (gm(lq, bp + 0x40), gm(lq, bp + ((k as u32) << 8) + 0x40));
+        // bones whose guest world was never built (zero matrix) keep the native pose (fallback)
+        if g0.determinant().abs() < 1e-8 || gk.determinant().abs() < 1e-8 {
+            continue;
+        }
+        let w0 = G::from_cols_array_2d(&worlds[r]);
+        worlds[i] = (w0 * g0.inverse() * gk).to_cols_array_2d();
+    }
+}
+
 pub fn drive_npcs(
     time: Res<Time>,
     level: Res<ClassesLevel>,
@@ -311,22 +492,84 @@ pub fn drive_npcs(
     mut fxq: ResMut<FxQueue>,
     mut fxt: ResMut<FxTargets>,
     mut fxm: ResMut<FxModels>,
+    mut liveq: Option<ResMut<crate::engine::classes::q::live::LiveQ>>,
+    clock: Option<Res<crate::engine::player::plugin::PlayerClock>>,
+    od: Option<Res<super::objects::ObjDraw>>,
 ) {
+    // ANIM-ALL: SLY2_NPCDRAW=0 turns this native NPC animation stand-in off (default on: the guest ASEGA set
+    // world+0x3d88 plays the class-code starts, but guard anim tasks and the bone readback are not wired yet)
+    if npcdraw_off() {
+        return;
+    }
     let Some(w) = level.0.clone() else { return };
     if nd.key != Arc::as_ptr(&w) as usize {
         return;
     }
     let c = &mut *classes;
     let nd = &mut *nd;
-    let dt = time.delta_secs().min(1.0 / 15.0);
+    // ANIM-ALL R15: DAT_002dded4 (g_clock, clamped [1/60, 1/30]) when the game clock runs, as the guard's own
+    // FUN_00130918 updates; else the Bevy delta (capped)
+    let dt = clock.as_deref().map_or(time.delta_secs().min(1.0 / 15.0), |c| c.dt);
     nd.set.step(&w, &mut c.set, &mut c.host, dt);
     // WP-D6: the class-run ASEGAs pose the bones they bind (FUN_0012f9b8 acts) over the NPC anims
     let live: Vec<(u64, usize, Option<usize>)> = c.host.k25.asegas.iter().filter(|x| x.1.st.alive).map(|(k, x)| (*k as u64, x.aseg, (x.obj as usize).checked_sub(1))).collect();
+    let mut live = live;
+    let mut times: HashMap<u64, (f32, f32)> = c.host.k25.asegas.iter().map(|(k, x)| (*k as u64, (x.st.t, x.st.svt))).collect();
+    // LOOK R34 diag: SLY2_LOOK_ASEGSTART=oid,.. plays those ASEGs (looping on the frame clock) as if the level
+    // script had started them (splice getters_call_101910 -> FUN_00130488, not run by the port here)
+    if let Ok(v) = std::env::var("SLY2_LOOK_ASEGSTART") {
+        for (n, oid) in v.split(',').filter_map(|x| x.trim().parse::<i32>().ok()).enumerate() {
+            let Some(i) = (0..w.objects.len()).find(|&i| w.objects[i].oid == oid && w.objects[i].class == 109) else { continue };
+            let Some(a) = crate::engine::playerdraw::aseg_of(&w, i) else { continue };
+            let h = 0x7f00_0000u64 | n as u64;
+            live.push((h, i, None));
+            times.insert(h, (time.elapsed_secs() % a.length.max(1.0e-3), 1.0));
+        }
+    }
     nd.binder.sync(&w, &live);
-    let times: HashMap<u64, (f32, f32)> = c.host.k25.asegas.iter().map(|(k, x)| (*k as u64, (x.st.t, x.st.svt))).collect();
     nd.set.overlay_class_anims(&w, &nd.binder, &|k| times.get(&k).copied());
+    // LOOK R34: pool copies on an animated owner bone follow it (FUN_0022faa0: the copy is a child of the
+    // spawner's parent bone, so its world = rest x socket x posed bone world)
+    if let Some(od) = od.as_deref().filter(|o| !(o.follow.is_empty() && o.marker_bones.is_empty()) && o.key == Arc::as_ptr(&w) as usize) {
+        let locals = nd.binder.locals(&w, &|k| times.get(&k).copied());
+        if !locals.is_empty() {
+            let pose = nd.binder.compose(&w, locals);
+            if std::env::var_os("SLY2_LOOK_ASEGDBG").is_some() {
+                let owners: HashSet<i32> = od.follow.iter().map(|f| w.objects[f.3 .0].oid as i32).collect();
+                for i in 0..w.objects.len() {
+                    let Some(a) = crate::engine::playerdraw::aseg_of(&w, i) else { continue };
+                    let hit: Vec<i32> = a.channels.iter().map(crate::engine::anim::bind::channel_oid).filter(|o| owners.contains(o)).collect();
+                    if !hit.is_empty() {
+                        info!("ASEGDBG aseg obj {i} oid {} cls {} live {} hits {hit:?}", w.objects[i].oid, w.objects[i].class, live.iter().any(|l| l.1 == i));
+                        for j in i.saturating_sub(6)..(i + 3).min(w.objects.len()) {
+                            let x = &w.objects[j];
+                            info!("ASEGDBG   obj {j} oid {} cls {} owner {:?} sma {}", x.oid, x.class, x.owner.map(|o| w.objects[o].oid), c.host.k25.smas.values().any(|m| m.sm == j && m.alive));
+                        }
+                    }
+                }
+            }
+            if std::env::var_os("SLY2_LOOK_ORIGINDBG").is_some() {
+                info!("FOLLOW {} of {} pool copies on posed bones", od.follow.iter().filter(|f| pose.bones.contains_key(&f.3)).count(), od.follow.len());
+            }
+            // LOOK R40: K12 sign copies (objects::ObjDraw::marker_bones): prim local = posed bone x inverse(bone 0)
+            for (e, keys, root0, k0) in &od.marker_bones {
+                let Some(bw) = keys.iter().find_map(|k| pose.bones.get(k)) else { continue };
+                let r0 = pose.bones.get(k0).unwrap_or(root0);
+                if let Ok(mut t) = tf.get_mut(*e) {
+                    *t = affine_to_transform(&mul(bw, &invert(r0)));
+                }
+            }
+            for (e, rest, pm, key) in &od.follow {
+                let Some(bw) = pose.bones.get(key) else { continue };
+                let m = mul(rest, &mul(pm, bw));
+                if let Ok(mut t) = tf.get_mut(*e) {
+                    *t = affine_to_transform(&m);
+                }
+            }
+        }
+    }
     for d in &mut nd.drawn {
-        let Some(an) = nd.set.npcs.get(&d.obj) else { continue };
+        let Some(an) = nd.set.npcs.get_mut(&d.obj) else { continue };
         // class transform: placement rotation turned by the body yaw change, class position
         let mut stunned = false;
         let (m, show) = match c.set.k6.iter().chain(&c.set.k8).find(|x| x.0 == d.obj).map(|x| &x.1) {
@@ -409,7 +652,13 @@ pub fn drive_npcs(
                 }
             }
         }
-        let worlds = an.rig.pose.world();
+        let an = &*an;
+        let mut worlds = an.rig.pose.world();
+        if guest_pose_on() {
+            if let Some(m) = liveq.as_deref_mut().and_then(|lq| lq.mem.as_mut()) {
+                guest_pose_overlay(m, &an.rig.keys, &mut worlds);
+            }
+        }
         let rest_of = |o: usize| d.objects.iter().find(|x| x.1 == o).map(|x| x.3);
         let posed = |o: usize| an.rig.index.get(&(o, 0)).map(|&b| to_affine(&worlds[b])).or_else(|| rest_of(o));
         let frame = |o: Option<usize>| match o {
@@ -446,7 +695,11 @@ pub fn npc_camera(nd: Res<NpcDraw>, mut cam: Query<&mut Transform, With<CmCamera
         return;
     }
     if pick.is_none() {
-        *pick = nd.set.npcs.iter().filter(|(_, a)| matches!(a.anim, NpcAnim::Loop { id: GUARD_ANIM_WALK, .. })).map(|(o, _)| *o).min();
+        // ANIM-ALL R76 (capture aid): SLY_NPC_CAM=<oid> picks that NPC (else the lowest walking guard)
+        *pick = std::env::var("SLY_NPC_CAM").ok().and_then(|s| s.parse().ok()).filter(|o| nd.drawn.iter().any(|d| d.obj == *o)).or_else(|| nd.set.npcs.iter().filter(|(_, a)| matches!(a.anim, NpcAnim::Loop { id: GUARD_ANIM_WALK, .. })).map(|(o, _)| *o).min());
+        for d in nd.drawn.iter().filter(|d| d.body.is_some()) {
+            info!("npcs: drawn {} body {:?}", d.obj, d.body);
+        }
         if let Some(o) = *pick {
             info!("npcs: camera on walking guard {o}");
         }

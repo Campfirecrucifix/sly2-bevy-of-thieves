@@ -545,7 +545,7 @@ pub fn ee_sub_144640<M: QMem + ?Sized>(m: &mut M, o: u32) {
             if m.rf(o + 0x20) - d < rof(0x002b_d2d4) * rof(0x002b_d2d0) {
                 let buf = stack_push(m, 0x10);
                 m.wv(buf, q);
-                let hit = m.call(0x0017_3610, &[0x42c8_0000, 0xc316_0000, buf, 0, 0], &[]).0;
+                let hit = m.call(0x0017_3610, &[buf, 0, 0], &[super::q5util::f4(f32::from_bits(0x42c8_0000)), super::q5util::f4(f32::from_bits(0xc316_0000))]).0;
                 if hit == 0 && m.call(0x0017_d608, &[buf], &[]).0 & 0xff == 0 {
                     m.wf(o + 0x20, d);
                     stack_pop(m, 0x10);

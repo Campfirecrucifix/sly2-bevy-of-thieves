@@ -270,6 +270,7 @@ impl JobMgr {
     pub fn FUN_00165118(&mut self, t: usize, arg: i32) {
         if self.FUN_001637e8(t) {
             self.calls.push((0x00165118, arg));
+            self.msg17.push((self.tasks[t].obj, arg));
         }
     }
 

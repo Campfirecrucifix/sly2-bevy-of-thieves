@@ -26,12 +26,11 @@ pub fn ee_sub_210338(w: &World, vis: &mut JtVis, oid: i32, on: bool) -> bool {
 /// FUN_00210408(world, on, oid, mesh oid, ctx): oid != -1 -> FUN_0015e938(world, 4, oid) (here: below the JT);
 /// an ALO (FUN_00132b10(0x30)) -> FUN_001f6978 (show) / FUN_001f69f8 (hide) its mesh records with word `mesh`.
 /// The glider's wing / harness meshes are JT records with words 3775 / 3784 (u1 bit 0: hidden at load),
-/// shown by ASEG 5517 kind 0xd (7, 3775) / (7, 3784) and hidden by 5518 kind 0xe. oid -1 (ctx object): skipped.
+/// shown by ASEG 5517 kind 0xd (7, 3775) / (7, 3784) and hidden by 5518 kind 0xe. oid -1: param_5, the ctx
+/// object the ASEG plays on (here the JT: its cane / hand variant words 0xf41, 0x1014.., 0x10da).
 pub fn ee_sub_210408(w: &World, vis: &mut JtVis, oid: i32, mesh: i32, on: bool) -> bool {
-    if oid == -1 {
-        return false;
-    }
-    let Some(o) = ee_sub_15e938_below(w, vis.jt, oid).filter(|&o| crate::engine::gfx::attach::alo_of(w, o).is_some()) else { return false };
+    let o = if oid == -1 { Some(vis.jt) } else { ee_sub_15e938_below(w, vis.jt, oid) };
+    let Some(o) = o.filter(|&o| crate::engine::gfx::attach::alo_of(w, o).is_some()) else { return false };
     let before = vis.hidden.clone();
     vis.set_mesh(w, o, mesh, on);
     vis.hidden != before

@@ -59,6 +59,8 @@ pub struct Node {
     pub f_38: u32,
     pub f_3c: u32,
     pub f_60: u32,
+    /// ANIM-ALL R35: +0xa0 the action-0x3b binocucom subject (FUN_0019cc50 mode 1; released by FUN_001e54b0)
+    pub f_a0: u32,
     /// K28: +0x40 / +0x44 the action-0x23 record and its subject (FUN_001e4eb8)
     pub f_40: Option<usize>,
     pub f_44: u32,
@@ -78,6 +80,9 @@ pub struct Node {
     pub f_90: u32,
     pub f_94: u32,
     pub f_9c: u32,
+    /// ANIM-ALL R33: +0xa4 count / +0xa8 objects / +0xb8 / +0xc8 args of the action-0x47 attach list
+    /// (FUN_001e51a0, max 4)
+    pub f_a8: Vec<(u32, u32, u32)>,
 }
 
 /// K27: guard brain calls of the sequence actions (object handles)
@@ -87,6 +92,52 @@ pub enum GuardOp {
     Run(u32, u32),
     /// FUN_00171d58(guard): substate {1}
     Stop(u32),
+    /// ANIM-ALL R33: FUN_001e51a0 / FUN_001e5280: the attached object's vtable +0x29c (slot 82) / +0x2a4
+    /// (slot 83) with the action's (a, b) (players: FUN_001442d0 / FUN_00144338)
+    Slot82(u32, u32, u32),
+    Slot83(u32, u32, u32),
+    /// ANIM-ALL R35: FUN_0019cc50(subject + 0xf00, mode, a, b) (action 0x3b) / FUN_0019cce8(subject + 0xf00)
+    /// (FUN_001e54b0: action 0x3c and FUN_001e5628)
+    Binoc(u32, i32, u32, u32),
+    BinocLeave(u32),
+}
+
+/// ANIM-ALL R35: FUN_001e54b0(node): node +0xa0 != 0 -> FUN_0019cce8(+0xa0 + 0xf00), +0xa0 = 0
+fn ee_sub_1e54b0(c: &mut C2d8c48, k: usize) {
+    let s = std::mem::take(&mut c.k22_nodes[k].f_a0);
+    if s != 0 {
+        c.k27_ops.push(GuardOp::BinocLeave(s));
+    }
+}
+
+/// ANIM-ALL R35: the binocucom HUD state (+0xf28) of an object as `ClassSet` saw it before the update (-1 none)
+fn binoc_hud(c: &C2d8c48, o: u32) -> i32 {
+    c.binoc_huds.iter().find(|x| x.0 == o).map_or(-1, |x| x.1)
+}
+
+/// FUN_001e51a0(node, obj, a, b): attach an is-a-0x33 object (once, max 4) and call its slot 82
+fn ee_sub_1e51a0(c: &mut C2d8c48, k: usize, o: u32, a: u32, b: u32, h: &mut dyn ClassHost) {
+    if h.ee_sub_132b10(o, 0x33) == 0 {
+        return;
+    }
+    let l = &mut c.k22_nodes[k].f_a8;
+    if l.iter().any(|x| x.0 == o) || l.len() >= 4 {
+        return;
+    }
+    l.push((o, a, b));
+    c.k27_ops.push(GuardOp::Slot82(o, a, b));
+}
+
+/// FUN_001e5280(node, obj, a, b): detach the object and call its slot 83
+fn ee_sub_1e5280(c: &mut C2d8c48, k: usize, o: u32, a: u32, b: u32, h: &mut dyn ClassHost) {
+    if h.ee_sub_132b10(o, 0x33) == 0 {
+        return;
+    }
+    let l = &mut c.k22_nodes[k].f_a8;
+    if let Some(i) = l.iter().position(|x| x.0 == o) {
+        l.remove(i);
+        c.k27_ops.push(GuardOp::Slot83(o, a, b));
+    }
 }
 
 /// K27: FUN_00171cf8 (queued for `ClassSet`; the running view is updated at once for the wait)
@@ -343,6 +394,14 @@ pub fn ee_sub_1e5628(c: &mut C2d8c48, n: u32) {
     if let Some(k) = ix(c, n).filter(|&k| c.k22_nodes[k].f_38 != 0) {
         c.k27_world.push(c.k22_nodes[k].f_3c);
     }
+    // ANIM-ALL R35: FUN_001e54b0 (the action-0x3b binocucom), then R33: FUN_001e54e8: detach the action-0x47
+    // objects, last first (FUN_001e5280 -> slot 83)
+    if let Some(k) = ix(c, n) {
+        ee_sub_1e54b0(c, k);
+        while let Some((o, a, b)) = c.k22_nodes[k].f_a8.pop() {
+            c.k27_ops.push(GuardOp::Slot83(o, a, b));
+        }
+    }
     c.f_5c.retain(|&x| x != n);
     c.k22_nodes.retain(|x| x.handle != n);
 }
@@ -370,6 +429,14 @@ fn ee_sub_1e1db8(ctx: u32, oid: u32, h: &mut dyn ClassHost) -> u32 {
     }
 }
 
+/// FUN_001e4eb8(node, 0, 0): +0x40 / +0x44 cleared (the FUN_00143de8(old, 0) detach is the player layer's)
+fn ee_sub_1e4eb8_clear(c: &mut C2d8c48, n: u32) {
+    if let Some(k) = ix(c, n) {
+        c.k22_nodes[k].f_40 = None;
+        c.k22_nodes[k].f_44 = 0;
+    }
+}
+
 /// FUN_001e3890(node, rec): the wait condition of `rec`
 pub fn ee_sub_1e3890(c: &mut C2d8c48, k: usize, rec: usize, now: f32, h: &mut dyn ClassHost) -> bool {
     let r = c.f_54[rec];
@@ -383,11 +450,23 @@ pub fn ee_sub_1e3890(c: &mut C2d8c48, k: usize, rec: usize, now: f32, h: &mut dy
             }
             on
         }
+        // FEEL R81: case 0x2a: node +0x44 == 0 -> done; else +0x44's +0x2dc (JMP jtbs) == -1
+        0x2a if n.f_44 != 0 && std::env::var("SLY2_FEEL_R81HOP").map_or(true, |v| v != "0") => h.k22_hop_done_2a(n.f_44).unwrap_or(true),
+        // FEEL R92: case 0x1a: node +0x44 == 0 -> done; else |jt+0xf60 - FUN_0011d948(+0x7c, FUN_0019e110(jt+0xf50))|
+        // < rec[5] (the climb itself: FUN_001e46a0 case 0x1a steering, host `k22_climb_1a`). SLY2_FEEL_R92CLIMB=0 = old.
+        0x1a if n.f_44 != 0 && std::env::var("SLY2_FEEL_R92CLIMB").map_or(true, |v| v != "0") => {
+            let t = ee_sub_1e1db8(n.ctx, r[4], h);
+            let p = if t != 0 { h.ee_sub_1a62e8(t) } else { h.ee_sub_1a62e8(n.f_44) };
+            h.k22_climb_1a(n.f_44, p).map_or(true, |d| d < f32::from_bits(r[5]))
+        }
         0x44 => !h.k22_title_active_1d9880(),
         // K23: FUN_001fe848(0x3dd040, id) == 0
         0x45 => !h.k23_stream_1fe848(r[4] as i32),
         0x4a | 0x4e => f32::from_bits(r[4]) <= h.k22_music_1fe3f8(),
         0x53 => f32::from_bits(r[5]) < now - n.f_34,
+        // ANIM-ALL R35: 0x3b until the subject's HUD (+0xf28) is up (1); 0x3c until it is gone (-1)
+        0x3b => n.f_a0 == 0 || binoc_hud(c, n.f_a0) == 1,
+        0x3c => n.f_a0 == 0 || binoc_hud(c, n.f_a0) == -1,
         // K30: the zoom look's getters (as of the last camera apply)
         0x3d | 0x3e | 0x40 => h.k30_zoom_wait(r[0]),
         // K27: +0x60 = the fading object: 0x2c done once it is in the world (+0x28 bit 60) with alpha
@@ -412,6 +491,55 @@ pub fn ee_sub_1e3890(c: &mut C2d8c48, k: usize, rec: usize, now: f32, h: &mut dy
                 c.k22_nodes[k].f_dc = 0;
             }
             c.k22_nodes[k].f_dc == 0
+        }
+        // CRAWL R46: case 0x24 (text_001e0000.c:3055): subject = node +0x44 (set by the 0x24 start); target =
+        // FUN_001e1db8(rec[4]); done when |FUN_001a62e8(subj) - FUN_001e4d40(target)| < rec[6] (float); every
+        // wait frame FUN_001448f0(subj + 0xfd0, target pos) (host `k22_walkto_1448f0`). Done with rec[8] != -1 ->
+        // FUN_00143ff8(subj) (pose release, UNPORTED).
+        // Gated (SLY2_K22_WALK) until the walker exists: with no +0xfd0 controller the wait never ends and the
+        // row-6 intro sequence stalls (job 1836 return fails); default keeps the old immediate-done behaviour.
+        // FEEL R27: back to opt-in (SLY2_K22_WALK=1). CRAWL R49 made it default ON, but the walker is not wired
+        // yet: the Bevy loop never drains k22_walktos, FUN_001a62e8 of Sly's JT object (class 53) returns its
+        // static load xf instead of the player, and the teleported JT stands 28 above the locator (sphere centre
+        // vs origin) -> every 0x24 wait (hub int1 obj 3931 rec 6 -> 27248) never ends (wirean_zoom_look_live_camera).
+        // CRAWL R52: default ON again (SLY2_K22_NOWALK=1 disables): ee_sub_1a62e8 maps Sly's class-53 JT object to the
+        // live JT (EngineHost::jt_live), the Bevy loop drains the goals (player::plugin loot_link) and the distance is
+        // XY (R50). REPLACED: with no live JT at all (headless runs without a player) nothing can walk -> done.
+        0x24 if std::env::var_os("SLY2_K22_NOWALK").is_none() => {
+            let s = n.f_44;
+            if s == 0 || !h.k22_jt_live() {
+                return true;
+            }
+            let t = ee_sub_1e1db8(n.ctx, r[4], h);
+            if t == 0 {
+                return true;
+            }
+            let p = h.ee_sub_1a62e8(t);
+            // CRAWL R122: NPC walk (Murray 0x36 / Bentley 0x37 subject, not the live JT): FUN_001e46a0 case 0x24 writes
+            // the subject's joy (heading atan2(goal - pos), magnitude |rec[5]| * clamp(poly(d))) and the subject's PO
+            // update walks it (host `k22_npc_walk_1e46a0`). Opt-out SLY2_NO_R122_NPCWALK=1.
+            if std::env::var_os("SLY2_NO_R122_NPCWALK").is_none() && s != super::guard::PLAYER_HANDLE && (h.ee_sub_132b10(s, 0x36) != 0 || h.ee_sub_132b10(s, 0x37) != 0) {
+                h.k22_npc_walk_1e46a0(s, p, f32::from_bits(r[5]));
+            }
+            let q = h.ee_sub_1a62e8(s);
+            // CRAWL R50: XY distance (asm 0x1e3c98 vmul.xy + vaddy.x), not 3D
+            let d = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+            // CRAWL R121: row 3 seq 1779 (task 1778 crank) walks MURRAY (obj 1436, class 54, handle 0x59d) to 124002 /
+            // 124003; the port has no NPC (Bentley / Murray) FUN_001448f0 walker and Murray's FUN_001a62e8 is his static
+            // load xf, so the wait never ends. OPT-IN SLY2_R121_NPCWALK_DONE=1 (REPLACED): a walk of a subject that is
+            // not the live JT is done at once (lets the rest of the sequence run: 0x4f crank -> slab SM 17434).
+            if std::env::var_os("SLY2_R121_NPCWALK_DONE").is_some() && s != super::guard::PLAYER_HANDLE && (h.ee_sub_132b10(s, 0x36) != 0 || h.ee_sub_132b10(s, 0x37) != 0) {
+                return true;
+            }
+            if std::env::var_os("SLY2_R121_WALKDBG").is_some() {
+                eprintln!("R121W 0x24 wait subj {s:#x} {q:?} target {t:#x} {p:?} d {d} lim {}", f32::from_bits(r[6]));
+            }
+            h.k22_walkto_1448f0(s, p, f32::from_bits(r[5]));
+            // FEEL R93: FUN_001e46a0 case 0x24: rec[9] != 0 -> joy +0x30 |= 8 (R1 held = jts 1 run). SLY2_FEEL_R93RUN=0 = old
+            if r[9] != 0 && std::env::var("SLY2_FEEL_R93RUN").map_or(true, |v| v != "0") {
+                h.k22_walk_r1_1e46a0(s);
+            }
+            d < f32::from_bits(r[6])
         }
         // K28: owner-clock timer (LAB_001e42ac, as 0x33)
         0x23 => f32::from_bits(r[4]) < now - n.f_34,
@@ -444,7 +572,9 @@ pub fn ee_sub_1e3890(c: &mut C2d8c48, k: usize, rec: usize, now: f32, h: &mut dy
                 return true;
             }
             let sma_done = h.ee_sub_1f0638(n.f_58);
-            if sma_done || n.f_5c != 0 {
+            // CRAWL R50: FUN_001e1bc8 sets +0x5c on the SMA's message 10 whose new label is rec[6] (and the 0xd
+            // start sets it when FUN_001f07e8 already is rec[6]); REPLACED: polled here
+            if sma_done || n.f_5c != 0 || h.ee_sub_1f07e8(n.f_58) == r[6] as i32 || h.k22_sma_msg10(n.f_58, r[6] as i32) {
                 let owner = c.f_6c as u32 + 1;
                 h.k22_release_1e5410(owner);
                 c.k22_nodes[k].f_58 = 0;
@@ -602,12 +732,17 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
     let r = c.f_54[cur];
     let nd = c.k22_nodes[k].clone();
     let subj = match subject_word(r[0]) {
-        Some(w) => ee_sub_1e1db8(nd.ctx, r[w], h),
-        None if nd.f_20 != 0 => nd.f_20,
-        None if nd.target != 0 => nd.target,
-        None => c.f_6c as u32,
+        // EMU5: asm 0x1e1eec: a word of -1 falls back to the defaults below (node +0x20 / +0x1c / owner +0x6c).
+        // (logs/EMU5.md 02:30: this exposes ep1d row 6 harness route assumptions; CRAWL owns mission_rows)
+        Some(w) if r[w] as i32 != -1 => ee_sub_1e1db8(nd.ctx, r[w], h),
+        Some(_) | None if nd.f_20 != 0 => nd.f_20,
+        Some(_) | None if nd.target != 0 => nd.target,
+        _ => c.f_6c as u32,
     };
     c.k22_nodes[k].f_24 = subj;
+    if std::env::var_os("SLY2_K22DBG").is_some() {
+        eprintln!("k22 obj {obj} node {n:#x} rec {cur}/{} {:x?} subj {subj:#x}", c.k22_nodes[k].last, r);
+    }
     let me = obj as u32 + 1;
     match r[0] {
         0 => {
@@ -625,14 +760,37 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
                 ee_sub_1e5628(c, t);
             }
         }
-        // 5 / 6 on another sequence object (FUN_00132b10(.., 0x72)) are unported
+        // 6 on another sequence object (FUN_00132b10(.., 0x72)) is unported
         5 if r[5] as i32 == -1 => ee_sub_1e0020(c, r[4] as i32),
+        // CRAWL R108: case 5 on another sequence: seq = FUN_001e1db8(rec[5]) is-a 0x72 -> FUN_001e0020(seq, rec[4])
+        // (host `seq_signals`, delivered before that sequence's next update). Row 5 recon: seq 1792 rec 1
+        // {5, .., 123864, 1791} releases seq 1791's rec-3 wait 4 -> 1790 2 (wireep8_recon_photos_live). Opt-out
+        // SLY2_NO_R108_SEQSIG.
+        5 if std::env::var_os("SLY2_NO_R108_SEQSIG").is_none() => {
+            let s = ee_sub_1e1db8(nd.ctx, r[5], h);
+            if s != 0 && h.ee_sub_132b10(s, 0x72) != 0 {
+                if s == obj as u32 + 1 {
+                    ee_sub_1e0020(c, r[4] as i32);
+                } else {
+                    h.ee_sub_1e0020(s, r[4] as i32);
+                }
+            }
+        }
         6 if r[4] as i32 == -1 => c.ee_sub_1dfeb8(obj, h),
         // (po vtable +0x27c)(po, 1): slot 78, the controlled character switch (classes derived from 0x32)
         7 => {
             let po = ee_sub_1e1db8(nd.ctx, r[4], h);
             if po != 0 && h.ee_sub_132b10(po, 0x32) != 0 {
                 h.k22_po_switch(po);
+            }
+        }
+        // EMU5: case 0xb: seq = FUN_001e1db8(rec[4]) is-a 0x72 -> FUN_001dfd58(seq, subject) (host queue
+        // `seq_starts`, e.g. hub safehouse exit 141710 -> 27254 with Sly). The rec[1] == 0 wait (+0x50 = seq until
+        // its +0x74 clears, FUN_001e3890 case 0xb) is not modelled: another object's running flag is out of reach.
+        0xb => {
+            let s = ee_sub_1e1db8(nd.ctx, r[4], h);
+            if s != 0 && h.ee_sub_132b10(s, 0x72) != 0 {
+                h.ee_sub_1dfd58(s, subj);
             }
         }
         8 => {
@@ -644,10 +802,40 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
         0x44 => h.k22_title_show_1dd820(),
         // WP-EP1f: FUN_001e1db8(node, rec[4]) of class 0x29 (warp) -> FUN_00228170(warp) (the +0x14 / +0x24
         // next-record choice is not modelled, like the other actions)
+        // EMU5: the rest of case 0x16 (asm 0x1e24f0..0x1e2728): no subject -> nothing; target not a
+        // class-0x1b path (or none) -> FUN_001e4d40 locator pos / matrix, subject SetPosition (+0xec) /
+        // SetMat (+0xf4), for a 0x34 subject jt+0x1060 and (rec[5] == 0 && +0x12f4 == 0) FUN_00195a00(jt+0x2c0,
+        // 0xb, 0, 0) + FUN_001f4e28, FUN_001e4eb8(node, 0, 0), then vt +0x11c / +0x124 (host
+        // `k22_teleport_1e1e30_16`); 0x1b target on a 0x34 subject -> FUN_001928f8(+0x4c0, 8, target) /
+        // FUN_00192bd8(+0x4c0, 9) (UNPORTED, recorded) + FUN_001e4eb8(node, 0, 0).
+        // CRAWL R121: case 0x4f (as case 0's second arm, text_001e0000.c FUN_001e1e30): subject is-a 0x36 ->
+        // FUN_001b9c00(subj, FUN_001f67e0(FUN_001e1db8(rec[5]), -1), rec[7], rec[6], rec[8]): subj +0x1530 = the
+        // SMA, +0x1534 = rec[6], SetState(subj, 6); label rec[7] != -1 -> that SMA (and the subject's own +0x1034
+        // SMA) FUN_001f0660 (rec[8] == 0) / FUN_001f0948. Row 3 seq 1779 (task 1778 crank): Sly drives ALO 123999's
+        // SM 457 459 -> 461 -> 464, whose state-change script (entry 119 sym 8) mirrors the label onto the cellar
+        // slab 136544's SM 17434 (rec_ep1d slab z 320 -> 0, clk 38..58). REPLACED: FUN_001e1db8(rec[5]) = the oid's
+        // first object (FUN_0020fff0 lookup); UNPORTED: the subject's SetState 6 / +0x1034 SMA (Sly's crank pose).
+        // Opt-out SLY2_NO_R121_SEQ4F=1.
+        0x4f if std::env::var_os("SLY2_NO_R121_SEQ4F").is_none() => {
+            if subj != 0 && h.ee_sub_132b10(subj, 0x36) != 0 && r[7] as i32 != -1 {
+                let mode = 1 | if r[8] != 0 { 2 } else { 0 };
+                h.k22_sma_20fff0(nd.ctx, &[r[5], u32::MAX, r[7], r[7]], mode, 0);
+            }
+        }
         0x16 => {
             let o = ee_sub_1e1db8(nd.ctx, r[4], h);
             if o != 0 && h.ee_sub_132b10(o, 0x29) != 0 {
                 h.ee_sub_228170(o);
+            } else if subj != 0 {
+                if o == 0 || h.ee_sub_132b10(o, 0x1b) == 0 {
+                    h.k22_teleport_1e1e30_16(subj, o, r[5]);
+                    if h.ee_sub_132b10(subj, 0x34) != 0 {
+                        ee_sub_1e4eb8_clear(c, n);
+                    }
+                } else if h.ee_sub_132b10(subj, 0x34) != 0 {
+                    h.k22_seq_action(me, subj, &r);
+                    ee_sub_1e4eb8_clear(c, n);
+                }
             }
         }
         // K27: FUN_00171cf8(guard, routine); r[1] == 0 (wait) keeps both at +0xd8 / +0xdc
@@ -798,6 +986,16 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
                 }
             }
         }
+        // FEEL (K1): 0x3a ends the camera move: FUN_001e5a98(node, rec[4]) (+0x90 = cut, +0x9c = 0,
+        // FUN_0014e4c8(g_cm, 2, 10, 0x2de440, 0, node + 0x84)) — without it the intro move stays on cpp 10
+        0x3a => {
+            if let Some(k) = ix(c, n) {
+                c.k22_nodes[k].f_9c = 0;
+                c.k22_nodes[k].f_90 = r[4];
+                h.k29_cm_move_cut(c.k22_nodes[k].handle, r[4]);
+                h.ee_sub_14e4c8_k(2, 10, 0x2de440, 0, c.k22_nodes[k].handle);
+            }
+        }
         // K30: the zoom look 0x2de460 setters (FUN_00150e20 / e60 centre / look-at object of rec[4], FUN_00150ea0
         // key rec+0x10 pos / +0x20 Euler / rec[0xc] fov, FUN_00150ee8 zoom rec[4], FUN_00150ef0 snap)
         0x3d | 0x3e => {
@@ -842,21 +1040,87 @@ pub fn ee_sub_1e1e30(c: &mut C2d8c48, obj: usize, n: u32, now: f32, h: &mut dyn 
         // SEQ1: player movement / attach (subject is-a 0x34): action + FUN_001e4eb8 sets node
         // +0x40/+0x44 (record, subject). The recomp's player position is owned by the player layer;
         // these are cosmetic (cutscene choreography). Port as no-ops with the f_40/f_44 bookkeeping.
+        // CRAWL R43: case 0x24 (JT subject): rec[8] != -1 -> FUN_00143ee0(jt, rec[8], 9, 6); target =
+        // FUN_001e1db8(rec[4]) is-a 0x22/0xc/0x26/0x58/0xb/0x13 -> FUN_001938c0(jt + 0x4c0, mask, target), mask
+        // 0xffff (is-a 0x35) / 0xf8fe (0x37) / 0xf8fa; the walker itself is the host's (`k22_autowalk_1938c0`)
+        0x24 if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 => {
+            if r[8] as i32 != -1 {
+                h.k22_pose_143ee0(subj, r[8] as i32, 9, 6);
+            }
+            let t = ee_sub_1e1db8(nd.ctx, r[4], h);
+            if t != 0 && [0x22, 0xc, 0x26, 0x58, 0xb, 0x13].iter().any(|&k| h.ee_sub_132b10(t, k) != 0) {
+                let mask = if h.ee_sub_132b10(subj, 0x35) != 0 { 0xffff } else if h.ee_sub_132b10(subj, 0x37) != 0 { 0xf8fe } else { 0xf8fa };
+                h.k22_autowalk_1938c0(subj, mask, t);
+            }
+            if let Some(k) = ix(c, n) {
+                c.k22_nodes[k].f_40 = Some(cur);
+                c.k22_nodes[k].f_44 = subj;
+            }
+        }
+        // FEEL R81: case 0x2a (text_001e0000.c:2321) on a 0x34 subject: target t = FUN_001e1db8(rec[4]) -> FUN_0019f590(subj,
+        // {t, pos}) (pos: t == 0 -> subject pos + jt+0x240; FUN_00184670(t) == 0 -> FUN_001e4d40 locator pos dropped by
+        // FUN_00173610(100, -150); else the attach extension's vt +0x14 point), = the jtbs 0x15 hop; rec[5] == 1 ->
+        // +0x2e8 = 1; FUN_001e4eb8 bookkeeping. The hop itself is the host's (`k22_hop_1e1e30_2a`, player layer).
+        // Port had it as a no-op: the EP1 hub intro (seq 3609 recs 3 / 7 / 9) then left Sly elsewhere than rec_ep1b.
+        // SLY2_FEEL_R81HOP=0 = old no-op.
+        0x2a if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 && std::env::var("SLY2_FEEL_R81HOP").map_or(true, |v| v != "0") => {
+            let t = ee_sub_1e1db8(nd.ctx, r[4], h);
+            h.k22_hop_1e1e30_2a(subj, t, r[5]);
+            if let Some(k) = ix(c, n) {
+                c.k22_nodes[k].f_40 = Some(cur);
+                c.k22_nodes[k].f_44 = subj;
+            }
+        }
+        // FEEL R86: case 0x2b (text_001e0000.c:2371) on a 0x34 subject: target t = FUN_001e1db8(rec[4]), its pos
+        // FUN_001e4d40(t, 0) -> FUN_00141968(subj, pos, f12 = rec[5], f13 = rec[6]) = the ballistic launch (bounce pad).
+        // The launch itself is the host's (`k22_launch_1e1e30_2b`, player layer). SLY2_FEEL_R86PAD=0 = old no-op.
+        0x2b if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 && std::env::var("SLY2_FEEL_R86PAD").map_or(true, |v| v != "0") => {
+            let t = ee_sub_1e1db8(nd.ctx, r[4], h);
+            h.k22_launch_1e1e30_2b(subj, t, f32::from_bits(r[5]), f32::from_bits(r[6]));
+        }
         0x1a | 0x2a | 0x24 => {
-            if subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 {
+            // FEEL R92: case 0x1a attaches the subject only while it rides a path (+0xf54 != -1)
+            let on = r[0] != 0x1a || std::env::var("SLY2_FEEL_R92CLIMB").map_or(false, |v| v == "0") || h.k22_on_path_1a(subj).unwrap_or(true);
+            if on && subj != 0 && h.ee_sub_132b10(subj, 0x34) != 0 {
                 if let Some(k) = ix(c, n) {
                     c.k22_nodes[k].f_40 = Some(cur);
                     c.k22_nodes[k].f_44 = subj;
                 }
             }
         }
-        // SEQ1: attach/detach kind-0x33 object to/from node list (FUN_001e51a0 / FUN_001e5280).
-        // The slot 82/83 calls are cosmetic (dialog actor positioning). No-op in the recomp.
+        // ANIM-ALL R33: attach/detach an is-a-0x33 object to/from the node list (FUN_001e51a0 / FUN_001e5280):
+        // slot 82/83 = the players' FUN_00205478 / FUN_00205588 layer SMs (EP4 Bentley SMs 1548..1552)
+        0x47 if subj != 0 => {
+            if let Some(k) = ix(c, n) {
+                ee_sub_1e51a0(c, k, subj, r[5], r[6], h);
+            }
+        }
+        0x48 if subj != 0 => {
+            if let Some(k) = ix(c, n) {
+                ee_sub_1e5280(c, k, subj, r[5], r[6], h);
+            }
+        }
         0x47 | 0x48 => {}
-        // SEQ1: dialog start (FUN_0019cc50 on subject+0xf00) — cosmetic voice line. No-op.
-        0x3b => {}
-        // SEQ1: dialog release (FUN_001e54b0, node+0xa0). No-op.
-        0x3c => {}
+        // ANIM-ALL R35: case 0x3b: partner = FUN_001e1db8(rec[5]) (its is-a 0x33 test is unused), b =
+        // FUN_0015e938(0x3dd490, 0x405, rec[6], 0), s = FUN_001e1db8(rec[4]); s is-a 0x34 -> node +0xa0 = s,
+        // FUN_0019cc50(s + 0xf00, 1, partner, b) (queued for `ClassSet`)
+        0x3b => {
+            let partner = ee_sub_1e1db8(nd.ctx, r[5], h);
+            let b = h.ee_sub_15e938(0x405, r[6] as i32, 0);
+            let s = ee_sub_1e1db8(nd.ctx, r[4], h);
+            if s != 0 && h.ee_sub_132b10(s, 0x34) != 0 {
+                if let Some(k) = ix(c, n) {
+                    c.k22_nodes[k].f_a0 = s;
+                }
+                c.k27_ops.push(GuardOp::Binoc(s, 1, partner, b));
+            }
+        }
+        // ANIM-ALL R35: case 0x3c: FUN_001e54b0
+        0x3c => {
+            if let Some(k) = ix(c, n) {
+                ee_sub_1e54b0(c, k);
+            }
+        }
         _ => h.k22_seq_action(me, subj, &r),
     }
     // LAB_001e380c: the action start time

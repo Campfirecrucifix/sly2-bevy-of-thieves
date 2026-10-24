@@ -93,6 +93,14 @@ impl EmitterSystem {
         }
     }
 
+    /// AUD3: a music / ambience instance of 0x3dd040 (+0x204 stack, +0x228): pool alloc with one reference,
+    /// not on the active list (the stream voice is the host's layer players; FUN_001fe150 REPLACED).
+    pub fn alloc_instance(&mut self, sound: i32) -> EmitterId {
+        let id = self.alloc(SoundEmitter::new(sound));
+        self.add_ref(id);
+        id
+    }
+
     /// vtable slot 0 (FUN_001fc090): add reference
     pub fn add_ref(&mut self, id: EmitterId) {
         if let Some(e) = self.get_mut(id) {

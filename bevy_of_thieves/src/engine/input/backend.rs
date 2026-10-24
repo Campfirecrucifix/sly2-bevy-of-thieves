@@ -4,7 +4,7 @@
 use super::bindings::{Action, Bindings, VirtualPad, action_by_name};
 use super::pad::{self, CheatDetector, Clock, InputLock, PadState, ReadCtx};
 use super::rumble::RumbleCtx;
-use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton, GamepadRumbleIntensity, GamepadRumbleRequest};
+use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton, GamepadInput, GamepadRumbleIntensity, GamepadRumbleRequest};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use std::time::Duration;
@@ -122,6 +122,8 @@ pub struct DeviceScript {
     pub steps: Vec<(u32, u32, bool, Vec<String>)>,
     pub frame: u32,
     pub pad: Option<Entity>,
+    /// FEEL R82 (verification): mouse motion of this frame from `kA-B:MouseDX=n+MouseDY=n` items (pixels/frame)
+    pub motion: Vec2,
 }
 
 impl DeviceScript {
@@ -167,13 +169,18 @@ fn device_script(
         return;
     };
     let mut pad = pads.get_mut(e).ok();
+    let mut motion = Vec2::ZERO;
     for (a, b, kb, names) in &s.steps {
         let on = f >= *a && f < *b;
         if !on && f != *b {
             continue;
         }
         for n in names {
-            if *kb {
+            if let Some(d) = n.strip_prefix("MouseDX=").and_then(|v| v.parse::<f32>().ok()) {
+                motion.x += if on { d } else { 0.0 };
+            } else if let Some(d) = n.strip_prefix("MouseDY=").and_then(|v| v.parse::<f32>().ok()) {
+                motion.y += if on { d } else { 0.0 };
+            } else if *kb {
                 match (key_code(n), mouse_button(n)) {
                     (Some(k), _) if on => keys.press(k),
                     (Some(k), _) => keys.release(k),
@@ -195,6 +202,7 @@ fn device_script(
             }
         }
     }
+    s.motion = motion;
 }
 
 fn button_bits(n: &str) -> u32 {
@@ -290,7 +298,25 @@ fn apply(v: &mut VirtualPad, action: Action, value: f32) {
     }
 }
 
-/// Sample everything into one virtual DualShock2 (keyboard/mouse and the first gamepad are merged).
+/// FEEL R80 (port addition): radial stick deadzone of a physical gamepad (a resting / worn stick reads a few
+/// percent off centre; summed onto the keyboard stick it made Sly creep). Rescaled so full tilt stays 1.0.
+pub const PAD_STICK_DEADZONE: f32 = 0.2;
+
+fn deadzone(s: [f32; 2]) -> [f32; 2] {
+    let m = (s[0] * s[0] + s[1] * s[1]).sqrt();
+    if m <= PAD_STICK_DEADZONE {
+        return [0.0, 0.0];
+    }
+    let k = ((m - PAD_STICK_DEADZONE) / (1.0 - PAD_STICK_DEADZONE)).min(1.0) / m;
+    [s[0] * k, s[1] * k]
+}
+
+/// FEEL R82: smallest mouse-driven right stick = just past FUN_00187768's dead zone (0.35 of a range of up to 1.0).
+pub const MOUSE_STICK_EDGE: f32 = 0.36;
+
+/// Sample everything into one virtual DualShock2. Buttons of keyboard/mouse and the active gamepad are merged;
+/// FEEL R80: a stick held on the keyboard (or moved by the mouse) replaces that pad stick instead of being summed
+/// with it, and the pad sticks get a radial deadzone (`PAD_STICK_DEADZONE`).
 pub fn sample(
     b: &Bindings,
     keys: &ButtonInput<KeyCode>,
@@ -298,6 +324,124 @@ pub fn sample(
     motion: Vec2,
     gamepad: Option<&Gamepad>,
 ) -> VirtualPad {
+    let mut v = sample_kb(b, keys, mouse, motion);
+    if let Some(g) = gamepad {
+        let p = sample_pad(b, g);
+        v.buttons |= p.buttons;
+        v.extra |= p.extra;
+        for i in 0..16 {
+            v.analog[i] = v.analog[i].max(p.analog[i]);
+        }
+        let old = std::env::var("SLY2_FEEL_R80PAD").is_ok_and(|s| s == "0");
+        for i in 0..2 {
+            if old {
+                v.sticks[i] = [(v.sticks[i][0] + p.sticks[i][0]).clamp(-1.0, 1.0), (v.sticks[i][1] + p.sticks[i][1]).clamp(-1.0, 1.0)];
+            } else if v.sticks[i] == [0.0, 0.0] {
+                v.sticks[i] = deadzone(p.sticks[i]);
+            }
+        }
+    }
+    v
+}
+
+fn sample_pad(b: &Bindings, g: &Gamepad) -> VirtualPad {
+    sample_pad_ax(b, g, &|a| g.get(a).unwrap_or(0.0))
+}
+
+fn sample_pad_ax(b: &Bindings, g: &Gamepad, ax: &dyn Fn(GamepadAxis) -> f32) -> VirtualPad {
+    let mut v = VirtualPad::default();
+    for (name, srcs) in &b.gamepad {
+        let Some(action) = action_by_name(name) else { continue };
+        for s in srcs {
+            let value = if let Some(btn) = pad_button(s) {
+                let v = g.get(btn).unwrap_or(0.0);
+                if (g.pressed(btn) || g.just_pressed(btn)) && v < 0.5 { 1.0 } else { v }
+            } else if let Some((axis, sign)) = pad_axis(s) {
+                ax(axis) * sign
+            } else {
+                0.0
+            };
+            apply(&mut v, action, value);
+        }
+    }
+    for s in v.sticks.iter_mut().flatten() {
+        *s = s.clamp(-1.0, 1.0);
+    }
+    v
+}
+
+/// FEEL R82 (port addition, USER PLAYTEST 6 'controller unusable'): every connected gamepad is read, so the pad
+/// that really carries the DualSense / DS4 input drives the game whichever gilrs device it is (gilrs on Windows
+/// lists the DualSense as 'PS5 Controller' with an SDL mapping plus a 'No mapping found for UUID 0000..' phantom
+/// that reports vendor 0 instead of None, so R80's vendor test let the phantom win). A stuck axis cannot push Sly:
+/// an axis's value during the first `PAD_REST_FRAMES` frames a pad is seen is its rest value (a trigger / unmapped
+/// axis resting at -1 / +1 under the default mapping) and only the offset from rest counts. Buttons of all pads are
+/// OR-ed, each stick is the strongest pad stick after the deadzone.
+#[derive(Default, Debug)]
+pub struct PadMerge {
+    /// (pad, axis) -> rest value
+    pub rest: std::collections::HashMap<(Entity, GamepadAxis), f32>,
+    /// pad -> frames seen
+    pub seen: std::collections::HashMap<Entity, u32>,
+}
+
+/// FEEL R82: frames after a pad appears during which its axis readings count as rest.
+pub const PAD_REST_FRAMES: u32 = 30;
+
+impl PadMerge {
+    pub fn sample(&mut self, b: &Bindings, pads: &[(Entity, &Gamepad)]) -> Option<VirtualPad> {
+        self.seen.retain(|e, _| pads.iter().any(|p| p.0 == *e));
+        self.rest.retain(|k, _| pads.iter().any(|p| p.0 == k.0));
+        let mut out: Option<VirtualPad> = None;
+        for &(e, g) in pads {
+            let n = self.seen.entry(e).or_insert(0);
+            *n += 1;
+            let early = *n <= PAD_REST_FRAMES;
+            if early {
+                for (axis, v) in g.analog().all_axes_and_values() {
+                    if let GamepadInput::Axis(a) = axis {
+                        self.rest.insert((e, *a), v);
+                    }
+                }
+            }
+            let rest = &self.rest;
+            let p = sample_pad_ax(b, g, &|a| (g.get(a).unwrap_or(0.0) - rest.get(&(e, a)).copied().unwrap_or(0.0)).clamp(-1.0, 1.0));
+            let o = out.get_or_insert_with(VirtualPad::default);
+            o.buttons |= p.buttons;
+            o.extra |= p.extra;
+            for i in 0..16 {
+                o.analog[i] = o.analog[i].max(p.analog[i]);
+            }
+            for i in 0..2 {
+                let d = deadzone(p.sticks[i]);
+                if d[0].hypot(d[1]) > o.sticks[i][0].hypot(o.sticks[i][1]) {
+                    o.sticks[i] = d;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// FEEL R82: keyboard/mouse + the merged pads (`PadMerge`); a held keyboard/mouse stick wins over the pad stick.
+pub fn sample_merged(b: &Bindings, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>, motion: Vec2, pads: Option<VirtualPad>) -> VirtualPad {
+    let mut v = sample_kb(b, keys, mouse, motion);
+    if let Some(p) = pads {
+        v.buttons |= p.buttons;
+        v.extra |= p.extra;
+        for i in 0..16 {
+            v.analog[i] = v.analog[i].max(p.analog[i]);
+        }
+        for i in 0..2 {
+            if v.sticks[i] == [0.0, 0.0] {
+                v.sticks[i] = p.sticks[i];
+            }
+        }
+    }
+    v
+}
+
+fn sample_kb(b: &Bindings, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>, motion: Vec2) -> VirtualPad {
     let mut v = VirtualPad::default();
     for (name, srcs) in &b.keyboard {
         let Some(action) = action_by_name(name) else { continue };
@@ -308,25 +452,20 @@ pub fn sample(
             apply(&mut v, action, if held { 1.0 } else { 0.0 });
         }
     }
-    if let Some(g) = gamepad {
-        for (name, srcs) in &b.gamepad {
-            let Some(action) = action_by_name(name) else { continue };
-            for s in srcs {
-                let value = if let Some(btn) = pad_button(s) {
-                    let v = g.get(btn).unwrap_or(0.0);
-                    if (g.pressed(btn) || g.just_pressed(btn)) && v < 0.5 { 1.0 } else { v }
-                } else if let Some((axis, sign)) = pad_axis(s) {
-                    g.get(axis).unwrap_or(0.0) * sign
-                } else {
-                    0.0
-                };
-                apply(&mut v, action, value);
-            }
-        }
-    }
     if b.mouse_right_stick {
-        v.sticks[1][0] += motion.x * b.mouse_sensitivity;
-        v.sticks[1][1] -= motion.y * b.mouse_sensitivity;
+        let m = Vec2::new(motion.x, -motion.y) * b.mouse_sensitivity;
+        let l = m.length();
+        // FEEL R82 (port addition, user playtest 5 'camera does not turn with the mouse'): FUN_00187768 drops a
+        // stick below 0.35 of its calibrated range (0.75..1) and squares the rest in the camera, so ordinary mouse
+        // speeds (< 13 px/frame at sensitivity 0.02) never reached the camera. Mouse motion starts just past that
+        // dead zone instead. SLY2_FEEL_R82MOUSE=0 = old (linear, inside the dead zone).
+        let m = if l <= 0.0 || std::env::var("SLY2_FEEL_R82MOUSE").is_ok_and(|s| s == "0") {
+            m
+        } else {
+            m * ((MOUSE_STICK_EDGE + l).min(1.0) / l)
+        };
+        v.sticks[1][0] += m.x;
+        v.sticks[1][1] += m.y;
     }
     for s in v.sticks.iter_mut().flatten() {
         *s = s.clamp(-1.0, 1.0);
@@ -346,17 +485,54 @@ fn pad_update(
     mut rumble: MessageWriter<GamepadRumbleRequest>,
     script: Option<ResMut<GlobalPadScript>>,
     dev_script: Option<Res<DeviceScript>>,
-    mut log: Local<(u32, Option<bool>, VirtualPad)>,
+    mut log: Local<(u32, Option<bool>, VirtualPad, Option<Entity>)>,
+    mut merge: Local<PadMerge>,
 ) {
     let dt = time.delta_secs();
     // DAT_002ddf10 is never 0 in the original; guard the first frame
     let clock = Clock { t: time.elapsed_secs(), dt: if dt > 0.0 { dt } else { 1.0 / 60.0 } };
-    let first = gamepads.iter().next();
+    // FEEL R80 (port addition, user playtest: a DualSense showed up twice, once as an unmapped gilrs device whose
+    // axes pushed Sly in one direction): pads without a USB vendor id (gilrs "No mapping found for UUID 0000..")
+    // are ignored while a real one is connected; the active pad is the last one that pressed a button (sticky),
+    // else the first real one. SLY2_FEEL_R80PAD=0 = old (first pad, sticks summed with the keyboard).
+    let old_pad = std::env::var("SLY2_FEEL_R80PAD").is_ok_and(|s| s == "0");
+    // FEEL R82 (verification): env SLY2_PAD_DUMP=N logs every gamepad entity's ids and non-zero inputs every N app frames
+    if let Some(n) = std::env::var("SLY2_PAD_DUMP").ok().and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0 && log.0 % *n == 0) {
+        for (e, g) in gamepads.iter() {
+            let ax: Vec<_> = g.analog().all_axes_and_values().filter(|(_, v)| v.abs() > 0.001).map(|(a, v)| format!("{a:?}={v:.3}")).collect();
+            let bt: Vec<_> = g.digital().get_pressed().map(|b| format!("{b:?}")).collect();
+            info!("PADDUMP f{} {e:?} vendor {:?} product {:?} axes {ax:?} pressed {bt:?}", log.0, g.vendor_id(), g.product_id());
+        }
+    }
+    let any_real = gamepads.iter().any(|(_, g)| g.vendor_id().is_some_and(|v| v != 0));
+    let eligible = |g: &Gamepad| !any_real || g.vendor_id().is_some_and(|v| v != 0);
+    if let Some((e, _)) = gamepads.iter().find(|(_, g)| eligible(g) && g.get_just_pressed().next().is_some()) {
+        log.3 = Some(e);
+    }
+    if log.3.is_some_and(|e| !gamepads.get(e).is_ok_and(|(_, g)| eligible(g))) {
+        log.3 = None;
+    }
+    let first = if old_pad {
+        gamepads.iter().next()
+    } else {
+        log.3.and_then(|e| gamepads.get(e).ok()).or_else(|| gamepads.iter().find(|(_, g)| eligible(g)))
+    };
     // raw mouse motion is reported even while the window is in the background: only a focused window
     // turns it into right-stick input (and never during a scripted verification run)
     let focused = windows.iter().next().is_some_and(|w| w.focused) && script.is_none() && dev_script.is_none();
-    let motion = if focused { motion.delta } else { Vec2::ZERO };
-    let mut v = sample(&input.bindings, &keys, &mouse, motion, first.map(|(_, g)| g));
+    let motion = match &dev_script {
+        Some(d) if d.motion != Vec2::ZERO => d.motion,
+        _ if focused => motion.delta,
+        _ => Vec2::ZERO,
+    };
+    // FEEL R82: all pads merged with rest calibration (SLY2_FEEL_R82PADS=0 = R80 single active pad)
+    let mut v = if old_pad || std::env::var("SLY2_FEEL_R82PADS").is_ok_and(|s| s == "0") {
+        sample(&input.bindings, &keys, &mouse, motion, first.map(|(_, g)| g))
+    } else {
+        let pads: Vec<(Entity, &Gamepad)> = gamepads.iter().collect();
+        let p = merge.sample(&input.bindings, &pads);
+        sample_merged(&input.bindings, &keys, &mouse, motion, p)
+    };
     // WP-EP1a: scripted app-frame pad (verification)
     if let Some(mut s) = script {
         let (st, btn) = s.next();

@@ -29,7 +29,8 @@ pub fn ee_sub_11ed40<M: QMem + ?Sized>(m: &mut M, p: V4, a: V4, b: V4, out_pt: u
         m.wf(out_t, t);
     }
     if out_pt != 0 || out_dist != 0 {
-        let pt: V4 = std::array::from_fn(|i| a[i] + d[i] * t);
+        // VER3: ACC = a + vf0 (w + 1.0), then vmaddx: pt = ACC + d * t (asm 0x11edb4)
+        let pt: V4 = std::array::from_fn(|i| (a[i] + [0.0, 0.0, 0.0, 1.0][i]) + d[i] * t);
         if out_pt != 0 {
             m.wv(out_pt, pt);
         }

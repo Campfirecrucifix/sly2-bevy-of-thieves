@@ -87,6 +87,8 @@ pub struct Lifecycle {
     pub attached: HashMap<usize, Vec<usize>>,
     /// +0x12c applied transforms (template placement matrix, FUN_00117f18 layout)
     pub placed: HashMap<usize, [u8; 48]>,
+    /// ANIM-ALL R47: +0x28 bits 48..51 set by FUN_0013f990 (0 / 1; absent = the FUN_001a5270 default -1)
+    pub scope_kind: HashMap<usize, i8>,
 }
 
 /// FUN_001c99d8 node (0x28 bytes from FUN_001ae2a0): +0 key, +4 parent, +8 oid
@@ -373,6 +375,33 @@ impl World {
         // FUN_00148300 for root with no parent when newly activated
     }
 
+    /// ANIM-ALL R47: FUN_0013f990(o, k): +0x28 bits 48..51 = k; for a class-0x30 object also its +0x64 child list.
+    pub fn ee_sub_13f990(&mut self, i: usize, k: i8) {
+        // 0x0013f990
+        self.life.scope_kind.insert(i, k);
+        if self.objects.get(i).is_some_and(|o| class::ee_sub_15e988(o.class, 0x30 as ClassId)) {
+            let kids = self.life.lists.get(&i).map(|l| l.items.clone()).unwrap_or_default();
+            for c in kids {
+                self.ee_sub_13f990(c, k);
+            }
+        }
+    }
+
+    /// vtable +0xcc of object `i`: FUN_001ca118 (73 classes) or FUN_001ca308 (61 classes, from C2caf88:
+    /// FUN_001ca118, then +0xcc(key, 0) on every object of its +0x64 child list (+0x24 next)). ANIM-ALL R34:
+    /// the port called FUN_001ca118 only, so a template copy's children kept the root +0x3c (FUN_0015e3e8 scope).
+    pub fn vt_cc(&mut self, i: usize, key: u32, recurse: bool) {
+        let vt = self.objects.get(i).and_then(|o| super::class::class(o.class)).map_or(0, |c| c.vtable);
+        let f = if vt != 0 { crate::engine::disc::exe::exe().w(vt + 0xcc) } else { 0x001c_a118 };
+        self.ee_sub_1ca118(i, key, recurse);
+        if f == 0x001c_a308 {
+            let kids = self.life.lists.get(&i).map(|l| l.items.clone()).unwrap_or_default();
+            for c in kids {
+                self.vt_cc(c, key, false);
+            }
+        }
+    }
+
     /// FUN_001ca118 (vtable +0xcc): push `key` onto the object's template key chain and,
     /// with `recurse`, onto its attached objects'. The new chain [key, old chain root..leaf] is
     /// interned by FUN_001c99d8 (alias nodes); the old chain's nodes naming this object are
@@ -409,7 +438,7 @@ impl World {
         }
         if recurse {
             for a in attached_of(self, i) {
-                self.ee_sub_1ca118(a, key, true);
+                self.vt_cc(a, key, true);
             }
         }
     }
@@ -448,7 +477,7 @@ impl World {
             }
         }
         for &o in &objs {
-            self.ee_sub_1ca118(o, key, true); // +0xcc
+            self.vt_cc(o, key, true); // +0xcc
             self.ee_sub_1a5478(o); // +0x44
             self.ee_sub_1a5900(o, owner); // +0x54(owner, bone, 0)
             self.apply_xform(o, xform); // +0x12c
@@ -490,6 +519,15 @@ impl World {
                     self.ee_sub_1a5630(n);
                 }
                 att
+            }
+            B4Load::L1efac0 { nested, .. } if std::env::var_os("SLY2_R53OFF").is_none() => {
+                // ANIM-ALL R53: FUN_001efac0 (SM, class 111) loads its nested objects into its own collector
+                // (FUN_0013fb40(this+0x10, ..)) and then runs vt +0x4c (FUN_001a5630, bit 56) on every one of them
+                // (PCSX2: the player ASEGs held by an SM are Removed, unreferenced ones stay clear)
+                for n in nested.clone() {
+                    self.ee_sub_1a5630(n);
+                }
+                return;
             }
             _ => return,
         };

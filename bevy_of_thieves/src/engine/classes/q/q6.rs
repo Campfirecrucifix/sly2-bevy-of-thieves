@@ -28,9 +28,9 @@ pub fn callf<M: QMem + ?Sized>(m: &mut M, f: u32, a: &[u32], v: &[V4]) -> f32 {
 }
 /// virtual call through an embedded vtable pointer: `(**(code **)(*(obj + vt) + off))(obj + *(short *)(*(obj + vt) + off - 4), ..)`
 pub fn vcall<M: QMem + ?Sized>(m: &mut M, obj: u32, vt: u32, off: u32, a: &[u32], v: &[V4]) -> (u32, V4) {
-    let t = m.r32(obj + vt);
-    let f = m.r32(t + off);
-    let adj = m.r16(t + off - 4) as i16 as i32;
+    let t = m.r32(obj.wrapping_add(vt));
+    let f = m.r32(t.wrapping_add(off));
+    let adj = m.r16(t.wrapping_add(off).wrapping_sub(4)) as i16 as i32;
     let mut args = vec![obj.wrapping_add(adj as u32)];
     args.extend_from_slice(a);
     m.call(f, &args, v)

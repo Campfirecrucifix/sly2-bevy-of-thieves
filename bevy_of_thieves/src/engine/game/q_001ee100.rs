@@ -25,8 +25,10 @@ pub fn ee_sub_1ee100<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32) {
     if k == 0 {
         let n = m.r32(o + 0x1c) as i32;
         let fr = m.rf(o + 0x78);
-        let rate = ((n << 1) as f32 * (1.0 - fr)) / m.rf(o + 0x50);
-        m.wf(o + 0x74, (n - 1) as f32 * fr);
+        // VFIX3: PS2 FPU (sub.s / mul.s / div.s: x/0 = +-max, no inf/NaN)
+        use crate::engine::math::ps2f::{ps2_div, ps2_mul, ps2_sub};
+        let rate = ps2_div(ps2_mul((n << 1) as f32, ps2_sub(1.0, fr)), m.rf(o + 0x50));
+        m.wf(o + 0x74, ps2_mul((n - 1) as f32, fr));
         m.wf(o + 0x70, rate);
         let r = frand(m, 0.0, 1.0);
         let d = if r < m.rf(o + 0x5c) {

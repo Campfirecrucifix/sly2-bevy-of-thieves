@@ -259,6 +259,131 @@ impl SaveVars {
     }
 }
 
+/// Splice value tags of the CRefs FUN_001d7ed8 builds: FUN_00129518 int 0x15, FUN_00129558 float 0x16,
+/// FUN_00129598 bool 0x17 (missing = -1).
+pub const TAG_INT: u32 = 0x15;
+pub const TAG_FLOAT: u32 = 0x16;
+pub const TAG_BOOL: u32 = 0x17;
+/// SAVE2: vector / clq CRefs (Splice 0x1a / 0x1c) of the kind 5 / 6 variables; the 16-byte payload lives in
+/// the store's side table (`LiveMem::save_vec`), the store word is the guest block holding it
+pub const TAG_VECTOR: u32 = 0x1a;
+pub const TAG_CLQ: u32 = 0x1c;
+/// SAVE2: side table of the live store: path -> 16-byte vector / clq payload
+pub type SaveVecs = std::collections::BTreeMap<String, [u32; 4]>;
+
+impl SaveVars {
+    fn sym_of(&self, name: &str) -> Option<u16> {
+        let s = self.ee_sub_1d8720(name);
+        if s != -1 {
+            return Some(s as u16);
+        }
+        // FUN_001d8640 hashes upper-cased chars: same bucket for any case
+        self.names.iter().find(|(k, _)| k.eq_ignore_ascii_case(name.as_bytes())).map(|(_, &v)| v)
+    }
+
+    /// SAVE1: the live store (`LiveMem::save`, path -> {tag, payload}) is the host form of the blob 0x3d4a60:
+    /// write every scalar value through FUN_00258200 -> FUN_001d80c8 into a cleared, stamped blob
+    /// (FUN_001d7c80). Path components are symbol names or array indices ("%d").
+    pub fn live_to_blob(&self, store: &std::collections::BTreeMap<String, [u32; 2]>) -> GameData {
+        self.live_to_blob_v(store, &SaveVecs::new())
+    }
+    /// SAVE2: `live_to_blob` with the vector side table (kinds 5 / 6 written whole through FUN_001d80c8)
+    pub fn live_to_blob_v(&self, store: &std::collections::BTreeMap<String, [u32; 2]>, vecs: &SaveVecs) -> GameData {
+        let mut d = GameData::default();
+        self.ee_sub_1d7c80(&mut d);
+        d.data.fill(0);
+        for (k, v) in store {
+            let path: Option<Vec<u16>> = k.split('/').map(|c| self.sym_of(c).or_else(|| c.parse::<u16>().ok())).collect();
+            let val = match v[0] {
+                TAG_INT => SaveValue::Int(v[1] as i32),
+                TAG_FLOAT => SaveValue::Float(f32::from_bits(v[1])),
+                TAG_BOOL => SaveValue::Bool(v[1] != 0),
+                TAG_VECTOR | TAG_CLQ => match vecs.get(k) {
+                    Some(q) => SaveValue::Quad(if v[0] == TAG_VECTOR { 5 } else { 6 }, *q),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if let Some(p) = path {
+                self.ee_sub_1d80c8(&p, val, &mut d);
+            }
+        }
+        d
+    }
+
+    /// SAVE1: the loaded blob as the live store: every scalar variable (and array element) read with
+    /// FUN_001d7ed8, keyed by its name path; zero values are left out (the store's missing value reads
+    /// as 0 everywhere it is tested).
+    pub fn blob_to_live(&self, d: &GameData) -> std::collections::BTreeMap<String, [u32; 2]> {
+        self.blob_to_live_v(d).0
+    }
+    /// SAVE2: `blob_to_live` plus the kind 5 / 6 values: store entry {0x1a / 0x1c, 0} (block allocated by the
+    /// live store, `LiveMem::materialize_vecs`) and the payload in the side table
+    pub fn blob_to_live_v(&self, d: &GameData) -> (std::collections::BTreeMap<String, [u32; 2]>, SaveVecs) {
+        let mut vecs = SaveVecs::new();
+        let mut out = std::collections::BTreeMap::new();
+        let rev: HashMap<u16, String> = self.names.iter().map(|(k, &v)| (v, String::from_utf8_lossy(k).into_owned())).collect();
+        let mut offs: Vec<usize> = self.recs.iter().map(|r| r.offset as usize).chain([DATA_SIZE]).collect();
+        offs.sort_unstable();
+        let Some(root) = self.recs.first() else { return (out, vecs) };
+        let mut stack: Vec<(u16, Vec<u16>)> = vec![(root.child, vec![])];
+        let mut guard = 0;
+        while let Some((mut ui, pre)) = stack.pop() {
+            while ui != 0 && guard < 0x10000 {
+                guard += 1;
+                let Some(&r) = self.recs.get(ui as usize) else { break };
+                let mut p = pre.clone();
+                p.push(r.sym as u16);
+                let mut emit = |path: &[u16], v: SaveValue| {
+                    let tv = match v {
+                        SaveValue::Int(i) => [TAG_INT, i as u32],
+                        SaveValue::Float(f) => [TAG_FLOAT, f.to_bits()],
+                        SaveValue::Bool(b) => [TAG_BOOL, b as u32],
+                        SaveValue::Quad(5, q) if q != [0; 4] => [TAG_VECTOR, 0],
+                        SaveValue::Quad(6, q) if q != [0; 4] => [TAG_CLQ, 0],
+                        _ => return,
+                    };
+                    if tv[1] == 0 && tv[0] != TAG_VECTOR && tv[0] != TAG_CLQ {
+                        return;
+                    }
+                    let n = path.len();
+                    let k: Option<Vec<String>> = path
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| if r.array != 0 && i == n - 1 { Some(s.to_string()) } else { rev.get(s).cloned() })
+                        .collect();
+                    if let Some(k) = k {
+                        if let SaveValue::Quad(_, q) = v {
+                            vecs.insert(k.join("/"), q);
+                        }
+                        out.insert(k.join("/"), tv);
+                    }
+                };
+                if r.kind == -1 && r.array == 0 {
+                    stack.push((r.child, p));
+                } else if r.array == 0 {
+                    emit(&p, self.ee_sub_1d7ed8(&p, d));
+                } else if matches!(r.kind, 0..=6 | 9 | 10) {
+                    let o = r.offset as usize;
+                    let end = offs.iter().copied().find(|&x| x > o).unwrap_or(DATA_SIZE);
+                    let n = match r.kind {
+                        4 => (end - o) * 8,
+                        5 | 6 => (end - o) / 16,
+                        _ => (end - o) / 4,
+                    };
+                    for i in 0..n.min(0x10000) {
+                        let mut q = p.clone();
+                        q.push(i as u16);
+                        emit(&q, self.ee_sub_1d7ed8(&q, d));
+                    }
+                }
+                ui = r.next;
+            }
+        }
+        (out, vecs)
+    }
+}
+
 /// FUN_001d54b8: vibration option DAT_002c2d8c 2 -> fNoVibration (DAT_003e0fd8) = false, 3 -> true.
 pub fn ee_sub_1d54b8(vars: &SaveVars, data: &mut GameData, sym_no_vibration: u16, mode: i32) {
     // 0x001d54b8
@@ -353,6 +478,14 @@ impl MemoryCard {
         let d = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default();
         Self::new(d.join("saves"))
     }
+    /// SAVE1: `<user config dir>/saves` (`%APPDATA%\sly2-recomp\saves`), falling back to next to the exe.
+    pub fn user() -> Self {
+        // SAVE2: env SLY2_SAVE_DIR = card directory (isolated test runs)
+        if let Some(d) = std::env::var_os("SLY2_SAVE_DIR") {
+            return Self::new(d);
+        }
+        crate::settings::user_config_dir().map_or_else(Self::next_to_exe, |d| Self::new(d.join("saves")))
+    }
     /// FUN_001abb10
     pub fn slot_path(&self, slot: usize) -> PathBuf {
         self.root.join(SAVE_DIR).join(format!("{SAVE_DIR}{}", slot + 1))
@@ -365,6 +498,33 @@ impl MemoryCard {
         let tmp = p.with_extension("tmp");
         std::fs::write(&tmp, d.to_bytes())?;
         std::fs::rename(tmp, p)
+    }
+    /// SAVE2: vector / clq store values have no place in the 0x5408 image (the variable table has no kind 5 / 6
+    /// records): they are kept in a side file next to the slot (`<slot>.vec`, lines `path tag w0 w1 w2 w3` hex)
+    pub fn vec_path(&self, slot: usize) -> PathBuf {
+        self.slot_path(slot).with_extension("vec")
+    }
+    pub fn write_vecs(&self, slot: usize, store: &std::collections::BTreeMap<String, [u32; 2]>, vecs: &SaveVecs) -> io::Result<()> {
+        let mut t = String::new();
+        for (k, q) in vecs {
+            let tag = store.get(k).map_or(TAG_VECTOR, |v| v[0]);
+            t += &format!("{k}\t{tag:x}\t{:x}\t{:x}\t{:x}\t{:x}\n", q[0], q[1], q[2], q[3]);
+        }
+        std::fs::create_dir_all(self.root.join(SAVE_DIR))?;
+        std::fs::write(self.vec_path(slot), t)
+    }
+    /// SAVE2: the side file as store entries {tag, 0} (block allocated by the live store) + payloads
+    pub fn read_vecs(&self, slot: usize) -> (std::collections::BTreeMap<String, [u32; 2]>, SaveVecs) {
+        let (mut s, mut v) = (std::collections::BTreeMap::new(), SaveVecs::new());
+        for l in std::fs::read_to_string(self.vec_path(slot)).unwrap_or_default().lines() {
+            let f: Vec<&str> = l.split('\t').collect();
+            let w: Option<Vec<u32>> = f.get(1..6).map(|x| x.iter().filter_map(|h| u32::from_str_radix(h, 16).ok()).collect());
+            if let Some(w) = w.filter(|w| w.len() == 5) {
+                s.insert(f[0].to_string(), [w[0], 0]);
+                v.insert(f[0].to_string(), [w[1], w[2], w[3], w[4]]);
+            }
+        }
+        (s, v)
     }
     /// FUN_001ac468: write an empty slot (FUN_001d8d80(slot, 0) then FUN_001ac420).
     pub fn ee_sub_1ac468(&self, slot: usize, vars: &SaveVars, d: &mut GameData) -> io::Result<()> {

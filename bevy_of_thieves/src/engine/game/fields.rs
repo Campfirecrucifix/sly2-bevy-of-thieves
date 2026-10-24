@@ -61,6 +61,23 @@ pub fn object_props(o: &Lo) -> Option<&[Prop]> {
     })
 }
 
+/// WIRE-EP7: the field-8 rows (FUN_00132d88 ensure-o {symid (kind 0x15), S32 (kind 6)}) FUN_0013f810 ran
+/// at load for `obj`: its own stream props, then the FUN_001c9b08 override rows, in order.
+pub fn load_user_props(w: &World, obj: usize) -> Vec<(u32, i32)> {
+    use crate::engine::world::props::ArrayItem;
+    let own = w.objects.get(obj).and_then(object_props).unwrap_or(&[]);
+    let ov = w.override_props.get(&obj).map(|v| v.as_slice()).unwrap_or(&[]);
+    let mut out = vec![];
+    for p in own.iter().chain(ov).filter(|p| p.field == 8) {
+        let PropValue::Array(items) = &p.value else { continue };
+        let (Some(ArrayItem::One(0x15, s)), Some(ArrayItem::One(6, v))) = (items.first(), items.get(1)) else { continue };
+        let sym = s.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32).unwrap_or(0);
+        let val = v.get(..4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0);
+        out.push((sym, val));
+    }
+    out
+}
+
 fn f(b: &[u8], i: usize) -> f32 {
     b.get(i * 4..i * 4 + 4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).unwrap_or(0.0)
 }
@@ -155,12 +172,151 @@ pub fn ee_sub_1a62e8(w: &World, i: usize) -> [f32; 3] {
 pub fn out_of_world_at_load(w: &World, obj: usize) -> bool {
     let mut o = Some(obj);
     while let Some(i) = o.filter(|&i| i < w.objects.len()) {
-        if object_props(&w.objects[i]).is_some_and(|p| p.iter().any(|p| p.field == crate::engine::playerdraw::vis::FIELD_REMOVE)) {
+        if removed_self_at_load(w, i) {
             return true;
         }
         o = w.objects[i].owner;
     }
     false
+}
+
+/// POOL1 R99: the object's OWN load Remove (LO +0x28 bit 56 at load: it sits on its parent's removed-child list
+/// +0x70), without the ancestors of `out_of_world_at_load` (rec11 005: guard 11539 @0xefba60 in the world, its
+/// child 13144 @0x785c00 b56 1 out, 13144's child 13145 b56 0 out under it)
+pub fn removed_self_at_load(w: &World, i: usize) -> bool {
+    if i >= w.objects.len() {
+        return false;
+    }
+    if unplaced_copy(w, i) {
+        return true;
+    }
+    // POOL1 R95: a player load bind-table Remove (World::bind_removed; e.g. Sly's class-29 emitters oid 385 =
+    // 0x2bc9f0 row 52 {0x300, 385, +0x12f8} and oid 255 = 0x2be990 row 111 {0x300, 255, +0x1ab0}: rec11 001 has
+    // both Removed, LO +0x28 bit 56). Default since R96 (opt-out SLY2_R96_NO_BINDRM=1): with it (and the rec5 052
+    // load rand) feel_inworld_live_saved_matches_original_ep1_hub passes with R64 on and off
+    if w.bind_removed.contains(&i) && std::env::var_os("SLY2_R96_NO_BINDRM").is_none() {
+        return true;
+    }
+    // FEEL R34: a FUN_0013e510 copy runs its source's deferred list: FUN_001a6730 (the LO part of vtable
+    // +0x14c) copies LO +0x34 (`puVar13[0xd] = param_2[0xd]`), so the field-26 Remove applies to the copy too
+    let mut s = Some(i);
+    while let Some(j) = s.filter(|&j| j < w.objects.len()) {
+        if object_props(&w.objects[j]).is_some_and(|p| p.iter().any(|p| p.field == crate::engine::playerdraw::vis::FIELD_REMOVE)) {
+            return true;
+        }
+        // POOL1 R94: any FUN_001c9b08 placement override row with field 26 (FUN_0013f810 on the copy runs the
+        // field-26 setter FUN_00100b10 -> deferred Remove, as World::has_field_26): rec11 001 has the hub's entry-14
+        // emitters 100712 / entry-18 copies Removed (LO +0x28 bit 56) at load. Default on since R95 (opt-out
+        // SLY2_R94_NO_OVRREMOVE=1); the guard tests that depend on the draw order run the one shared rand (R95)
+        // (class-6 template records are not objects in the original: their rows are the in-place case below)
+        // POOL1 R96: only the copy's OWN row (FUN_001c9b08 runs per placement; the EP1 hub entry 4/5/6 copies 1 =
+        // clones of the rowed copy 0 are in the original's world in rec5 210; opt-out SLY2_R96_OVRCLONE=1)
+        if std::env::var_os("SLY2_R94_NO_OVRREMOVE").is_none() && (j == i || std::env::var_os("SLY2_R96_OVRCLONE").is_some()) && w.objects[j].class != 6 && w.override_props.get(&j).is_some_and(|p| p.iter().any(|p| p.field == crate::engine::playerdraw::vis::FIELD_REMOVE)) {
+            return true;
+        }
+        // CRAWL R90: the FUN_001c9b08 kind-5 rows ran FUN_0013f810 on the in-place spawner itself
+        if matches!(w.objects[j].payload, crate::engine::world::objects::Payload::Loaded(crate::engine::world::objects::LoadData::B4(ref b)) if matches!(**b, crate::engine::world::loads_b4::B4Load::Class6 { in_place: true, .. }))
+            && w.override_props.get(&j).is_some_and(|p| p.iter().any(|p| p.field == crate::engine::playerdraw::vis::FIELD_REMOVE))
+        {
+            return true;
+        }
+        s = w.objects[j].clone_of;
+    }
+    false
+}
+
+/// CRAWL R109: LO +0x28 bit 56 at load as the R99 Add skip uses it: the object's (or its copy source's, FEEL R34:
+/// FUN_001a6730 copies LO +0x34) OWN field-26 property = its deferred Remove FUN_001a5d30 at post-load ->
+/// FUN_001a5630 sets bit 56, so a later Add of the parent skips it (FUN_001a5800 walks the in-world list only).
+/// Default: class-44 cameras only (the gang's owned cameras 7563 / 4332 are out of the original's world while the
+/// safehouse script's Remove+Add of the gang re-adds the gang). Staged: for every class (SLY2_R109_B56ALL=1) the
+/// ep1 hub guard pool picks change through the rand draw order (feel_inworld ep1_hub: 125317 copy 1 hidden;
+/// own-only without copies: wired_guards_hear_search guard recycled), as POOL1's whole `removed_self_at_load`
+/// (SLY2_R99_B56=1; ep1 hub 88309 copy 0 has an override field-26 row but is in rec5 210's world).
+/// SLY2_NO_R109_B56OWN=1 = no skip (old whole-subtree Add).
+pub fn b56_at_load(w: &World, i: usize) -> bool {
+    if std::env::var_os("SLY2_R99_B56").is_some() {
+        return removed_self_at_load(w, i);
+    }
+    if i >= w.objects.len() || (w.objects[i].class != 44 && std::env::var_os("SLY2_R109_B56ALL").is_none()) {
+        return false;
+    }
+    let mut s = Some(i);
+    while let Some(j) = s.filter(|&j| j < w.objects.len()) {
+        if object_props(&w.objects[j]).is_some_and(|p| p.iter().any(|p| p.field == crate::engine::playerdraw::vis::FIELD_REMOVE)) {
+            return true;
+        }
+        s = w.objects[j].clone_of;
+    }
+    false
+}
+
+fn b56_skip_on() -> bool {
+    std::env::var_os("SLY2_R99_B56").is_some() || std::env::var_os("SLY2_NO_R109_B56OWN").is_none()
+}
+
+/// CRAWL R109: the Add walk skips child `c` (LO +0x28 bit 56): `rt` = its run-time bit (last direct Add / Remove),
+/// else `b56_at_load`. Staged like `b56_at_load`: class 44 only unless SLY2_R99_B56 / SLY2_R109_B56ALL (the run-time
+/// skip of a directly Removed child for every class alone hides ep1 hub guard 125317 copy 1, feel_inworld)
+pub fn b56_skips(w: &World, c: usize, rt: Option<bool>) -> bool {
+    b56_skips_in(w, c, rt, true)
+}
+
+/// ANIM-ALL R87: the script path (method 0x100a90 -> vt +0x44, `ObjectFields::set_in_world`) keeps the whole-subtree
+/// Add for the class-29 emitters (`emit_rule` false): rec5 101 -> 102 the deferred FUN_001a5d08 Removes ran for every
+/// node holder (709 of 725 b56 1), but the EP1 hub holder 141539 copies (class 48, entry 152), Added after that, have
+/// their 88309 emitters / 6390 children back in with bit 56 clear (as FEEL R36's boss parts); rec_ep1b 060 -> 061 the
+/// holders were Added before the batch and their 88309 stay out (b56 1). Opt-out SLY2_R87_SCRIPTEMIT=1 (rule there too).
+/// ANIM-ALL R88: only a class-48 holder's Add (`root`) re-adds them: decomp FUN_001a5478 (Add) clears bit 56 on the
+/// object alone and never walks a removed child, and FUN_001a5630 (Remove) sets it unconditionally, so 88309's b56 0
+/// at rec5 102 is its deferred Remove never running: the 141539 holder copies are detached pool members (p 0, b56 1 at
+/// rec5 101 / rec_ep1b 059) when the post-load batch runs, claimed (attached + Added) later. A char's Add (Sly /
+/// Bentley / Murray, attached at load) keeps its emitters out (PCSX2 002: 385 / 3742 / 4624 / 7462 b56 1 under the
+/// in-world chars). EP2 table 8 draws/f with B56EMIT + B56HOLD: 470 -> 125. Opt-out SLY2_NO_R88_HOLDADD=1 (R87: every Add).
+pub fn b56_skips_script(w: &World, root: usize, c: usize, rt: Option<bool>) -> bool {
+    let holder = std::env::var_os("SLY2_NO_R88_HOLDADD").is_some() || w.objects.get(root).is_some_and(|o| o.class == 48);
+    b56_skips_in(w, c, rt, std::env::var_os("SLY2_R87_SCRIPTEMIT").is_some() || !holder)
+}
+
+fn b56_skips_in(w: &World, c: usize, rt: Option<bool>, emit_rule: bool) -> bool {
+    let emit = emit_rule && r86_b56_emitter(w, c);
+    if !emit && std::env::var_os("SLY2_R99_B56").is_none() && std::env::var_os("SLY2_R109_B56ALL").is_none() && w.objects.get(c).is_none_or(|o| o.class != 44) {
+        return false;
+    }
+    rt.unwrap_or_else(|| if emit { removed_self_at_load(w, c) || w.has_field_26(c) } else { b56_at_load(w, c) })
+}
+
+/// ANIM-ALL R86: class-29 emitters (C2ceb78) take the whole POOL1 `removed_self_at_load` as their LO +0x28 bit 56
+/// for the Add skip (FUN_001a5478 / FUN_001a5800 walk only the in-world child list +0x64; a child on the removed
+/// list +0x70 stays out with its subtree). PCSX2 cap_anim_ep2_guard_walk 002: the emitters under the in-world
+/// guards (C2cf520 / C2c9dc0), Sly, Bentley, Murray, class 99 are out with bit 56 set. Emitters never feed the
+/// guard pool picks except through the shared rand stream. A FUN_001f66f0 kid clone inherits its source's LO +0x34
+/// deferred list (FUN_001a6730), override field-26 rows included (`World::has_field_26`; PCSX2 002: every 19724 /
+/// 19726 copy under the 11539 guard copies has the FUN_001a5d08 node and bit 56). DEFAULT since ANIM-ALL R88 (with the R88 holder-only script re-add: feel_inworld ep1 hub + wired_guards green), opt-out SLY2_NO_R86_B56EMIT=1 (EP2 table 8
+/// draws/f 657 -> 245, original ~55): EP1 hub emitter 88309 (own override field-26 row, FUN_001a5d08 node) is in the
+/// original's world with bit 56 clear at rec5 052 / 210, re-added by something not modelled -> feel_inworld ep1 hub;
+/// opt-in SLY2_R86_B56HOLD=1 also class-48 holders (PCSX2 002: the 4299 / 13079 holders under guards are out).
+fn r86_b56_emitter(w: &World, c: usize) -> bool {
+    w.objects.get(c).is_some_and(|o| o.class == 29 || (o.class == 48 && std::env::var_os("SLY2_R86_B56HOLD").is_some())) && b56_skip_on() && std::env::var_os("SLY2_NO_R86_B56EMIT").is_none()
+}
+
+/// FEEL R35: `obj` is one of its directory entry's instances (entry +4, m * n) whose copy no FUN_001ca370
+/// placement handed out at load (copy index >= entry +0x0c). Only FUN_001ca370 Adds a copy at load; the
+/// rest start out of the world until FUN_001caec8 (spawner slot 22 / FUN_001cb250) Adds them.
+pub fn unplaced_copy(w: &World, obj: usize) -> bool {
+    let Some(e) = w.entries.get(w.objects[obj].entry) else { return false };
+    let m = e.objects.len();
+    m > 0 && e.instances.iter().position(|&x| x == obj).is_some_and(|k| (k / m) as i64 >= e.load_count as i64)
+}
+
+/// FEEL R32: LO +0x28 bit 60 of `obj` (in the world's update list) as one shared check: the scripts' object
+/// state (`ObjectFields::in_world`: script / job-toggle Add 0x44 / Remove 0x4c) when there is one, else the
+/// load-time state (`out_of_world_at_load`, the deferred field-26 Remove).
+pub fn lo_in_world(objs: Option<&ObjectFields>, w: &World, obj: usize) -> bool {
+    match objs {
+        Some(o) => o.in_world(Some(w), obj as u32),
+        None => !out_of_world_at_load(w, obj),
+    }
 }
 
 /// Run-time object state scripts reach through get-o / set-o (object memory in the original).
@@ -195,6 +351,8 @@ pub struct ObjectFields {
     /// WP-J9: 0x3dd040 +0x200 current music instance, kept as the +0x40 key of its +0xec definition
     /// (FUN_001fe5f0 sets it, FUN_001fe738 clears it, FUN_001fe848 tests it)
     pub music_cur: Option<i32>,
+    /// PORT2: methods 0x001025a8 / 0x00102630 / getter 0x00102538 -> MusicMgr (`music_link`)
+    pub music_link: super::music_link::MusicLink,
     /// WP-J8: global 0x3da0c0 (class 154)
     pub g3da0c0: G3da0c0,
     /// WP-J9: run-time records getter thunks create (Basic = `BASIC_RT | index`), in creation order
@@ -207,6 +365,8 @@ pub struct ObjectFields {
     /// WP-J11: objects out of the world (LO +0x28 bit 60 clear); None until the first script Add / Remove
     /// (until then [`out_of_world_at_load`] answers). See [`ObjectFields::in_world`].
     pub out_of_world: Option<std::collections::HashSet<u32>>,
+    /// POOL1 R99: script-path LO +0x28 bit 56 set by a direct Add (false) / Remove (true); else `removed_self_at_load`
+    pub lo_b56: HashMap<u32, bool>,
     /// WP-C8: member writes on LIGHT (class 4) objects, (object, field, value); FUN_00200598 calls the
     /// LIGHT setter (0x1a35b0.., ends with FUN_001a3968). Drained by `gfx::screen::drain_light_writes`.
     pub light_writes: Vec<(u32, u16, Ref)>,
@@ -220,6 +380,9 @@ pub struct ObjectFields {
 
 /// WP-J9: Basic payloads of `ObjectFields::rt` records (bit 29; emitters use bit 30, objects are indices).
 pub const BASIC_RT: u32 = 0x2000_0000;
+/// HEIST r16: Basic payload of a usable object's embedded JOY tracker (class 137, member +0x150 of the
+/// C2d5898 family, field 888 / sym 810 kind 0x2089): `BASIC_JOY | object index` (bit 28).
+pub const BASIC_JOY: u32 = 0x1000_0000;
 
 /// WP-J9: a run-time record (pool object the original allocates with FUN_0011ccc0).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -420,12 +583,52 @@ impl ObjectFields {
     /// WP-J11: the bit side of LO Add (vtable +0x44 FUN_001a5478 -> FUN_001a5800 sets it) / Remove
     /// (vtable +0x4c FUN_001a5630 -> FUN_001a5848 clears it), both recursive over the subtree.
     pub fn set_in_world(&mut self, w: &World, obj: usize, on: bool) {
+        // REPLACED (script path): the whole subtree, as before FEEL R36 -- BOSS's Dimitri (122332) relies on the
+        // level script's Add of the in-world boss re-adding his field-26-removed parts (FUN_001a5478 would return
+        // at once: bit 56 clear); REQUESTS.md FEEL R36 -> BOSS
         let s = self.out_of_world.get_or_insert_with(|| (0..w.objects.len()).filter(|&i| out_of_world_at_load(w, i)).map(|i| i as u32).collect());
-        for i in crate::engine::playerdraw::subtree(w, obj) {
-            if on {
-                s.remove(&(i as u32));
-            } else {
-                s.insert(i as u32);
+        // POOL1 R99: LO +0x28 bit 56 (removed on its own): the Add clears it on `obj` and FUN_001a5800 walks only
+        // the in-world child lists, so a child removed on its own stays out with its subtree (rec11 005: the
+        // dazed-birds 13144 copies under the in-world hub guards 11539 / 44949 all out, b56 1). Opt-in SLY2_R99_B56=1 (default off: with it feel_inworld_live_saved_matches_original_ep1_hub and wired_guards hear_search / sly_knocks_out fail, POOL1.md R99).
+        self.lo_b56.insert(obj as u32, !on);
+        let sub = if on && b56_skip_on() {
+            let mut out = vec![];
+            let mut st = vec![obj];
+            while let Some(i) = st.pop() {
+                out.push(i);
+                st.extend(w.objects[i].children.iter().rev().copied().filter(|&c| !b56_skips_script(w, obj, c, self.lo_b56.get(&(c as u32)).copied())));
+            }
+            out
+        } else {
+            crate::engine::playerdraw::subtree(w, obj)
+        };
+        for i in sub {
+            let changed = if on { s.remove(&(i as u32)) } else { s.insert(i as u32) };
+            if changed && std::env::var("SLY2_R120_WATCH").is_ok_and(|v| v.split(',').any(|x| x == i.to_string())) {
+                eprintln!("R120 watch obj {i} (script, via {obj}) in_world {on}
+{}", std::backtrace::Backtrace::force_capture());
+            }
+        }
+    }
+
+    pub fn set_in_world_lo(&mut self, w: &World, obj: usize, on: bool) {
+        let s = self.out_of_world.get_or_insert_with(|| (0..w.objects.len()).filter(|&i| out_of_world_at_load(w, i)).map(|i| i as u32).collect());
+        // FEEL R36: FUN_001a5478 (Add) returns at once unless LO +0x28 bit 56 (removed) is set, FUN_001a5630
+        // (Remove) unless it is clear; each recursed child (vtable +0x44 / +0x4c) checks its own bit. So an Add
+        // of an object already in the world leaves its removed children (e.g. unplaced copies) out.
+        // POOL1 R99: and the walk skips a child removed on its own (bit 56, see `set_in_world`)
+        let b56_on = on && b56_skip_on();
+        self.lo_b56.insert(obj as u32, !on);
+        let mut st = vec![obj];
+        while let Some(i) = st.pop() {
+            let changed = if on { s.remove(&(i as u32)) } else { s.insert(i as u32) };
+            if changed && std::env::var("SLY2_R120_WATCH").is_ok_and(|v| v.split(',').any(|x| x == i.to_string())) {
+                eprintln!("R120 watch obj {i} (via {obj}) in_world {on}
+{}", std::backtrace::Backtrace::force_capture());
+            }
+            if changed {
+                let b = &self.lo_b56;
+                st.extend(w.objects[i].children.iter().rev().copied().filter(|&c| !b56_on || !b56_skips(w, c, b.get(&(c as u32)).copied())));
             }
         }
     }
@@ -482,7 +685,9 @@ impl ObjectFields {
             }
             _ => {}
         }
-        match object_props(o).and_then(|p| p.iter().rev().find(|p| p.field == field as i16)) {
+        // WIRE-EP7: FUN_001c9b08 override rows were applied after the copy's own props
+        let ov = w.and_then(|w| w.override_props.get(&(obj as usize))).and_then(|p| p.iter().rev().find(|p| p.field == field as i16));
+        match ov.or_else(|| object_props(o).and_then(|p| p.iter().rev().find(|p| p.field == field as i16))) {
             Some(Prop { value: PropValue::Scalar(b), .. }) => member_to_ref(kind, b, w),
             _ => Ref::Nil,
         }
@@ -617,4 +822,34 @@ impl ObjectFields {
             }
         }
     }
+}
+
+/// HEIST: all FUN_0013f810 user-property rows (field table rows 3..10, method thunks 0x001002a8..
+/// 0x00100760 -> q_131990 setters, each ensure-o FUN_00200d10 {symid (kind 0x15), value}) of `obj`:
+/// own stream props, then the FUN_001c9b08 override rows, in order. Row 3 FUN_00132bc8 Bool, 4
+/// FUN_00132c20 / 8 FUN_00132d88 S32, 5 FUN_00132c78 F32, 10 FUN_00132e40 Basic(null); rows 6/7/9
+/// (Clq / Lm / Vector) are passed through as the raw item (unk: not seen on load rows).
+/// A load-time copy (`clone_of`) starts from its template's user list (the clone copies the LO body,
+/// +8 list included; UNV), its own / override rows then overwrite.
+pub fn load_user_props_all(w: &World, obj: usize) -> Vec<(u32, Ref)> {
+    use crate::engine::world::props::ArrayItem;
+    let own = w.objects.get(obj).and_then(object_props).unwrap_or(&[]);
+    let ov = w.override_props.get(&obj).map(|v| v.as_slice()).unwrap_or(&[]);
+    let mut out = w.objects.get(obj).and_then(|o| o.clone_of).filter(|&c| c != obj).map(|c| load_user_props_all(w, c)).unwrap_or_default();
+    for p in own.iter().chain(ov).filter(|p| (3..=10).contains(&p.field)) {
+        let PropValue::Array(items) = &p.value else { continue };
+        let Some(ArrayItem::One(0x15, s)) = items.first() else { continue };
+        let sym = s.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32).unwrap_or(0);
+        let raw = match items.get(1) { Some(ArrayItem::One(_, v)) => v.as_slice(), _ => &[][..] };
+        let word = || raw.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0);
+        let v = match p.field {
+            3 => Ref::Bool(word() != 0),
+            4 | 8 => Ref::S32(word() as i32),
+            5 => Ref::F32(f32::from_bits(word())),
+            10 => Ref::Basic(0),
+            _ => continue,
+        };
+        out.push((sym, v));
+    }
+    out
 }

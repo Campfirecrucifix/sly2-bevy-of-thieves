@@ -328,7 +328,7 @@ impl C2ceb78 {
 
     /// The new group object FUN_00159500 creates (FUN_0013e3c8(0x1d, 0, oid, -1)) when no object has the oid:
     /// fresh refcounted template copy (block reset when the source has one), copied +0xf0..+0x114.
-    pub fn new_group(&self, h: &mut dyn ClassHost, newobj: usize) -> C2ceb78 {
+    pub fn new_group(&self, h: &mut dyn ClassHost, obj: usize, newobj: usize) -> C2ceb78 {
         let mut n = C2ceb78::default();
         n.ee_sub_1591b0(newobj, h);
         n.tpl = self.tpl.clone();
@@ -349,7 +349,8 @@ impl C2ceb78 {
         n.f_110 = self.f_110;
         n.f_114 = self.f_114;
         h.ee_sub_1a6ca8(newobj, 1);
-        h.vcall_f4_1a6318(newobj, self.tpl.block[0]); // (vtable +0xf4)(new + adj, FUN_001a6318(obj))
+        // (vtable +0xf4)(new + adj, FUN_001a6318(obj)): this member's frame (ANIM-ALL R92: was the block source)
+        h.vcall_f4_1a6318(newobj, obj as u32 + 1);
         n
     }
 

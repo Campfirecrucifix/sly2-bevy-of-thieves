@@ -20,6 +20,8 @@ pub struct VideoOpts {
     pub height: u32,
     /// borderless fullscreen on the primary monitor
     pub fullscreen: bool,
+    /// WIRE-OPT: with `fullscreen`, exclusive fullscreen instead of borderless (settings.toml `[graphics] window_mode`)
+    pub exclusive: bool,
     pub vsync: bool,
     /// current window size in physical pixels (the aspect row shows it)
     pub win_w: f32,
@@ -30,7 +32,7 @@ pub struct VideoOpts {
 
 impl Default for VideoOpts {
     fn default() -> Self {
-        VideoOpts { width: 1920, height: 1080, fullscreen: false, vsync: true, win_w: 1920.0, win_h: 1080.0, rt_running: false }
+        VideoOpts { width: 1920, height: 1080, fullscreen: false, exclusive: false, vsync: true, win_w: 1920.0, win_h: 1080.0, rt_running: false }
     }
 }
 
@@ -55,11 +57,25 @@ pub fn aspect_name(w: f32, h: f32) -> String {
 }
 
 impl VideoOpts {
+    pub fn window_mode(&self) -> crate::settings::WindowModeOpt {
+        use crate::settings::WindowModeOpt as W;
+        match (self.fullscreen, self.exclusive) {
+            (false, _) => W::Windowed,
+            (true, false) => W::Borderless,
+            (true, true) => W::Fullscreen,
+        }
+    }
+
+    pub fn set_window_mode(&mut self, m: crate::settings::WindowModeOpt) {
+        use crate::settings::WindowModeOpt as W;
+        (self.fullscreen, self.exclusive) = (m != W::Windowed, m == W::Fullscreen);
+    }
+
     pub fn label(&self, row: VidRow) -> String {
         let on = |b: bool| if b { "On" } else { "Off" };
         match row {
             VidRow::Resolution => format!("Resolution: {}x{}", self.width, self.height),
-            VidRow::Window => format!("Window: {}", if self.fullscreen { "Borderless" } else { "Windowed" }),
+            VidRow::Window => format!("Window: {}", ["Windowed", "Borderless", "Fullscreen"][self.window_mode().index()]),
             VidRow::VSync => format!("VSync: {}", on(self.vsync)),
             VidRow::Aspect => format!("Screen: {}", aspect_name(self.win_w, self.win_h)),
         }
@@ -74,7 +90,7 @@ impl VideoOpts {
                 let k = (cur + d).rem_euclid(n) as usize;
                 (self.width, self.height) = RESOLUTIONS[k];
             }
-            VidRow::Window => self.fullscreen = !self.fullscreen,
+            VidRow::Window => self.set_window_mode(crate::settings::WindowModeOpt::from_index((self.window_mode().index() as i32 + d.signum().max(-1) + if d == 0 { 1 } else { 0 }).rem_euclid(3) as u8)),
             VidRow::VSync => self.vsync = !self.vsync,
             VidRow::Aspect => return false,
         }

@@ -40,6 +40,31 @@ pub fn ee_sub_20e890_po(w: &World, oid: i32) -> Option<usize> {
     [CLASS_SLY, CLASS_BENTLEY, CLASS_MURRAY].iter().find_map(|&c| w.objects.iter().position(|o| o.class == c))
 }
 
+/// POOL1 R55: the FUN_0020e890 tail after the selection: vtable +0x44 (Add) of the selected po `sel`, then
+/// vtable +0x4c (Remove) of every other world +0x3ebc entry that is a PO (FUN_00132b10(o, 0x34)) with
+/// FUN_001c4080(o) == 0 (joystick +0x150 +0x80 control mode 0). Returns (object, in world) in call order.
+/// REPLACED: the PO entries of the +0x3ebc list = the class 53 / 54 / 55 objects (its other entries, e.g.
+/// 0x2dbd80 / 0x2d80d0, are no POs); the JT has no +0x150 JOY object in the port, its mode is 0 (rec11 285:
+/// Sly's +0x150 +0x80 = 0 -> Sly out of the world while Bentley runs a job; Murray's 1 keeps him in).
+pub fn ee_sub_20e890_in_world(w: &World, sel: usize, set: &mut crate::engine::classes::ClassSet) -> Vec<(usize, bool)> {
+    let mut out = vec![(sel, true)];
+    for (o, x) in w.objects.iter().enumerate() {
+        if o == sel || !matches!(x.class, CLASS_SLY | CLASS_MURRAY | CLASS_BENTLEY) {
+            continue;
+        }
+        // FUN_001c4080: (+0x150) ? (+0x150)->+0x80 : -1
+        let mode = match x.class {
+            CLASS_SLY => Some(0),
+            CLASS_BENTLEY => set.k16_get(o).and_then(|c| c.joy_80),
+            _ => set.k18_murray(o).and_then(|m| m.b.joy_80),
+        };
+        if mode == Some(0) {
+            out.push((o, false));
+        }
+    }
+    out
+}
+
 /// `oidPoCurrent`: the last FUN_001d8b20 message 0x15 the job manager sent (-1 none).
 pub fn oid_po_current(jobs: &crate::engine::jobs::JobMgr) -> i32 {
     std::env::var("SLY2_PO_OID")
@@ -66,6 +91,22 @@ pub struct PoCurrent {
     /// WP-P23: live ASEGAs on the po (ASEG object, time) after the last class tick (p23::po_plays), read by
     /// playerdraw::po (the class runtime is lent to the scripts while the draw systems run)
     pub plays: Vec<(usize, f32)>,
+    /// ANIM R25: the FUN_001a0300 plain blend (field) the po's SetState plays now (p23::po_plain)
+    pub plain: Option<u32>,
+    /// CRAWL R111: the Bentley / Murray bodies NOT controlled now that are in the world (K27 body, run-time
+    /// ASEGAs, plain blend), drawn by playerdraw::plugin::drive_idle_po (the original draws every in-world
+    /// character ALO; the port drew only the controlled one -> empty chairs at the safehouse table)
+    pub idle: Vec<IdlePo>,
+}
+
+/// CRAWL R111: one uncontrolled in-world Bentley / Murray (see `PoCurrent::idle`).
+#[derive(Clone, Debug)]
+pub struct IdlePo {
+    pub obj: usize,
+    pub pos: crate::engine::physics::geom::V3,
+    pub rot: [crate::engine::physics::geom::V3; 3],
+    pub plays: Vec<(usize, f32)>,
+    pub plain: Option<u32>,
 }
 
 /// ClassHost::po_call target: the shadow JT of the controlled character.
@@ -76,7 +117,7 @@ pub struct PoHost {
 }
 
 impl PoHost {
-    pub fn po_call(&self, addr: u32, obj: usize, _off: u32, args: &[u32]) -> i64 {
+    pub fn po_call(&mut self, addr: u32, obj: usize, _off: u32, args: &[u32]) -> i64 {
         if obj != self.obj {
             return 0;
         }
@@ -84,7 +125,33 @@ impl PoHost {
         match addr {
             0x00140af8 => self.jt.FUN_00140af8(a0 != 0) as i64,
             0x0019c8d0 => self.jt.FUN_0019c8d0(a0 as i32) as i64,
+            // POOL1 r34: FUN_00197500 (JMP air update): 1 while the shadow JT is still in the jump state
+            0x00197500 => (self.jt.jts == super::JTS_JUMP) as i64,
             0x00194558 => self.jt.FUN_00194558(a0 as i32) as i64,
+            // FEEL R46: FUN_001daea8(g) power-up acquired (save "mppukfAcquired"); the shadow JT is a clone of the
+            // player JT (plugin.rs), so its gad.acquired is the save's. Murray state 5 picks run sub-state 2 with it (0x12).
+            0x001daea8 => self.jt.gad.FUN_001daea8(a0 as i32) as i64,
+            // MURRAY: FUN_00194a40(po + 0x4c0 JMP, mask): the po's target list by category bits (Murray 0xf8fa)
+            // over this frame's candidates (the JT's cands, player::plugin / Run::step build_k10_cands)
+            0x00194a40 => {
+                if let Some(c) = self.jt.cands.take() {
+                    self.jt.FUN_00194a40(&c, a0);
+                    self.jt.cands = Some(c);
+                }
+                0
+            }
+            // MURRAY: FUN_001938c0(po + 0x4c0): the po's ground target pick -> FUN_001928f8(kind); a kind-7 use
+            // point (class 0x23 subtree: class-36 carry points) is dropped on the next input step into
+            // vt+0x19c (slot 50)(target, po) (as Jt::input k7_pending); queued in jt.slot50, drained by po_link
+            0x001938c0 => {
+                let hit = self.jt.FUN_001938c0(&mut ());
+                if hit && std::mem::take(&mut self.jt.k7_pending) && self.jt.attach.kind == 7 {
+                    if let Some(t) = self.jt.attach.target.take() {
+                        self.jt.slot50.push(t);
+                    }
+                }
+                hit as i64
+            }
             _ => 0,
         }
     }

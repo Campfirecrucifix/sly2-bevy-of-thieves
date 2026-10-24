@@ -76,6 +76,7 @@ impl EngineHost {
         let Some(w) = self.world.clone() else { return };
         let fired = std::mem::take(&mut self.k25.fired);
         if fired.is_empty() {
+            self.k25.gone.clear();
             return;
         }
         let clk = crate::engine::camera::cm::CmClock { t, dt, dt_real: dt };
@@ -85,7 +86,11 @@ impl EngineHost {
         let mut n = 0;
         let mut seeks = vec![];
         let mut k28 = vec![];
+        let mut msg9 = vec![];
         for (ai, ev, rev, h) in fired {
+            if std::env::var_os("SLY2_K22DBG").is_some() && (ai == 147 || ai == 148) {
+                eprintln!("[R50] k26 fired aseg {ai} ev {ev} rev {rev} h {h:#x} live {} gone {:?}", self.k25.asegas.contains_key(&h), self.k25.gone.get(&h));
+            }
             let Some(a) = crate::engine::playerdraw::aseg_of(&w, ai) else { continue };
             sink.current = ai;
             n += crate::engine::player::p23::dispatch_events(a, &[(ev, rev)], &mut sink);
@@ -93,6 +98,21 @@ impl EngineHost {
             sink.pending.retain(|c| match *c {
                 EffectCall::Seek { t, f } => {
                     seeks.push((h, t, f));
+                    false
+                }
+                // WIRE-BM2: case 0xb vt+0x24(asega, 9, {asega, t, v}) -> the target ALO's slot 4
+                EffectCall::Msg9 { t, v } => {
+                    msg9.push((h, t, v));
+                    false
+                }
+                // HEIST: case 0xc (asega + vt +0x18)->vt+0x1c(4, 0, 1, &payload, 0): ASEGA script message 4
+                EffectCall::Owner1c(v) => {
+                    // HEIST r16: a retract (+0xa8) event's ASEGA may already be out of the live map (`gone`)
+                    if let Some(owner) = self.k25.asegas.get(&h).map(|x| x.obj).or_else(|| self.k25.gone.get(&h).map(|g| g.0)) {
+                        if self.heist_aseg_msg4.len() < 256 {
+                            self.heist_aseg_msg4.push((ai, h, owner, v));
+                        }
+                    }
                     false
                 }
                 // K28: kinds 7..0x10 on this event's ASEGA (classes/k28.rs)
@@ -115,6 +135,13 @@ impl EngineHost {
         for (h, t, f) in seeks {
             self.k25.ee_sub_130d30(&w, t, f, h, 0);
             self.k27_seeks += 1;
+        }
+        self.k26.owner_msgs += msg9.len();
+        for (h, t, v) in msg9 {
+            if let Some(a) = self.k25.asegas.get(&h) {
+                self.k26_msg9.push((a.obj, [h, t.to_bits(), v as u32]));
+                self.k26_msg9_live.push((a.obj, [h, t.to_bits(), v as u32]));
+            }
         }
         for (h, c) in k28 {
             self.k28_event(h, c);
@@ -149,12 +176,52 @@ impl EngineHost {
             b.pose(&w, &|k| times.get(&k).copied())
         };
         self.k26.posed += pose.objects.len();
-        self.k26_posed = pose.objects;
-        self.k29_bones = pose.bones;
+        let (mut objects, mut bones) = (pose.objects, pose.bones);
+        // CRAWL R123: FUN_00130b18 (ASEGA retract) only unlinks the ASEGA: the bone locals / object xf keep what its
+        // last FUN_0012f9b8 evaluation wrote (no rest-pose reset). The port re-derived the pose from the live ASEGAs
+        // only, so a finished transition snapped back to the rest pose: row 3 slab 136544 (SM 17434 -> state 7 via
+        // ASEG 137306 on bone 2) popped back up to z 320 instead of staying lowered. Held per world; a new ASEGA
+        // on the same bone overrides. Opt-out SLY2_NO_R123_POSEHOLD=1.
+        if std::env::var_os("SLY2_NO_R123_POSEHOLD").is_none() {
+            let id = std::sync::Arc::as_ptr(&w) as usize;
+            if self.k29_held.0 != id {
+                self.k29_held = (id, Default::default(), Default::default());
+            }
+            let posed_objs: std::collections::HashSet<usize> = bones.keys().map(|k| k.0).chain(objects.keys().copied()).collect();
+            for (k, v) in &self.k29_held.1 {
+                if !posed_objs.contains(&k.0) {
+                    bones.entry(*k).or_insert(*v);
+                }
+            }
+            for (k, v) in &self.k29_held.2 {
+                if !posed_objs.contains(k) {
+                    objects.entry(*k).or_insert(*v);
+                }
+            }
+            self.k29_held.1 = bones.clone();
+            self.k29_held.2 = objects.clone();
+        }
+        self.k26_posed = objects;
+        self.k29_bones = bones;
     }
     /// K26: the SMA messages of this frame (ClassSet::frame_k26 delivers them)
     pub(super) fn k26_msgs(&mut self) -> Vec<(u32, i32, SmaMsg)> {
         let m = std::mem::take(&mut self.k25.msgs);
+        // POOL1: script message 8 {old, new} of each SMA state change to its SM object's frame
+        let selfs = std::mem::take(&mut self.k25.script8_sma);
+        for (k, (sm, old, new)) in std::mem::take(&mut self.k25.script8).into_iter().enumerate() {
+            if self.k27_script_msgs.len() < 256 {
+                self.k27_script_msgs.push((sm as u32 + 1, 8, vec![old as u32, new as u32]));
+                // POOL1 r36: FUN_001331f8(sma, 8, ..): self is the SMA (handle), not the SM object
+                if let Some(&x) = selfs.get(k) {
+                    self.sma_script_self_q.insert((sm as u32 + 1, old as u32, new as u32), x);
+                }
+            }
+        }
+        // POOL1 r30: ASEGA script messages 2 / 3 (FUN_0012f9b8 / FUN_00130b18), capped like k27_script_msgs
+        let a = std::mem::take(&mut self.k25.script_aseg);
+        let room = 256usize.saturating_sub(self.aseg_script_msgs.len());
+        self.aseg_script_msgs.extend(a.into_iter().take(room));
         self.k26.delivered += m.len();
         m
     }

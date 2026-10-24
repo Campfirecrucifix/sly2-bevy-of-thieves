@@ -115,10 +115,12 @@ pub fn c2dc018_v7<M: QMem + ?Sized>(m: &mut M, w: u32) {
 /// FUN_001dac58(p): debug label ("2L" strings at 0x2c3268) for each entry (stride 0x20 at +0x50, count +0x4c)
 /// whose id matches one of the 3 records of the player object (FUN_001c4840) +0x1180
 pub fn ee_sub_1dac58<M: QMem + ?Sized>(m: &mut M, p: u32) {
-    if m.r32(p + 0x24) == 0 {
+    let a24 = m.r32(p + 0x24);
+    if a24 == 0 {
         return;
     }
-    if m.call(0x0021_32d0, &[], &[]).0 == 0 {
+    // asm 0x1dac8c..98: a0 = *(p + 0x24) stays live into FUN_002132d0
+    if m.call(0x0021_32d0, &[a24], &[]).0 == 0 {
         return;
     }
     let pl = m.call(0x001c_4840, &[WORLD], &[]).0;
@@ -141,7 +143,7 @@ pub fn ee_sub_1dac58<M: QMem + ?Sized>(m: &mut M, p: u32) {
                 m.call(0x0025_8458, &[s180, a160], &[]);
                 m.call(0x0025_8470, &[s180, 0], &[]);
                 m.call(0x0025_8478, &[s180, 0], &[]);
-                m.call(0x0021_5ac0, &[ro32(0x002c_3264), a150, ro32(0x002c_3268 + 4 * k)], &[]);
+                m.call(0x0021_5ac0, &[a150, ro32(0x002c_3268 + 4 * k)], &[super::q5util::f4(f32::from_bits(ro32(0x002c_3264)))]);
                 let (x, y) = (m.r32(e + 0x18), m.r32(e + 0x14));
                 m.w32(s180 + 4, x);
                 m.w32(s180, y);

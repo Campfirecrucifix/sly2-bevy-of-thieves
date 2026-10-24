@@ -46,6 +46,9 @@ pub struct Stimulus {
     pub f_4c: f32,
     /// +0x14 -> +0x50 kind (0 sound, 1 sight)
     pub mode: i32,
+    /// +0x14 the stimulus kind (class 117 record) for the FUN_00156918 hearing test; None = always heard
+    /// (records fed by callers without a kind)
+    pub kind: Option<super::hearing::StimKind>,
 }
 
 /// One contact pair half as FUN_001f7410 reads it (guard +0xec -> +0x6c list, stride via +0xac).

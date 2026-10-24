@@ -237,7 +237,7 @@ impl C2d44c8 {
             7 => {
                 anim = if b.m.u(0x1ae0) != 0 && cx.h.po_call(0x1daea8, obj, 0, &[0x11]) != 0 { b.m.u(0x1ae0) } else { b.m.u(0x140c) };
                 b.zero_190();
-                self.ee_sub_1b5e98(obj, cx.h);
+                self.ee_sub_1b5e98(obj, cx.g, cx.h);
                 let d = sub(self.b.m.v3(0x1420), cx.h.ee_sub_1a62e8(o));
                 cx.h.ee_sub_2046b0(obj, d);
             }
@@ -552,20 +552,25 @@ impl C2d44c8 {
 
     /// FUN_001b5e98(self): state-7 throw target +0x1420: the nearest DAT_003e13b4 object with +0xe8 bit 16 in
     /// 150 .. 1.3 * +0x1410, height <= 500, within 1 rad of the facing; none: +0x1410 ahead
-    pub fn ee_sub_1b5e98(&mut self, obj: usize, h: &mut dyn ClassHost) {
+    pub fn ee_sub_1b5e98(&mut self, obj: usize, g: &ClassGlobals, h: &mut dyn ClassHost) {
         let o = handle(obj);
         let b = &mut self.b;
         let mut found = false;
         let mut r = b.m.f(0x1410) * F_2C0984;
         let held = b.m.u(0x13f0);
-        for x in h.list_3e13b4() {
-            if h.obj_i32(x, 0xe8) as u32 & 0x10000 == 0 || h.po_call(0x184380, obj, 0, &[held, x]) != 0 {
+        // TAKEN BY MURRAY: DAT_003e13b4 = the class-19 members (k10 FUN_0021d358) and their +0xe8
+        let list = g.k10_lists.get(&super::k10::L_3E13B4).cloned().unwrap_or_default();
+        for x in list {
+            if g.l3e13b4_e8.get(&x).copied().unwrap_or(0) & 0x10000 == 0 || ee_sub_184380(held, x, g, h) {
                 continue;
             }
             let d = sub(h.ee_sub_1a62e8(x), h.ee_sub_1a62e8(o));
             let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             if n <= r && 150.0 <= n && d[2] <= 500.0 {
-                let a = FUN_0011cf60(d[1].atan2(d[0]) - h.ee_sub_204740(obj));
+                // FUN_00204740: atan2 of the xf row 0 (TAKEN BY MURRAY: Murray's rows +0x1b0, the host PO has none)
+                let r0 = b.m.v3(0x1b0);
+                let yaw = if r0 == [0.0; 3] { h.ee_sub_204740(obj) } else { r0[1].atan2(r0[0]) };
+                let a = FUN_0011cf60(d[1].atan2(d[0]) - yaw);
                 if a.abs() <= F_2C0988 {
                     b.m.set_v3(0x1420, h.ee_sub_1a62e8(x));
                     found = true;
@@ -598,6 +603,9 @@ impl C2d44c8 {
             return;
         }
         if self.b.state == 4 && self.b.m.i(0x1450) == 0 {
+            // TAKEN BY MURRAY: the point takes its object back (REPLACED attach released)
+            let x = h.obj_i32(c, 0x180) as u32;
+            h.so_carry(x, 0);
             h.vcall_arg(c, 0x1c, 6);
             self.b.m.set_u(0x13f0, 0);
             return;
@@ -871,7 +879,7 @@ impl C2d44c8 {
                         cx.h.po_call(0x195a00, obj, 0x2c0, &[1, 0, 0]);
                         break 'c;
                     }
-                    if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && cx.h.vcall_ret_arg(o, 0x31c, 3) != 0 {
+                    if self.b.joy.FUN_001c4660(t, 0.15, 0x400) != 0 && self.ee_sub_1b98a0(obj, 3, cx.h) {
                         self.b.joy.FUN_001c4738(0x400);
                         cx.h.po_call(0x19cc50, obj, 0xf00, &[0, 0, 0]);
                         break 'c;
@@ -909,7 +917,7 @@ impl C2d44c8 {
                     let idle = k == 0xb || k == 0 || (0xf..0x11).contains(&k);
                     if !idle
                         && self.b.joy.FUN_001c4660(t, 0.15, 0x90) != 0
-                        && cx.h.vcall_ret_arg(o, 0x31c, 2) != 0
+                        && self.ee_sub_1b98a0(obj, 2, cx.h)
                         && (1..6).contains(&self.b.f_2dc)
                         && cx.h.po_call(0x143d20, obj, 0, &[0.1f32.to_bits()]) == 0
                     {
@@ -937,7 +945,32 @@ impl C2d44c8 {
                     cx.h.po_call(0x1a12f0, obj, 0xdf0, &[]);
                 }
                 0xf => {
-                    cx.h.po_call(0x21f418, obj, 0x1910, &[]);
+                    // POOL1: FUN_0021f418(self + 0x1910) (player::p26::ee_sub_21f418)
+                    let a = self.b.m.u(0x1030);
+                    let busy = a != 0 && !cx.h.ee_sub_131968(a);
+                    let t = cx.g.t;
+                    // TAKEN BY HEIST: the states 4..6 prelude (aim point +0x19f0 from the stick / FUN_00220508 tween),
+                    // then FUN_0021fb70(machine, 1) (throw arc, +0x1a00 launch velocity)
+                    let pos = cx.h.ee_sub_1a62e8(handle(obj));
+                    // REPLACED: bif 138(0x24) (save upgrade flag) is not reachable class side (p23 carry cx: false too)
+                    let bif138 = false;
+                    if crate::engine::player::p26::ee_sub_21f418_aim(&mut self.b.m, 0x1910, pos, self.b.joy.angle, self.b.joy.mag, t, cx.g.dt, bif138) {
+                        // carried [4] +0xe8 -> +0x80 (REPLACED: a body without one has the engine default gravity)
+                        let c4 = self.b.m.u(0x1920);
+                        let mut gravity = if c4 != 0 { cx.h.phys_e8_80(c4 as usize - 1) } else { [0.0; 3] };
+                        if gravity == [0.0; 3] { gravity = crate::engine::classes::guard::lift::GRAVITY; }
+                        let ccx = crate::engine::player::p26::CarryCx { owner: handle(obj), t, dt: cx.g.dt, bif138, gravity, ..Default::default() };
+                        let _ = crate::engine::player::p26::ee_sub_21fb70(&mut self.b.m, 0x1910, true, &ccx, cx.h, &mut |_, _| None);
+                    }
+                    let joy = &mut self.b.joy;
+                    let ev = crate::engine::player::p26::ee_sub_21f418(&mut self.b.m, 0x1910, handle(obj), busy, cx.g.g_2dd5bc_13d0, cx.h, &mut |k| joy.FUN_001c46c0(t, 0.1, k) != 0);
+                    for e in ev {
+                        match e {
+                            crate::engine::player::p26::Ev21f418::Set(s) => { cx.h.po_call(0x2206c8, obj, 0x1910, &[s as u32]); }
+                            crate::engine::player::p26::Ev21f418::OwnerIdle => self.ee_sub_1b6078(obj, 0, cx),
+                            crate::engine::player::p26::Ev21f418::Listener(l) => cx.h.vcall(l, 0x48),
+                        }
+                    }
                 }
                 0x11 => {
                     let sl = self.b.m.u(0x1030);
@@ -969,7 +1002,7 @@ impl C2d44c8 {
     pub fn ee_sub_1b50b0(&mut self, obj: usize, cx: &mut Cx) {
         let o = handle(obj);
         // FUN_001403d0: class-52 base update (K20, classes/k20_54.rs)
-        self.b.ee_sub_1403d0(obj, cx);
+        super::k20_54::ee_sub_1403d0_vt(self, obj, cx);
         if !cx.h.lo_28_bit60(o) {
             return;
         }
@@ -1042,7 +1075,7 @@ impl C2d44c8 {
         }
         cx.h.ee_sub_1a0300(obj, 0x16f0, 0x17f0);
         cx.h.po_call(0x20bd88, obj, 0x1850, &[]);
-        cx.h.po_call(0x21f388, obj, 0x1910, &[]);
+        crate::engine::player::p26::ee_sub_21f388_k(&mut self.b.m, 0x1910);
         self.b.ee_sub_1426e8(obj, 0x16, cx.h);
         let oid = cx.h.obj_i32(o, 0x18);
         let c = cx.h.ee_sub_1f4c58(o, oid, 0xc);
@@ -1059,6 +1092,17 @@ impl C2d44c8 {
         let o = handle(obj);
         cx.h.base(0x140f90, obj);
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        // FEEL R69: FUN_00140f90 case 9 event 0x15e (the punch lunge anim's root-motion key): +0x190 = -root
+        // velocity of the event anim (FUN_00204e38), xfLin velocity (vt +0x11c) = rows +0x1b0/+0x1c0/+0x1d0 * r
+        // set directly, bypassing the motor ramp (capture: 0 -> 1200 in one frame). SLY2_FEEL_EV15E=0 = off.
+        if msg == 9 && a(2) == 0x15e && std::env::var("SLY2_FEEL_EV15E").map_or(true, |v| v != "0") {
+            let r = cx.h.root_vel_204e38(a(0)); // port msg9 args = [asega, t, id]
+            self.b.m.set_v3(0x190, neg(r));
+            let (x, y, z) = (self.b.m.v3(0x1b0), self.b.m.v3(0x1c0), self.b.m.v3(0x1d0));
+            let v = [0, 1, 2].map(|c| x[c] * r[0] + y[c] * r[1] + z[c] * r[2]);
+            if std::env::var_os("SLY2_FEEL_EV15EDBG").is_some() { eprintln!("[R69] 15e murray {obj} r {r:?} v {v:?}"); }
+            self.set_vel_11c = Some(v);
+        }
         if msg == 9 {
             if a(0) != self.b.m.u(0x1030) && a(0) != self.b.m.u(0x190c) {
                 return;
@@ -1093,7 +1137,7 @@ impl C2d44c8 {
                         self.ee_sub_1b7970(obj, cx.g.t, cx.h);
                     }
                     0xf => {
-                        cx.h.po_call(0x2205a8, obj, 0x1910, &[]);
+                        crate::engine::player::p26::ee_sub_2205a8(&self.b.m, 0x1910, handle(obj), cx.g.g_2dd5bc, cx.g.g_2dd5bc_13d0, cx.h);
                     }
                     _ => {}
                 },
@@ -1197,4 +1241,21 @@ impl ClassSet {
         let mut cx = Cx { g: &self.g, rng: &mut self.rng, h };
         Some(f(c, &mut cx))
     }
+}
+
+/// CRAWL R85: FUN_00184380(point, x) 1:1: skip the throw target `x` unless its +0xf4 is the carry point's +0x19c,
+/// then skip it when it is (under) the carried object point +0x180 (FUN_001a6af8: x or an owner +0x10 of x)
+fn ee_sub_184380(point: u32, x: u32, g: &ClassGlobals, h: &mut dyn ClassHost) -> bool {
+    if std::env::var_os("SLY2_NO_R85_184380").is_some() {
+        return h.po_call(0x184380, 0, 0, &[point, x]) != 0;
+    }
+    if g.l3e13b4_f4.get(&x).copied().unwrap_or(-1) != g.pt_19c.get(&point).copied().unwrap_or(-1) {
+        return true;
+    }
+    let held = h.obj_i32(point, 0x180) as u32;
+    let mut p = x;
+    while p != 0 && p != held {
+        p = h.parent_10(p);
+    }
+    p != 0
 }

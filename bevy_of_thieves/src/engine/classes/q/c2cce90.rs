@@ -426,7 +426,7 @@ pub fn ee_sub_14ae38<M: QMem + ?Sized>(m: &mut M, s: u32, st: u32) {
             let op = pos(m, o);
             m.wv(path, op);
             let path = m.r32(mv + 0xf4);
-            let so = ee_sub_14ae18(m, s);
+            let so = m.call(0x0014_ae18, &[s], &[]).0; // jal 0x14ae18
             let sp = pos(m, so);
             m.wv(path + 0x10, sp);
             m.call(0x001e_6180, &[mv], &[]);
@@ -448,7 +448,7 @@ pub fn ee_sub_14ae38<M: QMem + ?Sized>(m: &mut M, s: u32, st: u32) {
         }
         2 => {
             let b = m.call(0x0020_5438, &[o, 0xac], &[]).0;
-            let so = ee_sub_14ae18(m, s);
+            let so = m.call(0x0014_ae18, &[s], &[]).0; // jal 0x14ae18
             let sp = pos(m, so);
             m.wv(b + 0x50, sp);
             m.w32(b + 0x68, 1);

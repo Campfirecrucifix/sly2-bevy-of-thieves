@@ -89,6 +89,7 @@ fn camera_probe() {
             geom: g,
             bsp: b,
             sphere: None,
+            bbox: None,
         }],
     };
     assert_eq!(cw.solid_intervals([-1.0, 0.5, 0.5], [3.0, 0.5, 0.5]), vec![(0.25, 0.5)]);

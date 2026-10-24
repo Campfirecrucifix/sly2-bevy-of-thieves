@@ -127,6 +127,10 @@ impl super::ClassSet {
     }
     pub(super) fn frame_k25(&mut self, h: &mut dyn ClassHost) {
         for (i, x) in &mut self.k25c {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let super::Inst::K25C127(c) = x {
                 c.ee_sub_211d38(*i, &mut self.g, h);
             }

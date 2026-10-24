@@ -227,6 +227,50 @@ pub fn apply_toggles(m: &JobMgr, objs: &mut ObjectFields, w: &World, seen: &mut 
     *seen = m.toggles.len();
 }
 
+/// CRAWL R118: applies `JobMgr::anims[*seen..]` (the 0x162250 cue records, task field 1288 / job field 1256):
+/// object `oid` (0x15e650 first match; REPLACED: `World::find_oid`), its SMA FUN_001f67e0(obj, sel), then
+/// FUN_001f0948 (ev 1 / 4) else FUN_001f0660 with the cue label. They were collected but never applied (e.g.
+/// task 1778: 123999 SM 457 -> 458 at states 0/1, 464 at 2/3).
+/// OPT-IN SLY2_R118_JOBANIM=1: default-on hid 3 ep1 hub objects the original shows (140739, 44949, 123845 in
+/// feel_inworld_live_saved_matches_original_ep1_hub); the cellar slab 136544 (SM 17434) has no cue record.
+pub fn apply_anims(m: &JobMgr, k25: &mut crate::engine::classes::k25::AnimRt, w: &std::sync::Arc<World>, seen: &mut usize) {
+    if m.anims.len() < *seen {
+        *seen = 0; // new world
+    }
+    if std::env::var_os("SLY2_R118_JOBANIM").is_none() {
+        *seen = m.anims.len();
+        return;
+    }
+    for &(oid, sel, anim, play) in &m.anims[*seen..] {
+        let Some(&o) = w.find_oid(oid).first() else { continue };
+        if std::env::var("SLY2_R119_JOBANIMSKIP").is_ok_and(|v| v.split(',').any(|x| x == oid.to_string())) {
+            continue;
+        }
+        let s = k25.ee_sub_1f67e0(w, o as u32 + 1, sel);
+        if std::env::var_os("SLY2_R119_JOBANIMDBG").is_some() {
+            let chain = |mut c: Option<usize>| { let mut v = vec![]; while let Some(x) = c { v.push((x, w.objects[x].oid, w.objects[x].class)); c = w.objects[x].owner; } v };
+            eprintln!("R119 jobanim oid {oid} -> obj {o} (copies {}) sel {sel} anim {anim} play {play} sma {s} chain {:?} sel objs {:?}", w.find_oid(oid).len(), chain(Some(o)), w.find_oid(sel).iter().map(|&x| chain(Some(x))).collect::<Vec<_>>());
+        }
+        if s == 0 {
+            continue;
+        }
+        let before = k25.sma_state(s);
+        let r0 = crate::engine::physics::driven::rng_shared_state();
+        if play {
+            k25.ee_sub_1f0948(w, s, anim);
+        } else {
+            k25.ee_sub_1f0660(w, s, anim);
+        }
+        if std::env::var_os("SLY2_R119_JOBANIMDBG").is_some() {
+            eprintln!("R120 jobanim oid {oid} sma {s} (cur, next, goal) {before:?} -> {:?} rng {r0:x?} -> {:x?}", k25.sma_state(s), crate::engine::physics::driven::rng_shared_state());
+        }
+        if std::env::var_os("SLY2_R120_JOBANIM_NORNG").is_some() && r0.is_some() {
+            crate::engine::physics::driven::rng_shared_thread(r0);
+        }
+    }
+    *seen = m.anims.len();
+}
+
 /// Per-task scratch of FUN_00164100: +0xfc visits, +0x100 depth, +0x104 job-end depth.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Order {

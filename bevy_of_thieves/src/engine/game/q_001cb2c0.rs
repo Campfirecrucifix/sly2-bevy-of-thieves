@@ -32,7 +32,7 @@ fn f(x: f32) -> V4 {
 
 /// FUN_001cb2c0(o): FUN_001cade0(o, 2) != 0
 pub fn ee_sub_1cb2c0<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
-    m.call(0x001c_ade0, &[o, 2], &[]).0 != 0
+    crate::engine::game::q_wirejob2::ee_sub_1cade0(m, o, 2) != 0
 }
 
 /// FUN_001cb2e0(o): first attachment's id (record +0xe0 ids [FUN_001ca930(o, +0xe8)]), 0 without a list

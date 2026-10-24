@@ -7,11 +7,11 @@ use super::geom::{dot, sub, CGeom, Plane, V3};
 use super::point::{FUN_00118a88, FUN_00119090, EMPTY, SOLID};
 
 /// 0x001a93c8 tail: no contacts and the centre inside solid (0x119090) -> one contact from 0x1a9108.
-fn deep(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, out: &mut Vec<Sbi>) -> usize {
-    if FUN_00119090(g, bsp, 0, bsp.nodes.len(), c).is_none() {
+fn deep(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, limit: usize, out: &mut Vec<Sbi>) -> usize {
+    if FUN_00119090(g, bsp, 0, limit, c).is_none() {
         return 0;
     }
-    match FUN_001a9108(r, c, g, bsp) {
+    match FUN_001a9108_lim(r, c, g, bsp, limit) {
         Some(s) => {
             out.push(s);
             1
@@ -25,11 +25,16 @@ fn deep(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, out: &mut Vec<Sbi>) -
 /// first interval with the largest t_in > 0: pos = its entry point, plane = 0x119390(normalize(p1 - c), pos),
 /// kind 0xc. First R with a hit wins. (Clip root = full BSP instead of the pruned tree; same intervals near c.)
 pub fn FUN_001a9108(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC) -> Option<Sbi> {
+    FUN_001a9108_lim(r, c, g, bsp, bsp.nodes.len())
+}
+
+/// FUN_001a9108 with the node limit `limit` (a1 of 0x1a93c8, see `FUN_001a93c8_lim`).
+pub fn FUN_001a9108_lim(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, limit: usize) -> Option<Sbi> {
     let mut rr = if 100.0 < r { r } else { 100.0 };
     while rr < 52000.0 {
         let mut left = 0x1555i32;
         let mut pruned = Vec::new();
-        if FUN_00118a88(g, bsp, 0, bsp.nodes.len(), c, rr, &mut left, &mut pruned) == 2 {
+        if FUN_00118a88(g, bsp, 0, limit, c, rr, &mut left, &mut pruned) == 2 {
             let mut best = 0.0f32;
             let mut hit = None;
             let mut seen = vec![false; g.surfs.len()];
@@ -42,7 +47,7 @@ pub fn FUN_001a9108(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC) -> Option
                 let pl = g.surfs[s].plane;
                 let p1 = madd(c, [pl[0], pl[1], pl[2]], rr + 1.0);
                 let mut lsg = Vec::new();
-                if FUN_00118668(g, bsp, 0, bsp.nodes.len(), p1, c, 0x10, &mut lsg) > 0 && best < lsg[0].t[0] {
+                if FUN_00118668(g, bsp, 0, limit, p1, c, 0x10, &mut lsg) > 0 && best < lsg[0].t[0] {
                     best = lsg[0].t[0];
                     let d = sub(p1, c);
                     let n = { let l = dot(d, d).sqrt(); [d[0] / l, d[1] / l, d[2] / l] };
@@ -90,17 +95,25 @@ pub use super::geom::FUN_00119390;
 /// Contact pos = c - r*n for every kind. Returns the number written (<= max).
 /// No contacts and the centre inside solid (0x00119090): 0x001a9108 deep-penetration fallback (deep()).
 pub fn FUN_001a93c8(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, max: usize, out: &mut Vec<Sbi>) -> usize {
+    FUN_001a93c8_lim(r, c, g, bsp, bsp.nodes.len(), max, out)
+}
+
+/// R29: 0x001a93c8 with its a2 node limit (saved at sp+0x364c, passed as a1 to 0x00118a88 / 0x00119090 /
+/// 0x001a9108): BSP nodes at index >= `limit` count as null. The other callers pass 0x7fffffff (whole tree,
+/// `FUN_001a93c8`); 0x0014eda0 passes part +0x74 + part +0x70 * 0xc = the BSPC third word (`BspC::b`, the
+/// camera node limit, ee_sub_118220).
+pub fn FUN_001a93c8_lim(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, limit: usize, max: usize, out: &mut Vec<Sbi>) -> usize {
     if max == 0 || bsp.nodes.is_empty() {
         return 0;
     }
     let mut left = 0x1555i32.min(bsp.nodes.len() as i32);
     let mut pruned = Vec::new();
-    let res = FUN_00118a88(g, bsp, 0, bsp.nodes.len(), c, r, &mut left, &mut pruned);
+    let res = FUN_00118a88(g, bsp, 0, limit, c, r, &mut left, &mut pruned);
     if res == EMPTY {
         return 0;
     }
     if res == SOLID {
-        return deep(r, c, g, bsp, out);
+        return deep(r, c, g, bsp, limit, out);
     }
     let start = out.len();
     let ns = g.surfs.len();
@@ -121,7 +134,7 @@ pub fn FUN_001a93c8(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, max: usiz
         let n = [pl[0], pl[1], pl[2]];
         let (p1, p2) = (madd(c, n, r), madd(c, n, -r));
         let mut lsg = Vec::new();
-        let k = FUN_00118668(g, bsp, 0, bsp.nodes.len(), p1, p2, 0x10, &mut lsg);
+        let k = FUN_00118668(g, bsp, 0, limit, p1, p2, 0x10, &mut lsg);
         for l in &lsg[..k.min(lsg.len())] {
             let hit = if 1.0 < l.t[0] + l.t[1] { l.surf[0] } else { l.surf[1] };
             if hit == Some(s) {
@@ -207,7 +220,7 @@ pub fn FUN_001a93c8(r: f32, c: V3, g: &CGeom, bsp: &super::geom::BspC, max: usiz
         }
     }
     if out.len() == start {
-        return deep(r, c, g, bsp, out);
+        return deep(r, c, g, bsp, limit, out);
     }
     out.len() - start
 }
@@ -255,11 +268,17 @@ pub const LCP_SCALE: f32 = 4.0;
 pub fn FUN_0014eda0(cw: &CollisionWorld, radius: f32, max_len: f32, c: V3, vel: V3, cb: &mut dyn FnMut(V3, V3, &Sbi) -> f32) -> V3 {
     let mut sbi = Vec::new();
     for col in &cw.colliders {
+        // R29: both callers (0x0014f110, 0x00223a70) gather with filter 0x0014f030 (`lw v0,0x70(a1); slt v0,
+        // zero,v0`: part BSPC third word > 0) and 0x14eda0 limits each part's BSP to nodes < that word
+        let lim = col.bsp.b as i32;
+        if lim <= 0 {
+            continue;
+        }
         let left = 0x40 - sbi.len();
         if left == 0 {
             break;
         }
-        FUN_001a93c8(radius, c, &col.geom, &col.bsp, left, &mut sbi);
+        FUN_001a93c8_lim(radius, c, &col.geom, &col.bsp, lim as usize, left, &mut sbi);
     }
     let n = sbi.len();
     if n == 0 {

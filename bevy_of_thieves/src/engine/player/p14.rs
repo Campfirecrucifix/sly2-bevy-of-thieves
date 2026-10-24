@@ -35,6 +35,8 @@ pub struct JtP14 {
     pub len_fcc: Option<f32>,
     /// s+0xc path of the ridden object (jt+0xf5c)
     pub path: Option<Path>,
+    /// CRAWL R67: jt+0xf5c as the target id (the pick handle), for SetJtJts' jmp+0xbc last-target write
+    pub f5c_id: Option<usize>,
     /// jt+0x1010 offset path point - jt position
     pub off_1010: V3,
     /// s+0x14 path speed (du/dt)
@@ -93,7 +95,9 @@ fn blend_init(w: &World, jt: usize, m: &std::collections::HashMap<u32, usize>, b
         w: [1.0, 0.0],
         k: [1.0, 1.0],
         vel: [e0.unwrap_or([0.0; 3]), e1.unwrap_or([0.0; 3])],
-        aseg: m.contains_key(&(b + 4)),
+        // BOSS R26: b+4 is the blend FUN_0020b868 builds at JT load (not a member): set iff entry b+0x14 exists
+        // (rec11 238: jt+0x644 = 0x1693410, a C2ca300 blend, from load on)
+        aseg: m.contains_key(&(b + 0x14)),
     }
 }
 
@@ -219,7 +223,7 @@ pub fn FUN_0019e110(path: &Path, dir: bool) -> (f32, f32) {
 }
 
 /// p(u + 50) - p(u - 50) (0x19e1e0 / 0x1c3500 tangent sample; 0x1e6728 wraps / clamps u).
-fn tangent(path: &Path, u: f32) -> V3 {
+pub(crate) fn tangent(path: &Path, u: f32) -> V3 {
     let wrap = |x: f32| if path.looped { path.FUN_001e66c8(x) } else { x.clamp(path.l[0], path.FUN_001e6648()) };
     let a = path.FUN_001e6f10(wrap(u + 50.0)).0;
     let b = path.FUN_001e6f10(wrap(u - 50.0)).0;
@@ -243,6 +247,50 @@ pub fn FUN_001c4768(rows: &[V3; 3], v: V3) -> [f32; 2] {
     } else {
         [x / l, y / l]
     }
+}
+
+/// FEEL R95: FUN_001c3500(o, flip, out, s) 1:1 (q_wirew1h9::ee_sub_1c3500): a = start tangent FUN_001e67b8(o, s[0]);
+/// search s + 0, -10, +20, -20, .. (non-looped: skip below l[0]; looped: wrap) for a tangent b (p(s+50) - p(s-50))
+/// with a.b > -0.9; v = (o rows * axis +0x1c0) * FUN_0011ba08(a, b); row1 = |b0 x v| (b0 = the first sample),
+/// row2 = b0, row0 = row1 x row2; flip == 0 negates rows 1 / 2. None = no sample found (port fallback).
+pub fn frame_1c3500(path: &Path, s: f32, flip: bool, axis: V3) -> Option<[V3; 3]> {
+    use super::p5_states::FUN_0011ba08;
+    let n3 = |v: V3| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        (l >= 0.0001).then(|| [v[0] / l, v[1] / l, v[2] / l])
+    };
+    let cr = |a: V3, b: V3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let a = n3(path.FUN_001e67b8(path.s[0]).1).unwrap_or([1.0, 0.0, 0.0]);
+    let (l0, len) = (path.l[0], path.FUN_001e6648());
+    let mut b0 = None;
+    for k in 0..200u32 {
+        let off = if k & 1 != 0 { 10.0 * (k + 1) as f32 } else { -10.0 * k as f32 };
+        let mut f = s + off;
+        if !path.looped {
+            if f < l0 || len < s {
+                continue;
+            }
+        } else {
+            f = path.FUN_001e66c8(f);
+        }
+        let b = tangent(path, f);
+        let b0 = *b0.get_or_insert(b);
+        if !(-0.9 < a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) {
+            continue;
+        }
+        let m = FUN_0011ba08(a, b);
+        let x = &path.xf;
+        let r: V3 = [0, 1, 2].map(|i| x[0][i] * axis[0] + x[1][i] * axis[1] + x[2][i] * axis[2]);
+        let v: V3 = [0, 1, 2].map(|i| m[0][i] * r[0] + m[1][i] * r[1] + m[2][i] * r[2]);
+        let r1 = n3(cr(b0, v)).unwrap_or_else(|| crate::engine::camera::looks::FUN_0011e390(b0));
+        let r0 = cr(r1, b0);
+        return Some(if flip { [r0, r1, b0] } else { [r0, r1.map(|c| -c), b0.map(|c| -c)] });
+    }
+    None
+}
+
+pub fn r95_frame_on() -> bool {
+    std::env::var("SLY2_FEEL_R95FRAME").map_or(true, |v| v != "0")
 }
 
 /// REPLACED FUN_001c3500 frame: row2 = tangent (negated when s+0x18 is set), row0 = horizontal direction
@@ -361,6 +409,7 @@ impl Jt {
         self.p14.mode = -1;
         self.p14.v_14 = 0.0;
         self.p14.path = Some(path);
+        self.p14.f5c_id = tg;
         let dt = self.dt;
         self.with_p5(|jt, st, w| super::p5_states::FUN_0019c688_p5(jt, st, w, dt, &mut *anim));
         // 0x19eab0(-1 -> 0) tail: 0x19e110 clamps u, jt+0x1010 = path(u) - jt position
@@ -369,6 +418,14 @@ impl Jt {
         self.p5.s8.u = self.p5.s8.u.clamp(lo, hi.max(lo));
         let q = p.FUN_001e6f10(self.p5.s8.u).0;
         self.p14.off_1010 = [q[0] - self.phys.pos[0], q[1] - self.phys.pos[1], q[2] - self.phys.pos[2]];
+        // FEEL R98: rows of this ride first (r95_anchor read p5w.path8 before jts8_frame = None / the previous ride's
+        // rows -> no anchor at entry, then a 70-unit jump on the first jts8_step). REPLACED: the anchor uses the ride
+        // rows also at entry (0x19eab0 reads the body xform; the port snaps the body to the ride rows next frame).
+        self.jts8_frame();
+        if let Some(a) = self.r95_anchor() {
+            // 0x19eab0 tail (text_00190000.c:11087): jt+0x1010 = path(u) - FUN_001a6f00(jt, 0, s+0x30)
+            self.p14.off_1010 = [q[0] - a[0], q[1] - a[1], q[2] - a[2]];
+        }
         if let Some(f) = jts8_aseg(self.p5.s8.state, &self.p14) {
             anim.play_aseg(f, 8, self.p5.s8.state);
         }
@@ -378,7 +435,11 @@ impl Jt {
     fn jts8_frame(&mut self) {
         let Some(p) = &self.p14.path else { return };
         let face = [self.yaw.cos(), self.yaw.sin(), 0.0];
-        self.p5w.path8 = Some(path_frame(p, self.p5.s8.u, self.p5.s8.dir_18, self.p14.off_1010, face));
+        // FEEL R95: 1:1 FUN_001c3500(obj, u, s+0x18 == 0) with the pipe's +0x1c0 axis (SLY2_FEEL_R95FRAME=0 = old)
+        let tg = self.p14.f5c_id;
+        let axis = self.p5_targets.iter().find(|t| Some(t.obj.id) == tg).and_then(|t| t.attach.as_ref()).map(|a| a.axis_1c0);
+        let fr = axis.filter(|_| r95_frame_on()).and_then(|ax| frame_1c3500(p, self.p5.s8.u, !self.p5.s8.dir_18, ax));
+        self.p5w.path8 = Some(fr.unwrap_or_else(|| path_frame(p, self.p5.s8.u, self.p5.s8.dir_18, self.p14.off_1010, face)));
     }
 
     /// 0x0019e1e0: jts 8 input (see module doc).
@@ -521,6 +582,25 @@ impl Jt {
         self.jts8_frame();
     }
 
+    /// FEEL R95 (opt-in SLY2_FEEL_R95ANCHOR=1): the jts 8 constraint holds the body point FUN_001a6f00(jt, 0, s+0x30)
+    /// (SO + s+0x30 in the path8 rows) on path(u) - jt+0x1010, not the JT position. s+0x30 is set by the Splice
+    /// method field 766 (symid 749, thunk 0x10b340 -> FUN_0019eaa0(jt+0xf50, ..)) whose script args were not
+    /// recovered (no call in the port's hub run); REPLACED by (45, 0, 0) measured from rec_ep1b (rest / climb
+    /// samples decompose to row0 -43.9 / -45.6 / -43.5, row1 ~0 in the 1:1 FUN_001c3500 frame). Off by default:
+    /// the jtbs 0xf pick u (port lq 50 -> clamp 100, rec ~151) must be fixed first or the rest sinks to ~584.
+    /// FEEL R98: DEFAULT ON (opt-out SLY2_FEEL_R95ANCHOR=0): cap_feel_r97_pipe_hop_fixed climb samples (u 209..525) are
+    /// xf = path(u) - rows * (45, 0, 40) to 0.001 in the 1:1 FUN_001c3500 frame (jt+0x1010 = 0 then).
+    /// Returns the anchor's world point for the current position / rows.
+    fn r95_anchor(&self) -> Option<V3> {
+        if std::env::var("SLY2_FEEL_R95ANCHOR").is_ok_and(|v| v == "0") || !r95_frame_on() {
+            return None;
+        }
+        let m = self.p5w.path8?;
+        let so = self.hang_so_ofs();
+        // FEEL R97: s+0x30 = (45, 0, 40) = FUN_0019de10(jt+0xf50) init (text_00190000.c:10440, [0xc] 45.0, [0xd] 0, [0xe] 40.0)
+        Some([0, 1, 2].map(|i| self.phys.pos[i] + so[i] + 45.0 * m[0][i] + 40.0 * m[2][i]))
+    }
+
     /// REPLACED 0x19e9d8 / 0x19ea00 constraint + 0x19df70 orientation: body on path(u) - jt+0x1010 with the
     /// path velocity, rows = the path frame. Returns false when not riding.
     pub fn jts8_step(&mut self) -> bool {
@@ -533,6 +613,10 @@ impl Jt {
         let t = tangent(p, u);
         let o = self.p14.off_1010;
         self.phys.pos = [q[0] - o[0], q[1] - o[1], q[2] - o[2]];
+        if let Some(a) = self.r95_anchor() {
+            let d = [a[0] - self.phys.pos[0], a[1] - self.phys.pos[1], a[2] - self.phys.pos[2]];
+            self.phys.pos = [self.phys.pos[0] - d[0], self.phys.pos[1] - d[1], self.phys.pos[2] - d[2]];
+        }
         let s = self.p14.v_14;
         self.phys.v = [t[0] * s, t[1] * s, t[2] * s];
         self.phys.imp_lin = [0.0; 3];

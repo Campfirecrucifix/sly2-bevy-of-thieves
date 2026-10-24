@@ -41,10 +41,12 @@ pub struct JtP16 {
     pub sfx: Vec<(i32, V3)>,
     /// FUN_001619a0(0x2deb30, k, jt) job events for the plugin
     pub jobs: Vec<i32>,
+    /// WIRE-B3: (state ASEG, its time) up to which FUN_00131290 has dispatched events (None = state entered)
+    pub t_ev: Option<(u32, f32)>,
 }
 impl Default for JtP16 {
     fn default() -> Self {
-        Self { snd_18c4: -1, t_off: 0.0, sfx: vec![], jobs: vec![] }
+        Self { snd_18c4: -1, t_off: 0.0, sfx: vec![], jobs: vec![], t_ev: None }
     }
 }
 
@@ -69,6 +71,7 @@ impl Jt {
     /// 0x0018c250 enter actions of jts 0xd / 0xe / 0x11.
     pub fn FUN_0018c250_enter_p16(&mut self, new: i32, anim: &mut dyn JtAnim) {
         self.p16.t_off = 0.0;
+        self.p16.t_ev = None;
         match new {
             0xd | 0xe => {
                 self.FUN_0018e540(-1, anim);
@@ -86,6 +89,39 @@ impl Jt {
                 self.p16.jobs.push(0x37);
             }
             _ => {}
+        }
+    }
+
+    /// WIRE-B3: FUN_00131290 over the jt+0x1030 state ASEG of jts 0xd / 0xe / 0x11: kind-0xb events in
+    /// (last, now] (events at time 0 included on the first frame; a forward seek FUN_00130d30 mode 0 passes the
+    /// skipped events) -> FUN_00188f20 msg 9 (e.g. jts 0xe 0x16d -> `calls` (0x188f20, 0x16d), heard by guards).
+    pub fn p16_events(&mut self, anim: &mut dyn JtAnim) {
+        let f = match self.jts {
+            0xd => ASEG_D,
+            0xe => ASEG_E,
+            0x11 => ASEG_11,
+            _ => {
+                self.p16.t_ev = None;
+                return;
+            }
+        };
+        let t1 = self.p16_aseg_t();
+        let t0 = self.p16.t_ev.filter(|x| x.0 == f).map_or(-1.0, |x| x.1);
+        self.p16.t_ev = Some((f, t1));
+        let Some(a) = self.cane.data.asegs.get(&f).cloned() else { return };
+        let jts = self.jts;
+        for (t, k, x) in a.ev {
+            if !(t0 < t && t <= t1 && self.jts == jts) {
+                continue;
+            }
+            // FUN_00131290: kind 0xb -> msg 9; POOL1 R65: kinds 0xf / 0x10 (FUN_002104a0 -> FUN_001f6ac8 /
+            // FUN_001f6b48) turn the SO geom with that id on / off, as for the cane ASEGs (air attack 0x1a80: part 0x14d)
+            match k {
+                0xb => self.FUN_00188f20_msg9(x, anim),
+                0xf => self.cane.geom_set(x as u32, true),
+                0x10 => self.cane.geom_set(x as u32, false),
+                _ => {}
+            }
         }
     }
 

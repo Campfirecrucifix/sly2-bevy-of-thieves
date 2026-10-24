@@ -86,7 +86,7 @@ impl Default for Bindings {
                 ("square", &["KeyQ", "Mouse:Left"]),
                 ("triangle", &["KeyF"]),
                 ("l1", &["ShiftLeft"]),
-                ("r1", &["Mouse:Right"]),
+                ("r1", &["Mouse:Right", "KeyR"]),
                 ("l2", &["KeyZ"]),
                 ("r2", &["KeyC"]),
                 ("l3", &["ControlLeft"]),

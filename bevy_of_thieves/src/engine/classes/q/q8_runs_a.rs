@@ -143,8 +143,8 @@ pub fn ee_sub_11b628<M: QMem + ?Sized>(m: &mut M, out: u32, ang: V4) -> u32 {
 pub fn ee_sub_11b720<M: QMem + ?Sized>(m: &mut M, a1: f32, a2: f32, out: u32) -> u32 {
     let ma = stack_push(m, 0x30);
     let mb = stack_push(m, 0x30);
-    m.call(0x0011_b500, &[ma], &[s(a1), rov(0x002a_2dc0)]);
-    m.call(0x0011_b500, &[mb], &[s(-a2), rov(0x002a_2db0)]);
+    m.call(0x0011_b500, &[ma], &[rov(0x002a_2dc0), s(a1)]);
+    m.call(0x0011_b500, &[mb], &[rov(0x002a_2db0), s(-a2)]);
     let a = [m.rv(ma), m.rv(ma + 0x10), m.rv(ma + 0x20)];
     for i in 0..3u32 {
         let r = m.rv(mb + 0x10 * i);
@@ -156,7 +156,7 @@ pub fn ee_sub_11b720<M: QMem + ?Sized>(m: &mut M, a1: f32, a2: f32, out: u32) ->
 }
 /// FUN_00120c48: p3[1] owner; p5 == 0x23 -> FUN_00129658(owner + 8, p3 + 8); else FUN_00256c58(owner + 0x10,
 /// p3[2] == 0x1f ? p3[3] : 0); FUN_0012a0b0(a0, 0x24); returns a0
-pub fn ee_sub_120c48<M: QMem + ?Sized>(m: &mut M, a0: u32, p3: u32, p5: u32) -> u32 {
+pub fn ee_sub_120c48<M: QMem + ?Sized>(m: &mut M, a0: u32, _a1: u32, p3: u32, _a3: u32, p5: u32) -> u32 {
     let ow = m.r32(p3 + 4);
     if p5 == 0x23 {
         m.call(0x0012_9658, &[ow + 8, p3 + 8], &[]);

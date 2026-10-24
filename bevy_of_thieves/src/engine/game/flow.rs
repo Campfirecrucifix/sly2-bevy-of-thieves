@@ -52,6 +52,17 @@ pub struct Post {
 
 static POSTED: Mutex<Vec<Post>> = Mutex::new(Vec::new());
 
+thread_local! {
+    /// Test isolation (TFIX): when set, posts from this thread go to a private queue instead of POSTED.
+    static THREAD_POSTS: std::cell::RefCell<Option<Vec<Post>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Route this thread's FUN_0022b490 posts / take_posted to a private queue (true) or the global one (false).
+/// Used by tests so parallel tests posting to the global queue cannot interleave.
+pub fn isolate_thread_posts(on: bool) {
+    THREAD_POSTS.with(|c| *c.borrow_mut() = on.then(Vec::new));
+}
+
 /// WP-J15: the ELF static descriptor table 0x2a3268 (30 rows of 64 bytes), set once by the binary / tests
 /// from SCUS_973.16 (`descriptor::static_table`).
 static STATIC_TABLE: Mutex<Vec<Descriptor>> = Mutex::new(Vec::new());
@@ -79,11 +90,17 @@ pub fn static_desc(addr: u32) -> Option<Descriptor> {
 
 /// FUN_0022b490 (record): post a world request.
 pub fn FUN_0022b490(p: Post) {
+    if let Some(v) = THREAD_POSTS.with(|c| c.borrow_mut().as_mut().map(|v| v.push(p))) {
+        return v;
+    }
     POSTED.lock().unwrap_or_else(|e| e.into_inner()).push(p);
 }
 
 /// Requests posted since the last call.
 pub fn take_posted() -> Vec<Post> {
+    if let Some(v) = THREAD_POSTS.with(|c| c.borrow_mut().as_mut().map(std::mem::take)) {
+        return v;
+    }
     std::mem::take(&mut *POSTED.lock().unwrap_or_else(|e| e.into_inner()))
 }
 

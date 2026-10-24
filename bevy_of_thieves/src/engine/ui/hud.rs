@@ -106,11 +106,15 @@ pub fn vault(shown: bool, out: &mut UiFrame) {
 /// A12: HUD meter (`ui::meter::HudMeter`, FUN_001d9df8) as two bars top-left: health (fill 0x34f) and,
 /// when shown, gadget power (fill 0x350) under it. REPLACED: the screen object 0x36b art / timelines.
 pub fn meter(m: &super::meter::HudMeter, out: &mut UiFrame) {
-    if m.health_shown {
+    // CRAWL R106 (USER: blue bar top left): the original's idle meter (state 1, FUN_001d9b60 anims[0] = 0x33d
+    // for Sly) is only the character icon (ref_video/01 gameplay: hat badge, no bar); the health pips show in
+    // the damage / run-down states 2 / 3, the power fill in 4 / 6 / 7. The icon art is not drawn (no sprite).
+    let r106 = std::env::var_os("SLY2_NO_R106_METERIDLE").is_none();
+    if m.health_shown && (!r106 || matches!(m.state, 2 | 3)) {
         out.boxes.push(box_quad(38.0, 26.0, 242.0, 42.0, 0x8000_0000));
         out.boxes.push(box_quad(40.0, 28.0, 40.0 + 200.0 * m.health.clamp(0.0, 1.0), 40.0, HEALTH_FILL));
     }
-    if m.power_shown {
+    if m.power_shown && (!r106 || matches!(m.state, 4 | 6 | 7)) {
         out.boxes.push(box_quad(38.0, 44.0, 242.0, 56.0, 0x8000_0000));
         out.boxes.push(box_quad(40.0, 46.0, 40.0 + 200.0 * m.power.clamp(0.0, 1.0), 54.0, POWER_FILL));
     }
@@ -211,4 +215,31 @@ pub fn episode(fonts: &mut Fonts, e: &super::episode::Ep131, inp: &super::episod
     text(fonts, if i == 0 { "Prologue".to_string() } else { format!("Episode {i}") }.as_bytes(), 0.0, 330.0, 640.0, 1.2, SEL_COLOR, 1, out);
     text(fonts, &bind::FUN_0015d8f8(&ctx), 0.0, 370.0, 640.0, 1.0, ROW_COLOR, 1, out);
     text(fonts, &bind::FUN_0015d9c0(&ctx), 0.0, 400.0, 640.0, 1.0, ROW_COLOR, 1, out);
+}
+
+/// WIRE-UI: the ThiefNet screen 0x3da150 (`ui::live_menu::ThiefNetView`) in text space: a backdrop, the
+/// page title, the visible rows (DAT_002c35b4 = 6 rows of DAT_002c35b0 = 40.0 from +0x250, the +0x24c row
+/// highlighted) as gadget name (GADGETS +0x14 string id) + price (+8), and the +0x30 dialog's +0x38 string.
+/// REPLACED: the original draws it through the class-126 screen object at +0x24 (row elements 0x2f5..).
+pub fn thiefnet(fonts: &mut Fonts, v: &super::thiefnet::ThiefNetRows, name: &dyn Fn(u32) -> Vec<u8>, out: &mut UiFrame) {
+    use super::thiefnet::{ROWS, ROW_H};
+    out.boxes.push(box_quad(96.0, 64.0, 544.0, 430.0, 0xc000_0000));
+    let title: &[u8] = if v.page == 0 { b"ThiefNet - Gadgets" } else { b"ThiefNet - Loot" };
+    text(fonts, title, 96.0, 76.0, 448.0, 1.0, SEL_COLOR, 1, out);
+    for r in 0..ROWS {
+        let i = v.first + r;
+        let Some(&[id, _]) = v.ent.get(i.max(0) as usize).filter(|_| i >= 0) else { break };
+        let y = 120.0 + r as f32 * ROW_H;
+        let c = if i == v.sel { SEL_COLOR } else { ROW_COLOR };
+        let g = crate::engine::player::p18_gadget::GADGETS.get(id.max(0) as usize).filter(|_| v.page == 0);
+        let label = g.map(|g| name(g.name)).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("#{id}").into_bytes());
+        text(fonts, &label, 116.0, y, 300.0, 0.8, c, 0, out);
+        if let Some(g) = g {
+            text(fonts, format!("{}", g.price).as_bytes(), 420.0, y, 104.0, 0.8, c, 2, out);
+        }
+    }
+    if v.dialog >= 0 {
+        out.boxes.push(box_quad(140.0, 360.0, 500.0, 420.0, 0xe020_2020));
+        text(fonts, &name(v.dialog_msg as u32), 150.0, 372.0, 340.0, 0.8, SEL_COLOR, 1, out);
+    }
 }

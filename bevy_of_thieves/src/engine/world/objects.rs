@@ -99,6 +99,10 @@ pub trait ObjectSink {
     fn push(&mut self, lo: Lo) -> usize;
     fn exists(&self, oid: i32) -> bool;
     fn get_mut(&mut self, i: usize) -> &mut Lo;
+    /// HEIST r27: FUN_001a6730 (LO clone, vt +0x14c) +0x3c part: the copy `dst` takes `src`'s key chain.
+    fn clone_chain(&mut self, src: usize, dst: usize) {
+        let _ = (src, dst);
+    }
     /// WP-B4: directory entry b (+0x60) of the entry whose c (+0x10) is `c` (FUN_001cb770)
     fn template_b(&self, c: i32) -> Option<i32> {
         let _ = c;
@@ -114,9 +118,27 @@ pub trait ObjectSink {
         let _ = (record, entry, owner, bone, oid, xform);
         Vec::new()
     }
+    /// WIRE-EP7: FUN_0013f810(target, stream) of a FUN_001c9b08 template-branch override row
+    fn apply_override(&mut self, target: usize, props: &[super::props::Prop]) {
+        let _ = (target, props);
+    }
+    /// ANIM-ALL R62: an override row whose oid is not (yet) in the copy's subtree: resolved after the load
+    /// (the copy's deeper objects are made later in the port); false = not supported (caller falls back)
+    fn defer_override(&mut self, roots: &[usize], oid: i32, class: i16, props: &[super::props::Prop]) -> bool {
+        let _ = (roots, oid, class, props);
+        false
+    }
+    /// WIRE-EP8: FUN_00256ee0 script slot of a template override row
+    fn bind_script_slot(&mut self, target: usize, entry: usize, slot: i16) {
+        let _ = (target, entry, slot);
+    }
     /// WP-B5: FUN_001c9b08 key/xform pass over the record's nested objects
     fn template_nested(&mut self, nested: &[usize], xform: [u8; 48]) {
         let _ = (nested, xform);
+    }
+    /// ANIM-ALL R47: FUN_0013fb40's own collector for a -1 / -2 record (DAT_002cbe38, slot +0xc = FUN_0013fa30)
+    fn singleton_loaded(&mut self, i: usize, n: i8, entry: usize) {
+        let _ = (i, n, entry);
     }
     /// WP-B5: vtable +0x4c (FUN_001a5630)
     fn post_load(&mut self, i: usize) {
@@ -280,12 +302,19 @@ pub fn ee_sub_13fb40(
             continue;
         }
         // LAB_0013fd38
-        if class::ee_sub_15e988(cls as ClassId, CID_6) {
+        // ANIM-ALL R47: a -1 / -2 record goes to the FUN_0013fa30 collector (kind 0 / 1), not the caller's
+        // (no entry copies / template keys; R48 full fix, `SLY2_R47OFF` = the old caller-collector path)
+        let single = (n == -1 || n == -2).then_some(n).filter(|_| std::env::var_os("SLY2_R47OFF").is_none());
+        let got = if class::ee_sub_15e988(cls as ClassId, CID_6) {
             // FUN_001c9b08(0x3dd490, owner, class, oid, parent, stream, collector): WP-B4
-            created.extend(super::loads_b4::ee_sub_1c9b08(w, s, lo, mission)?);
-            continue;
+            super::loads_b4::ee_sub_1c9b08(w, s, lo, mission)?
+        } else {
+            vec![create_and_load(w, s, lo, mission)?]
+        };
+        match single {
+            Some(n) => got.into_iter().for_each(|i| w.singleton_loaded(i, n, entry)),
+            None => created.extend(got),
         }
-        created.push(create_and_load(w, s, lo, mission)?);
     }
     Ok(created)
 }
@@ -311,4 +340,46 @@ pub fn ee_sub_13e510(w: &mut dyn ObjectSink, src: usize) -> usize {
         clone_of: Some(src),
     };
     w.push(lo)
+}
+
+/// HEIST: FUN_001f66f0 (vt +0x144 of ALO classes): true when `src`'s class clones its children.
+pub fn clones_children(w: &dyn ObjectSink, src: usize) -> bool {
+    class::class(w.objects()[src].class).is_some_and(|c| c.vtable != 0 && crate::engine::disc::exe::exe().w(c.vtable + 0x144) == 0x001f_66f0)
+}
+
+/// HEIST: FUN_0013e510(src, parent): FUN_0013e3c8(class, parent, oid, -1) creates the copy under
+/// `parent`, then vtable +0x144: for classes whose slot is FUN_001f66f0 (ALO clone) every child of `src`
+/// is cloned under the copy, recursively (each child's own +0x144). REPLACED: the child-list flag bit 57
+/// (+0x28) skip is not modelled (load-time children; UNV).
+pub fn ee_sub_13e510_in(w: &mut dyn ObjectSink, src: usize, parent: Option<usize>) -> usize {
+    // 0x0013e510
+    let o = &w.objects()[src];
+    let lo = Lo {
+        class: o.class,
+        oid: o.oid,
+        parent_slot: -1,
+        owner: parent,
+        children: Vec::new(),
+        entry: o.entry,
+        filter: Vec::new(),
+        singleton: None,
+        disabled: o.disabled,
+        payload_offset: o.payload_offset,
+        payload_size: o.payload_size,
+        payload: Payload::Clone,
+        clone_of: Some(src),
+    };
+    let i = w.push(lo);
+    w.clone_chain(src, i); // vt +0x144 -> +0x14c (FUN_001a6730)
+    ee_sub_1f66f0_kids(w, src, i);
+    i
+}
+
+/// HEIST: the FUN_001f66f0 child loop of a copy `dst` of `src` (see [`ee_sub_13e510_in`]).
+pub fn ee_sub_1f66f0_kids(w: &mut dyn ObjectSink, src: usize, dst: usize) {
+    // 0x001f66f0
+    let kids = if clones_children(w, src) { w.objects()[src].children.clone() } else { Vec::new() };
+    for c in kids {
+        ee_sub_13e510_in(w, c, Some(dst));
+    }
 }

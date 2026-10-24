@@ -277,14 +277,19 @@ impl ClassSet {
     pub fn k28_spawn(&mut self, h: &mut dyn ClassHost) {
         // K30: anim event 0x11 requests -> the target's vtable +0x19c (class 33 FUN_0015c690, class 31
         // FUN_0015c3c0); before the requests of the frame are taken
-        for (o, r) in h.k30_take_reqs() {
-            let i = o as usize - 1;
+        // POOL1 R54: drained until empty (class 31 forwards to its class-33 children through the same queue)
+        let mut q = h.k30_take_reqs();
+        while !q.is_empty() {
+          for (o, r) in std::mem::take(&mut q) {
+            let Some(i) = (o as usize).checked_sub(1) else { continue };
             let rng = &mut self.rng;
             match self.insts.iter_mut().chain(self.more.iter_mut()).find(|x| x.0 == i).map(|x| &mut x.1) {
                 Some(Inst::C2ce4d0(c)) => c.ee_sub_15c690(i, &r, rng, h),
                 Some(Inst::C2ce828(c)) => c.ee_sub_15c3c0(i, &r, &[[0.0; 4]; 6], h),
                 _ => {}
             }
+          }
+          q = h.k30_take_reqs();
         }
         for r in h.k28_take_emits() {
             // template +4 == 1: FUN_0015b1b0 (the +0x14c system, UNPORTED) instead of FUN_0015b428

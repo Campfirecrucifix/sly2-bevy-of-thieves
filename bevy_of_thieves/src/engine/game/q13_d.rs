@@ -15,8 +15,9 @@ pub fn ee_sub_1fbbc8<M: QMem + ?Sized>(m: &mut M, p1: u32, p2: u32) -> u32 {
     p1
 }
 /// FUN_001fc0f0
-pub fn ee_sub_1fc0f0<M: QMem + ?Sized>(m: &mut M) {
-    m.call(0x0011_ccc0, &[0x003d_d05c], &[]);
+pub fn ee_sub_1fc0f0<M: QMem + ?Sized>(m: &mut M) -> u32 {
+    // ANIM-ALL: tail call of FUN_0011ccc0 returns the pool block (was dropped)
+    m.call(0x0011_ccc0, &[0x003d_d05c], &[]).0
 }
 /// FUN_001fc138
 pub fn ee_sub_1fc138<M: QMem + ?Sized>(m: &mut M, p1: u32, p2: u32) -> u32 {
@@ -210,15 +211,18 @@ pub fn ee_sub_1cd5d0<M: QMem + ?Sized>(m: &mut M) {
 /// FUN_00204da8: clamp the new scale to >= 0.1, rescale the block (+0xe8) velocity-like quad (+0x80) by
 /// new/old (+0x260) and store the new scale
 pub fn ee_sub_204da8<M: QMem + ?Sized>(m: &mut M, p1: f32, o: u32) {
-    let f = if p1 < 0.1 { f32::from_bits(0x3dcc_cccd) } else { p1 };
+    use crate::engine::math::{ps2f::{ps2_div, ps2_mul}, vu0};
+    // max.s f20, 0.1, f12
+    let f = f32::from_bits(0x3dcc_cccd).max(p1);
     let b = m.r32(o + 0xe8);
     let old = m.rf(o + 0x260);
-    let a = m.rf(b + 0xd0) * old / f;
+    let a = ps2_div(ps2_mul(m.rf(b + 0xd0), old), f);
     super::q13_c::ee_sub_1f35c8(m, a, o);
     let b = m.r32(o + 0xe8);
-    let v = m.rv(b + 0x80);
-    let q = 1.0 / old;
-    m.wv(b + 0x80, [v[0] * f * q, v[1] * f * q, v[2] * f * q, v[3] * f * q]);
+    // vmulx.xyzw vf01, vf01, vf02x; vdiv Q, vf00w, vf03x; vmulq.xyzw (VU: x/0 = +-max, no inf/NaN)
+    let v = vu0::mul(m.rv(b + 0x80), [f; 4]);
+    let q = vu0::vdiv(1.0, m.rf(o + 0x260));
+    m.wv(b + 0x80, vu0::mul(v, [q; 4]));
     m.wf(o + 0x260, f);
 }
 /// FUN_00204ed8: query virtual slot (+0x1c of the entry vtable) of the type-6 child of `p3`; returns the
@@ -282,7 +286,7 @@ pub fn ee_sub_2137f0<M: QMem + ?Sized>(m: &mut M, p1: u32) -> u32 {
 /// FUN_00213830
 pub fn ee_sub_213830<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32) {
     let a = m.r32(o + 0x84);
-    m.call(0x0021_7ba0, &[a], &[]);
+    m.call(0x0021_7ba0, &[a, p2], &[]); // VFIX3: a1 still = p2 at the jal
     vcl(m, o, 0xa8, 0xac, &[1], &[]);
     if m.r32(o + 0xac) != 0 {
         m.call(0x0021_4300, &[o, 0], &[]);
@@ -509,7 +513,8 @@ pub fn ee_sub_214100<M: QMem + ?Sized>(m: &mut M, p: u32, gi: u32, p3: u32, p4: 
     0
 }
 /// FUN_002142b0
-pub fn ee_sub_2142b0<M: QMem + ?Sized>(m: &mut M, g: u32, key: u32) -> u32 {
+/// VER4: a0 unused (g = a1, key = a2)
+pub fn ee_sub_2142b0<M: QMem + ?Sized>(m: &mut M, _o: u32, g: u32, key: u32) -> u32 {
     if key == 0xffff_ffff {
         return 0;
     }

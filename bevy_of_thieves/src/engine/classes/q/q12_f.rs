@@ -7,6 +7,7 @@ use crate::engine::classes::q::q12_e::{ee_sub_209130, ee_sub_2090d0};
 use crate::engine::classes::q::q2mem::{stack_pop, stack_push, QMem, V4};
 use crate::engine::classes::q::q6::{rof, vcall};
 use crate::engine::classes::q::q7util::{f, fr, CLOCK, WORLD};
+use crate::engine::math::ps2f::ps2_div as pdiv;
 
 const NEG1: u32 = u32::MAX;
 
@@ -347,7 +348,7 @@ pub fn ee_sub_20bc08<M: QMem + ?Sized>(m: &mut M, o: u32) {
         let pf2 = m.r32(off + tab + 8);
         let a74 = m.rf(a + 0x74);
         let x = f12 - m.rf(pf2);
-        let fv10 = fr(m.call(0x0011_d898, &[x.to_bits()], &[f(a74)]));
+        let fv10 = fr(m.call(0x0011_d898, &[], &[f(x), f(a74)]));
         let u7 = (m.rf(pf2 + 4) <= fv10) as u32;
         if u7 != m.r32(pu) {
             if u7 == 0 {
@@ -474,7 +475,7 @@ pub fn ee_sub_20c058<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
 pub fn ee_sub_20c080<M: QMem + ?Sized>(m: &mut M, o: u32) {
     if !ee_sub_20c0d8(m, o) {
         ee_sub_20c2f8(m, o, 4);
-        m.call(0x0013_05b8, &[0, 0x3f80_0000, 0, 0, 0, o + 0x38], &[]);
+        m.call(0x0013_05b8, &[0, 0, 0, o + 0x38], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
     }
 }
 pub fn ee_sub_20c0d8<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
@@ -530,16 +531,129 @@ pub fn ee_sub_20c0e8<M: QMem + ?Sized>(m: &mut M, o: u32) {
         st = now;
     }
 }
-/// FUN_0020c2f8(o, k): +0x10 = k, +0x14 = clock; k < 5: enter handler PTR_LAB_002a88f0[k] (o, k)
+/// FUN_0020c2f8(o, k): +0x10 = k, +0x14 = clock; k < 5: switch (jump table 0x2a88f0 = inline case labels
+/// 0x20c358 / 0x20c398 / 0x20c634 / 0x20c658 / 0x20c694), ported 1:1 per case (VER5)
 pub fn ee_sub_20c2f8<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32) {
-    if k != m.r32(o + 0x10) {
-        m.w32(o + 0x10, k);
-        let c = m.r32(CLOCK);
-        m.w32(o + 0x14, c);
-        if k < 5 {
-            let h = m.r32(0x002a_88f0 + k * 4);
-            m.call(h, &[o, k], &[]);
+    if k == m.r32(o + 0x10) {
+        return;
+    }
+    m.w32(o + 0x10, k);
+    let c = m.r32(CLOCK);
+    m.w32(o + 0x14, c);
+    match k {
+        0 => {
+            let v = m.r32(o + 0x30);
+            let (a0, a1, a2) = (m.r32(v + 4), m.r32(o + 0x34), m.r32(o + 0x3c));
+            m.call(0x0013_05b8, &[a0, a1, a2, o + 0x38], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
+            let a0 = m.r32(o + 0x38);
+            m.call(0x0013_33c0, &[a0, o], &[]);
+            let a0 = m.r32(o + 0x34);
+            let q = m.call(0x001f_5860, &[a0], &[]).1;
+            m.wv(o + 0x20, q);
         }
+        1 => {
+            let a0 = m.r32(o + 0x34);
+            if m.call(0x0013_2b10, &[a0, 0x38], &[]).0 != 0 {
+                let s0 = m.r32(o + 0x34);
+                m.call(0x0020_b210, &[s0], &[]);
+                let p = m.r32(s0 + 0x498);
+                m.call(0x0020_d178, &[p], &[]);
+            }
+            let v38 = m.r32(o + 0x38);
+            let t = m.r32(o + 0x34);
+            let spd = m.rf(v38 + 0x40);
+            let t58 = m.r32(t + 0x58);
+            let vf4 = m.rv(t58 + 0x70);
+            let v30 = m.r32(o + 0x30);
+            let vf1 = m.rv(v30 + 0x20);
+            let s2 = spd * spd;
+            let g: V4 = std::array::from_fn(|i| vf1[i] * s2);
+            let p40 = m.rv(o + 0x40);
+            let d: V4 = std::array::from_fn(|i| p40[i] - vf4[i]);
+            let mut f20 = if m.r32(o + 0x60) != 0 {
+                let a0 = m.r32(o + 0x58);
+                let hi = a0 != 0 && (m.call(0x0013_2b10, &[a0, 0x13], &[]).0 != 0 || {
+                    let a0 = m.r32(o + 0x58);
+                    m.call(0x0013_2b10, &[a0, 0xb], &[]).0 != 0
+                });
+                let fl: [u32; 4] = if hi {
+                    [0x449c_4000, 0, 0x3f8c_cccd, 0x4248_0000]
+                } else if m.r32(o + 0x64) != 0 {
+                    [0x44bb_8000, 0xc4bb_8000, 0x3faa_3d71, 0xbfaa_3d71]
+                } else {
+                    [0x449c_4000, 0xc49c_4000, 0x3f8c_cccd, 0xbf8c_cccd]
+                };
+                fr(m.call(0x0019_6928, &fl, &[d, g]))
+            } else {
+                pdiv(m.rf(v30 + 0x14), spd)
+            };
+            let v30 = m.r32(o + 0x30);
+            let f0 = pdiv(m.rf(v30 + 0x18), spd);
+            let t = m.r32(o + 0x34);
+            f20 = f0.max(f20);
+            let inv = pdiv(1.0, f20);
+            let h = f20 * -0.5;
+            let vel: V4 = std::array::from_fn(|i| d[i] * inv + g[i] * h);
+            vcall(m, t, 0xc, 0x11c, &[], &[vel]);
+            let t1 = m.rf(CLOCK) + f20;
+            m.wf(o + 0x50, t1);
+            let v30 = m.r32(o + 0x30);
+            let f0 = pdiv(m.rf(v30 + 0x18), spd);
+            let on = m.r32(o + 0x60);
+            m.wf(o + 0x54, t1 - f0);
+            if on != 0 {
+                let w: V4 = [0.0, 0.0, 0.0, 1.0];
+                let e: V4 = std::array::from_fn(|i| vel[i] + w[i] + g[i] * f20);
+                let t = m.r32(o + 0x34);
+                let p40 = m.rv(o + 0x40);
+                let k = { let _t = m.r32(t + 0x58); m.r32(_t + 0xa0) };
+                let s0 = m.call(0x0022_fc48, &[0, k], &[p40]).1;
+                let t = m.r32(o + 0x34);
+                let k = { let _t = m.r32(t + 0x58); m.r32(_t + 0xa0) };
+                let t0 = m.call(0x0022_fcc8, &[0, k], &[e]).1;
+                let t = m.r32(o + 0x34);
+                let x = m.rf(o + 0x50);
+                let t58 = m.r32(t + 0x58);
+                // asm 0x20c5dc..f0: a0 = t, a1 = t58, a2 = 5, $f12 = o+0x50, a3 = s0, t0 = t0
+                let r = m.call(0x0012_de58, &[t, t58, 5], &[f(x), s0, t0]).0;
+                m.w32(o + 0x68, r);
+                let t = m.r32(o + 0x34);
+                let fl = m.r32(t + 0x148);
+                m.w32(t + 0x148, fl | 0x0400_0000);
+                let t = m.r32(o + 0x34);
+                m.call(0x0013_4320, &[0x003d_d490, t], &[]);
+            }
+            let t = m.r32(o + 0x34);
+            m.call(0x001f_5880, &[t], &[g]);
+        }
+        2 | 3 => {
+            let v30 = m.r32(o + 0x30);
+            let a0 = m.r32(o + 0x38);
+            let x = m.r32(v30 + if k == 2 { 0xc } else { 0x10 });
+            m.call(0x0013_0d30, &[a0, 0], &[super::q5util::f4(f32::from_bits(x)), super::q5util::f4(1.0)]);
+            if k == 3 {
+                let a1 = m.r32(o + 0x58);
+                if a1 != 0 {
+                    let a2 = m.r32(o + 0x5c);
+                    let a0 = m.r32(o + 0x34);
+                    ee_sub_20b2a8(m, a0, a1, a2);
+                }
+            }
+        }
+        4 => {
+            if m.r32(o + 0x60) != 0 {
+                m.call(0x0020_c760, &[o], &[]);
+            }
+            let a0 = m.r32(o + 0x34);
+            let q = m.rv(o + 0x20);
+            m.call(0x001f_5880, &[a0], &[q]);
+            let a0 = m.r32(o + 0x34);
+            if m.call(0x0013_2b10, &[a0, 0x38], &[]).0 != 0 {
+                let p = { let _t = m.r32(o + 0x34); m.r32(_t + 0x498) };
+                ee_sub_20d1a0(m, p);
+            }
+        }
+        _ => {}
     }
 }
 /// FUN_0020c6f8(o, v): state 0: vector +0x40 = v; states 1..2 with +0x60: job (+0x68) +0x20 =
@@ -611,14 +725,14 @@ pub fn ee_sub_20c948<M: QMem + ?Sized>(m: &mut M, a1: u32, p2: u32, p3: u32, buf
     m.w32(buf, 0);
     m.w32(buf + 4, 0);
     let s = m.r32(a1 + 0x30);
-    m.call(0x0013_05b8, &[0, 0x3f80_0000, s, p2, p3, buf + 0x24], &[]);
+    m.call(0x0013_05b8, &[s, p2, p3, buf + 0x24], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
     let h = m.r32(buf + 0x24);
     m.call(0x0013_33c0, &[h, buf], &[]);
     m.w32(buf + 0x2c, a1 + 0x30);
 }
 pub fn ee_sub_20ca48<M: QMem + ?Sized>(m: &mut M, o: u32) {
     if !ee_sub_20ca98(m, o) {
-        m.call(0x0013_05b8, &[0, 0x3f80_0000, 0, 0, 0, o + 0x24], &[]);
+        m.call(0x0013_05b8, &[0, 0, 0, o + 0x24], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
     }
 }
 pub fn ee_sub_20ca98<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
@@ -628,9 +742,19 @@ pub fn ee_sub_20ca98<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
 /// best of the 4 records at [o+0x28] (0x30 bytes: id, dir +0x10, speed +0x20) by dot product (x DAT_002c3de4
 /// for the current id), starts its sound (FUN_001305b8) and stores dir * speed at +0x10. p2 is the full
 /// 128-bit vector (qmtc2 a1): vv = p2 / |p2.xyz| on all four lanes.
+/// VU0 `vmul.xyz; vadday.x; vmaddz.x` (saturating dot3)
+fn vdot3(a: V4, b: V4) -> f32 {
+    use crate::engine::math::vu0::fix;
+    fix(fix(fix(a[0] * b[0]) + fix(a[1] * b[1])) + fix(a[2] * b[2]))
+}
+/// VU0 `vsqrt Q; vdiv Q, vf00w; vmulq.xyzw` normalise (0 vector -> 0 * FLT_MAX = 0, no NaN)
+fn vnorm(v: V4) -> V4 {
+    use crate::engine::math::vu0::{fix, vdiv, vsqrt};
+    let q = vdiv(1.0, vsqrt(vdot3(v, v)));
+    v.map(|c| fix(c * q))
+}
 pub fn ee_sub_20cb28<M: QMem + ?Sized>(m: &mut M, o: u32, p2: V4) {
-    let q = 1.0 / (p2[0] * p2[0] + p2[1] * p2[1] + p2[2] * p2[2]).sqrt();
-    let vv: V4 = p2.map(|c| c * q);
+    let vv: V4 = vnorm(p2);
     let pi2;
     if m.r32(o + 0x34) == 0 && m.r32(o + 0x38) == 0 {
         pi2 = m.r32(o + 0x2c);
@@ -644,9 +768,8 @@ pub fn ee_sub_20cb28<M: QMem + ?Sized>(m: &mut M, o: u32, p2: V4) {
             pi7 = pi6;
             if m.r32(p) != 0 {
                 let v13 = m.rv(p + 0x10);
-                let il = 1.0 / len3(v13);
-                let n: V4 = v13.map(|c| c * il);
-                f9 = vv[0] * n[0] + vv[1] * n[1] + vv[2] * n[2];
+                let n: V4 = vnorm(v13);
+                f9 = vdot3(vv, n);
                 let a = m.r32(o + 0x24);
                 if m.r32(p) == m.r32(a + 0x14) {
                     f9 *= rof(0x002c_3de4);
@@ -676,7 +799,7 @@ pub fn ee_sub_20cb28<M: QMem + ?Sized>(m: &mut M, o: u32, p2: V4) {
                 uv10 = m.r32(l);
             }
             let (a, b, c) = (m.r32(pi7), m.r32(o + 0x20), m.r32(o + 0x30));
-            m.call(0x0013_05b8, &[uv10, 0x3f80_0000, a, b, c, o + 0x24], &[]);
+            m.call(0x0013_05b8, &[a, b, c, o + 0x24], &[super::q5util::f4(f32::from_bits(uv10)), super::q5util::f4(1.0)]);
             let h = m.r32(o + 0x24);
             m.call(0x0013_33c0, &[h, o], &[]);
             m.w32(o + 0x2c, pi7);
@@ -684,7 +807,7 @@ pub fn ee_sub_20cb28<M: QMem + ?Sized>(m: &mut M, o: u32, p2: V4) {
         }
     }
     let s = m.rf(pi2 + 0x20);
-    m.wv(o + 0x10, vv.map(|c| c * s));
+    m.wv(o + 0x10, vv.map(|c| crate::engine::math::vu0::fix(c * s)));
 }
 /// FUN_0020ce28(o, p): [0] = p, [3] = 1, [1] = -1
 pub fn ee_sub_20ce28<M: QMem + ?Sized>(m: &mut M, o: u32, p: u32) {
@@ -763,7 +886,7 @@ pub fn ee_sub_20d020<M: QMem + ?Sized>(m: &mut M, o: u32) -> bool {
                 m.wf(buf, r[0]);
                 m.wf(buf + 4, r[1]);
                 let (c0, c1) = (m.r32(0x002c_3e50), m.r32(0x002c_3e54));
-                if m.call(0x0017_3610, &[c0, c1, buf, 1, 0x0020_cfc0], &[]).0 != 0 {
+                if m.call(0x0017_3610, &[buf, 1, 0x0020_cfc0], &[super::q5util::f4(f32::from_bits(c0)), super::q5util::f4(f32::from_bits(c1))]).0 != 0 {
                     break;
                 }
                 u5 += 1;

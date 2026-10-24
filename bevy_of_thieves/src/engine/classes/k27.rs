@@ -23,6 +23,8 @@ pub struct CharPo {
     pub acc: V3,
     /// 1 = FUN_001f9b20 (ALO gravity only), 2 = FUN_00204108 (PO motor), 0 = no force hook this frame
     pub mode: u8,
+    /// TAKEN BY HEIST: the last PO step had a ground motor record (FUN_001f8dd8 kind 0xe contact)
+    pub ground: bool,
 }
 
 /// PO motor fields of a class 54 / 55 character (its +0x180.. +0x248 words)
@@ -71,10 +73,11 @@ impl EngineHost {
         let acc = std::mem::take(&mut p.acc);
         match (std::mem::take(&mut p.mode), cw) {
             (2, Some(cw)) => {
-                po_step(&cw, &mut p.phys, &m, [0.0; 3], (50.0, 60.0), Some(([0.0, 0.0, 60.0], 50.0)), acc, dt);
+                p.ground = po_step(&cw, &mut p.phys, &m, [0.0; 3], (50.0, 60.0), Some(([0.0, 0.0, 60.0], 50.0)), acc, dt).motor.is_some();
             }
             (1, _) | (2, None) => {
                 // FUN_001f3980: previous velocities, accel reset, slot 69 (FUN_001f9b20 + FUN_001fac30), 0x22de88
+                p.ground = false;
                 let b = &mut p.phys;
                 b.prev_v = b.v;
                 b.prev_w = b.w;
@@ -88,6 +91,9 @@ impl EngineHost {
         }
     }
     pub(super) fn k27_pos(&self, obj: usize) -> Option<V3> {
+        // MURRAY: the controlled Bentley / Murray body is the JT (REPLACED, see player/p20.rs + p22::follow_active):
+        // FUN_001a62e8 of the po returns the body the pad drives, not the parked k27 one
+        if let Some(po) = self.po.as_ref().filter(|p| p.obj == obj) { return Some(po.jt.phys.pos); }
         self.k27_po.get(&obj).map(|p| p.phys.pos)
     }
     pub(super) fn k27_vel(&self, obj: usize) -> Option<V3> {

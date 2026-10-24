@@ -27,12 +27,25 @@ pub mod rt;
 // WP-C8: screen wipe / fade state machine (0x443740), class-97 sky follow
 pub mod screen;
 pub mod ultrawide;
+// UPSCALE: render scale + own EASU/RCAS upscale (options pure data in every build)
+pub mod upscale;
+// RENDER: mods/<mod>/meshes/<lsn>/<object>_<record>.obj prim geometry overrides
+pub mod mesh_mod;
 
 #[cfg(feature = "game")]
 pub mod game;
 // WP-C7: kind-3 env-only shaders as light volumes (DATE mask -> back faces, inverted depth test)
 #[cfg(feature = "game")]
 pub mod envvol;
+// PERF2: WIRE-C3 two-layer prims merged into one draw (raster)
+#[cfg(feature = "game")]
+pub mod twolayer;
+// LOOK: PS2 display-space colour math + the final decode pass
+#[cfg(feature = "game")]
+pub mod display;
+pub mod shadowvol;
+#[cfg(feature = "game")]
+pub mod shadowvol_pass;
 // WP-A10: screen-pixel -> level prim debug pick (SLY_A10_PICK)
 #[cfg(feature = "game")]
 pub mod pick;

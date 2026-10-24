@@ -16,7 +16,8 @@
 //! Air R1 (0x197500 head): jt == DAT_002e1e40 && acquired(0x1b) && !FUN_00143d20(0.3) -> spend, consume 8,
 //! use(0x1b) = paraglider 0x195fb8(jmp, 0x13). Glide: 0x197f98 case 0x14 (stick turning 5 / 12 rad/s, speed
 //! targets jmp+0x1c0 / +0x1c4) + 0x196df8 case 0x14 force (`glide_force`).
-//! REPLACED: the partner tests of can-use (jt+0x2010 FUN_001cb2c0, carried
+//! WIRE-JOB2: can-use 0x17 = jt+0x2010 (spawner oid 0x21d) && FUN_001cb2c0, evaluated by the host bridge.
+//! REPLACED: the partner tests of can-use (carried
 //! object 0x18d6f8 + 0x1cade0 / 0x224590, jmp+0x2c) = false; the clock rate 0x14d1d0 of gadgets 0x1d / 0x2a
 //! is stored in `Gadgets::time_scale` (DAT_002ddeec, the game clock owner must apply it); sounds are queued
 //! ids in `Gadgets::sfx`; event 0x3c on 0x2deb30 and the carry / throw bodies are recorded in `Jt::calls`.
@@ -146,6 +147,10 @@ pub struct Gadgets {
     pub g_2dfbc0: u32,
     /// FUN_0014fd50(0x2de2e0): DAT_002de254 == 0x2de2e0 (host global)
     pub scene_2de2e0: bool,
+    /// WIRE-JOB2: jt+0x2010 (guest handle of the spawner oid 0x21d, 0 = none; set by the host)
+    pub f_2010: u32,
+    /// WIRE-JOB2: FUN_001cb2c0(jt+0x2010) (host-evaluated)
+    pub cb2c0_2010: bool,
 }
 
 impl Default for Gadgets {
@@ -166,6 +171,8 @@ impl Default for Gadgets {
             f_12f0: 0,
             g_2dfbc0: 0,
             scene_2de2e0: false,
+            f_2010: 0,
+            cb2c0_2010: false,
         }
     }
 }
@@ -366,7 +373,9 @@ impl Jt {
                 self.p13.f_1d30 == 0 && self.p13.f_10ec != 4 && matches!(self.jts, 0 | 1 | 10 | 0xc)
             }
             3 => self.gad.scene_gate(),
-            _ => false, // 0x17 / 0x1a / 0x25 / 0x26 / 0x29: REPLACED partner / carry tests
+            // jt+0x2010 (spawner oid 0x21d, FUN_001885b8 bind row) && FUN_001cb2c0 = FUN_001cade0(., 2)
+            0x17 => self.gad.f_2010 != 0 && self.gad.cb2c0_2010,
+            _ => false, // 0x1a / 0x25 / 0x26 / 0x29: REPLACED partner / carry tests
         }
     }
 
@@ -498,7 +507,11 @@ impl Jt {
 
     /// 0x00197f98 case 0x14 (glide steering): yaw turn and the speed targets jmp+0x1c0 / +0x1c4.
     pub fn glide_steer(&mut self) {
-        let mut d = self.joy.angle - self.yaw;
+        // FEEL R94: the base yaw is FUN_00204740 = the body's xform yaw (*(jt+0x60)+0x40/+0x44), not +0x1a8; the
+        // new +0x1a8 (FUN_00204660) is base + rate * s * dt and the angular servo 0x204108 turns the body toward it.
+        // Capture cap_feel_r91_glide (side stick): heading turns ~74 deg/s at |v_h| 622 / vz -401 (stick ~73 deg off).
+        let base = if r94_glide() { super::p22::body_yaw(&self.phys) } else { self.yaw };
+        let mut d = self.joy.angle - base;
         d = super::p5_attach::FUN_0011cf60(d);
         let (s, c) = d.sin_cos();
         let (s, c) = (s * self.joy.mag, c * self.joy.mag);
@@ -508,7 +521,7 @@ impl Jt {
             f43 * DAT_002BF850[0] + f41 * DAT_002BF850[1],
             f43 * DAT_002BF850[2] + f41 * DAT_002BF850[3],
         ];
-        self.yaw += (f43 * DAT_002BF870[0] + f41 * DAT_002BF870[1]) * s * self.dt;
+        self.yaw = base + (f43 * DAT_002BF870[0] + f41 * DAT_002BF870[1]) * s * self.dt;
         self.att.rows = crate::engine::physics::driver::FUN_0011b500([0.0, 0.0, 1.0], self.yaw);
         self.calls.push((0x001384c0, 0x14)); // glider blend weights jmp+0x17c.. (draw side)
     }
@@ -517,7 +530,10 @@ impl Jt {
     pub fn glide_force(&self, dt: f32) -> V3 {
         use crate::engine::physics::dynamics::FUN_0011d018 as appr;
         let v = self.phys.v;
-        let (s, c) = self.yaw.sin_cos();
+        // FEEL R94: 0x196df8 case 0x14 frame = FUN_001a6318 body rows turned by the half-step angular velocity
+        // (+0xb0 + (+0xf0) dt) * dt / 2 (FUN_0011b570), not the +0x1a8 facing
+        let yaw = if r94_glide() { super::p22::body_yaw(&self.phys) + self.phys.w[2] * dt * 0.5 } else { self.yaw };
+        let (s, c) = yaw.sin_cos();
         let l = [c * v[0] + s * v[1], -s * v[0] + c * v[1], v[2]];
         let n = [
             appr(l[0], self.gad_glide[0], dt, GLIDE_PRM[0], None),
@@ -535,4 +551,11 @@ impl Jt {
         }
         a
     }
+}
+
+/// FEEL R94: glide steer / force in the body frame (0x197f98 FUN_00204740 base yaw, 0x196df8 FUN_001a6318 rows).
+/// `SLY2_FEEL_R94GLIDE=0` = old (+0x1a8 frame).
+fn r94_glide() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("SLY2_FEEL_R94GLIDE").map_or(true, |v| v != "0"))
 }

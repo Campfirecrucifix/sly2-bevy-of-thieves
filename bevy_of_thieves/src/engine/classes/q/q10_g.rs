@@ -85,10 +85,10 @@ use crate::engine::classes::q::q2mem::{stack_pop, stack_push};
 
 const WORLD_UI: u32 = 0x002d_eb30;
 
-/// FUN_0020df80(o, src): o[+0x3bf0] = 1; copy 0x8c bytes src -> o + 0x3bf4 (both decompiled branches are the same copy)
+/// FUN_0020df80(o, src): o[+0x3bf0] = 1; copy 0x4c bytes (8 dwords + 12 bytes) src -> o + 0x3bf4 (both decompiled branches are the same copy)
 pub fn fun_0020df80<M: QMem + ?Sized>(m: &mut M, o: u32, src: u32) {
     m.w32(o + 0x3bf0, 1);
-    for i in 0..0x8c {
+    for i in 0..0x4c {
         let b = m.r8(src + i);
         m.w8(o + 0x3bf4 + i, b);
     }
@@ -324,6 +324,8 @@ pub fn fun_00140338<M: QMem + ?Sized>(m: &mut M) {
     m.call(0x001f_b2f8, &[r, 0], &[]);
     let one = m.r32(0x002d_ded0);
     m.w32(W + 0x4754, one);
+    // LOOK R39: mirror DAT_003e1be4 into ClassGlobals.g_3e1be4 (K12 marker fade)
+    crate::engine::classes::k12::stamp_job_t();
     let c = m.r32(0x002d_e3e4).wrapping_add(1);
     m.w32(0x002d_e3e4, c);
 }

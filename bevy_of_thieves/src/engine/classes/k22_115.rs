@@ -437,6 +437,10 @@ impl super::ClassSet {
     pub(super) fn frame_k22_115(&mut self, h: &mut dyn ClassHost) {
         let now = self.g.t;
         for (i, x) in &mut self.k22c {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let super::Inst::K22C115(c) = x {
                 c.ee_sub_22c028(*i, now, h);
             }

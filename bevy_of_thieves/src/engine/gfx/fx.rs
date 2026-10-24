@@ -406,7 +406,7 @@ mod plugin {
                 px[i..i + 4].copy_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
             }
         }
-        Image::new(Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: 1 }, TextureDimension::D2, px, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD)
+        Image::new(Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: 1 }, TextureDimension::D2, px, crate::engine::gfx::light::ps2_texture_format(), RenderAssetUsages::RENDER_WORLD)
     }
 
     fn setup_fx(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut mats: ResMut<Assets<StandardMaterial>>) {
@@ -440,7 +440,7 @@ mod plugin {
         mut mats: ResMut<Assets<StandardMaterial>>,
         models: Res<FxModels>,
         kids: Query<&Children>,
-        parts: Query<(&Transform, Option<&Mesh3d>, Option<&MeshMaterial3d<StandardMaterial>>, Option<&InkOutline>, Option<&SkinnedMesh>)>,
+        parts: Query<(&Transform, Option<&Mesh3d>, Option<&MeshMaterial3d<StandardMaterial>>, Option<&InkOutline>, Option<&SkinnedMesh>, Option<&crate::engine::gfx::twolayer::TwoLayerSwapped>)>,
         mut mesh_assets: ResMut<Assets<Mesh>>,
     ) {
         let (Some(mut a), Some(root)) = (assets, roots.iter().next()) else {
@@ -563,7 +563,7 @@ mod plugin {
             t.rotation = Quat::from_mat3(&Mat3::from_cols(r2, u2, back));
             t.scale = Vec3::splat(size.max(0.0));
             if let Some(mut mat) = m.and_then(|m| mats.get_mut(&m.0)) {
-                mat.base_color = Color::srgba(col[0] * alpha, col[1] * alpha, col[2] * alpha, alpha);
+                mat.base_color = crate::engine::gfx::light::ps2_color(col[0] * alpha, col[1] * alpha, col[2] * alpha, alpha);
             }
         }
     }

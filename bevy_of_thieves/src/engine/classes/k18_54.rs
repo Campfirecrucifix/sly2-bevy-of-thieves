@@ -38,13 +38,16 @@ pub struct C2d44c8 {
     pub b: C2cb230,
     /// K25: the +0x13e4 contact-record list (head first; see `ee_sub_1b9130`)
     pub saved_13e4: Vec<ContactRec>,
+    /// FEEL R69: SetVelocity (vt +0x11c) of the anim event 0x15e (FUN_00140f90) outside the PO host; the player
+    /// layer applies it to the controlled body (`player::plugin`)
+    pub set_vel_11c: Option<[f32; 3]>,
 }
 
 impl Default for C2d44c8 {
     fn default() -> Self {
         let mut b = C2cb230::default();
         b.m.0 = vec![0; SIZE / 4];
-        C2d44c8 { b, saved_13e4: Vec::new() }
+        C2d44c8 { b, saved_13e4: Vec::new(), set_vel_11c: None }
     }
 }
 
@@ -360,11 +363,35 @@ impl ClassSet {
     /// K18: per frame, the controlled Murray: slot 15 (K19: FUN_001b50b0 in classes/k19_54.rs), slot 69
     /// forces, slot 89 ASEG, slot 18 draw. No-op until `k18_set_active` picks a Murray.
     pub(super) fn frame_k18_54(&mut self, h: &mut dyn ClassHost) {
+        // ANIM-ALL R43: an uncontrolled Murray's binocucom part of FUN_001b50b0 (FUN_001b5038 -> FUN_0019d330 after
+        // the +0x28 bit-60 gate; no input) still runs, as the uncontrolled Bentley's (k18_55 team loop), so a
+        // sequence action 0x3b mode-1 open reaches state 1 -> slot 82 / 83 (0x3f) on the partner
+        let team: Vec<usize> = self.k18.iter().map(|x| x.0).filter(|&m| Some(m) != self.k18_active).collect();
+        for m in team {
+            if self.k18_murray(m).is_some_and(|c| c.b.binoc.active()) {
+                self.k19_murray_with(m, h, |c, cx| {
+                    if cx.h.lo_28_bit60(handle(m)) {
+                        c.b.binoc_19d330(m, cx);
+                    }
+                });
+            }
+        }
         let Some(o) = self.k18_active else {
             return;
         };
+        if self.k18_murray(o).is_some() {
+            self.k10_mirror_180(h);
+        }
+        self.refresh_2dd5bc_13d0();
         if self.k19_murray_with(o, h, |c, cx| c.ee_sub_1b50b0(o, cx)).is_none() {
             return;
+        }
+        // TAKEN BY HEIST: FUN_00136530 calls of the frame (FUN_002205a8 throw release) on the Bentley
+        for (b, s) in h.take_136530() {
+            let g = self.g.clone();
+            if let Some(c) = self.k16_get(b) {
+                c.ee_sub_136530(b, s, &g, h);
+            }
         }
         let g = self.g.clone();
         let Some(c) = self.k18_murray(o) else {
@@ -375,5 +402,19 @@ impl ClassSet {
         h.k27_po_step(o, super::k27::motor_of(|x| c.b.m.f(x)), g.dt);
         c.ee_sub_1b8008(o, h);
         c.b.ee_sub_1425b0(o, &g, h);
+    }
+    /// MURRAY: class-36 point +0x180 (field 1085, an object ref: the thing Murray lifts there) as the LO word
+    /// FUN_001b93e8 / held_180 read (obj_i32(point, 0x180)). REPLACED: the K10 struct keeps the field as the
+    /// object's oid; on PS2 it is the object pointer -> the first object of that oid (FUN_0015e938(4, oid)).
+    fn k10_mirror_180(&mut self, h: &mut dyn ClassHost) {
+        use super::k10::K10;
+        let pts: Vec<(usize, i32)> = self.k10.iter().filter_map(|(i, k)| match k {
+            Inst::K10(k) => match &**k { K10::C2d1d00(d) if d.f_180 > 0 => Some((*i, d.f_180)), _ => None },
+            _ => None,
+        }).collect();
+        for (i, oid) in pts {
+            let x = h.ee_sub_15e938(4, oid, handle(i));
+            h.obj_set_u32(handle(i), 0x180, x);
+        }
     }
 }

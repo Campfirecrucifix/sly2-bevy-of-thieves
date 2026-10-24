@@ -51,6 +51,8 @@ impl Guard {
         let heard = Vec::new();
         let routines = Vec::new();
         let m = Mind {
+            chase_r: [self.f_314, self.f_318],
+            atk_v: self.atk.root_v(now),
             sensor: &self.sensor,
             pos: self.body.pos,
             pos_of: &pos_of,
@@ -62,10 +64,13 @@ impl Guard {
             c3b: false,
             routine: None,
             cursor: None,
-            t30: f32::MAX,
             routines: &routines,
             heard: &heard,
             sg: self.ee_sub_search_g(),
+            f_3cc_t: self.f_3cc.map(|r| r.0),
+            perches: &self.perch_recs,
+            hp: self.f_33c,
+            f_1018: self.f_1018,
         };
         if reset {
             self.brain.sub.code = -1;
@@ -74,6 +79,7 @@ impl Guard {
         let mut cx = Cx { guard: obj, now, dt, body: &mut self.body, h };
         let saved = self.brain.ee_sub_176750(Sub { code, obj: hit.src, routine: None }, &m, &mut cx);
         drop(cx);
+        self.take_clear_target();
         if saved.is_some() {
             self.f_2dc = saved;
         }
@@ -96,7 +102,17 @@ impl Guard {
                     h.base(0x179780, obj); // +0xfec object vt+0x44
                 }
             }
-            0xb if self.f_330 == 0 => {
+            0xb => {
+                // HEIST r31: C2d08b0_v7: +0x40 = the +0xc10 record of row FUN_001f78a0(hit kind) (-1 -> none) ->
+                // C2d09b0_v7 -> C2d0ab0_v7 -> FUN_001749c0(0) -> FUN_00209278 binds the clip on the guard: its
+                // events run on the anim system (e.g. the brawler's kind-8 fade of itself -> FUN_001f7bf8 ->
+                // Remove). REPLACED: FUN_00209278 start time / +0xc flags (played like the attack clips)
+                if let Some((a, 0)) = self.hit_anim_obj(obj, 2, ee_sub_1f78a0(g.hit.kind), h) {
+                    h.ee_sub_12f9b8(0f32.to_bits(), 1.0, a, obj as u32 + 1, 0);
+                }
+                if self.f_330 != 0 {
+                    return self.k32_bits(obj, h);
+                }
                 self.f_330 = 1;
                 // FUN_001c4840(0x3dd490): the focus (Sly)
                 h.ee_sub_1619a0(if src == super::PLAYER_HANDLE { 0x18 } else { 0x17 }, obj as u32 + 1);
@@ -110,8 +126,14 @@ impl Guard {
             }
             _ => {}
         }
+        self.k32_bits(obj, h);
+    }
+
+    fn k32_bits(&mut self, obj: usize, h: &mut dyn ClassHost) {
         let b = g_bit(&self.brain.child);
+        let old = self.f_2c0;
         self.f_2c0 = (self.f_2c0 & !CHILD_HIT_BITS) | if b >= 0 { 1 << b } else { 0 };
+        self.post_bit_msgs(obj, old, h);
     }
 
     /// brain slot 12 FUN_00176be8(brain, 0xc, hit). Returns the message result (1 = handled).
@@ -150,7 +172,7 @@ impl Guard {
         match sub {
             10 if kind & self.f_354 == 0 => return true,
             0xb if kind & self.f_358 == 0 || child_kind & self.f_358 != 0 => return true,
-            9 if crate::engine::player::p8_hazard::FUN_001f78d8(&[0; 26], kind) & 0x40 == 0 && (kind & self.f_350 == 0 || child_kind & self.f_350 != 0) => {
+            9 if crate::engine::player::p8_hazard::FUN_001f78d8(&h.alo_110(hit.target), kind) & 0x40 == 0 && (kind & self.f_350 == 0 || child_kind & self.f_350 != 0) => {
                 return true
             }
             _ => {}
@@ -260,7 +282,7 @@ impl Guard {
     }
 
     /// +0x8d0 / +0xa70 / +0xc10 hit-anim record kind (table `t`, row `k`); -1 = none (the slot 14 FUN_002080f0 /
-    /// FUN_00209130 oid resolution is not ported: `hit_anims` stays empty)
+    /// HEIST r31: resolved at slot 14, `Guard::hit_anim_obj`)
     pub fn hit_anim(&self, t: usize, k: usize) -> i32 {
         self.hit_anims.get(t).map_or(-1, |r| r[k])
     }

@@ -16,7 +16,7 @@ const SUB: u32 = 0x002d_eb14;
 const FRAMES: u32 = 0x002d_ea50;
 
 fn gs<M: QMem + ?Sized>(m: &mut M, pkt: u32, reg: u32, v: u64) {
-    m.call(0x0016_6e90, &[pkt, reg, v as u32, (v >> 32) as u32], &[]);
+    crate::engine::game::q_00166008::ee_sub_166e90(m, pkt, reg as u64, v); // VER3: full 64-bit data
 }
 
 /// FUN_001604e8: rig frame update for `p` = {src, dst, pos flag, rot flag}: with +8 the source position

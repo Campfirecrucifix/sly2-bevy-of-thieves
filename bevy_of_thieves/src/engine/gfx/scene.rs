@@ -129,10 +129,32 @@ fn template_copies(world: &World, objects: &[SceneObject], map: &std::collection
             } else if let Some(p) = world.life.placed.get(&c) {
                 mul(&ws, &super::attach::affine_from_bytes(p))
             } else {
+                if std::env::var_os("SLY2_LOOK_ORIGINDBG").is_some() {
+                    log::info!("ORIGINDBG copy-unplaced obj {c} oid {} cls {} src {src} owner {:?}", o.oid, o.class, o.owner.map(|p| (world.objects[p].oid, world.objects[p].class)));
+                }
                 continue;
             };
             at.insert(c, copies.len());
             copies.push(SceneCopy { object: c, source: si, world: world_m });
+        }
+    }
+    // LOOK (R3): sub-object copies (FUN_0013e510 clones the whole template subtree; only the copy roots
+    // are listed in template_instances) follow their copied owner: world = source child world *
+    // inverse(source owner world) * owner copy world. Repeat until no new copy (nested owners).
+    loop {
+        let n = copies.len();
+        for (c, o) in world.objects.iter().enumerate() {
+            let (Payload::Clone, Some(src), Some(p)) = (&o.payload, o.clone_of, o.owner) else { continue };
+            let (Some(&si), Some(&pc)) = (map.get(&src), at.get(&p)) else { continue };
+            if at.contains_key(&c) || copy_drawn_elsewhere(o.class) || objects[si].prims.is_empty() {
+                continue;
+            }
+            let world_m = mul(&mul(&worlds_of(si), &invert(&worlds_of(copies[pc].source))), &copies[pc].world);
+            at.insert(c, copies.len());
+            copies.push(SceneCopy { object: c, source: si, world: world_m });
+        }
+        if copies.len() == n {
+            break;
         }
     }
     copies
@@ -170,7 +192,12 @@ impl LevelScene {
                 }
                 for (ii, inst) in r.instances.iter().enumerate() {
                     let m = mul(&inst.xform, &bone(&mut bw, inst.r#ref));
-                    for prim in &p {
+                    // LOOK: an instance's own FUN_0016c8e0 prelit record (`mesh::convert_mesh0_rec`)
+                    let own = match (&r.data, &inst.r16c8e0) {
+                        (crate::engine::world::alo::MeshData::Type0(m0), Some(rec)) => Some(super::mesh::convert_mesh0_rec(m0, Some(rec))),
+                        _ => None,
+                    };
+                    for prim in own.as_ref().unwrap_or(&p) {
                         prims.push(ScenePrim { object: oi, record: ri, instance: Some(ii), local: m, prim: prim.clone() });
                     }
                 }
@@ -205,6 +232,33 @@ impl LevelScene {
         let s = &scene;
         let copies = template_copies(world, &s.objects, &map, &|i| s.world_of(i), &mut bw);
         scene.copies = copies;
+        // LOOK (R4): placed (P15 +0x12c) root ALOs: world = root joint * placement (as classes::plugin
+        // k24_world_xf); applied after the copies, which compose with the template's unplaced world.
+        // Guard/pickup (copy_drawn_elsewhere) and player classes 53/54/55 place themselves.
+        for so in scene.objects.iter_mut() {
+            let cls = world.objects[so.object].class;
+            if copy_drawn_elsewhere(cls) || matches!(cls, 53 | 54 | 55) {
+                continue;
+            }
+            if let (None, Some(p)) = (so.owner, world.life.placed.get(&so.object)) {
+                so.local = mul(&so.local, &super::attach::affine_from_bytes(p));
+            }
+        }
+        if std::env::var_os("SLY2_LOOK_ORIGINDBG").is_some() {
+            for i in 0..scene.objects.len() {
+                let w = scene.world_of(i)[3];
+                let so = &scene.objects[i];
+                if so.prims.is_empty() || w.iter().any(|x| x.abs() > 1.0) {
+                    continue;
+                }
+                let o = &world.objects[so.object];
+                let ow = so.owner.map(|j| (scene.objects[j].oid, world.objects[scene.objects[j].object].class, scene.world_of(j)[3]));
+                let ent = world.entries.get(so.entry as usize).map(|e| (e.objects.len(), e.instances.len(), e.load_count));
+                let ncopies = world.objects.iter().filter(|x| x.clone_of == Some(so.object)).count();
+                log::info!("ORIGINDBG ent {ent:?} copies {ncopies}");
+                log::info!("ORIGINDBG obj {} oid {} cls {} entry {} owner_lo {:?} owner_alo {ow:?} placed {} prims {} local {:?}", so.object, so.oid, o.class, so.entry, o.owner.map(|c| (world.objects[c].oid, world.objects[c].class, world.life.placed.contains_key(&c))), world.life.placed.contains_key(&so.object), so.prims.len(), so.local[3]);
+            }
+        }
         scene
     }
 

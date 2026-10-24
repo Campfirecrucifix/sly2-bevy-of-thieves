@@ -1,5 +1,28 @@
 # 🦝 Sly 2: Bevy of Thieves
 
+> ## ⛔ ABANDONED (October 2026)
+>
+> This project has been **stopped and is no longer maintained**. The repository is archived (read-only) and
+> published as-is, so anyone who wants to pick up the pieces can fork it. Issues and pull requests will not
+> be answered.
+>
+> **State at the end:** EP1 and EP2 hubs load and run; the player controller, collision solver and Splice
+> script VM are largely ported and many EP1 missions are wired, but nothing is playable start to finish. Many
+> behaviour fixes sit behind `SLY2_*` environment-variable opt-outs, and a number of them were tuned to match
+> PCSX2 captures without the original mechanism being confirmed.
+>
+> **Why it stopped:** a hand-written 1:1 port *into Bevy* turned out to be the expensive route. Sly 2's own
+> engine (C++ objects and vtables, scheduler, physics solver, script interpreter) had to be rebuilt inside
+> Bevy, which contributed little, and most of the time went into chasing frame-level differences against
+> emulator captures. If you want to continue the idea, a **matching decompilation** (like the Sly 1 decomp)
+> or a **static recompilation** (like the N64 recomp projects) is probably the better-value path.
+>
+> **Dev notes, work logs and recovered function names** (1,600 names matched from the March 2004 prototype,
+> type layouts, Ghidra scripts, per-lane handoff logs) are in the companion archive
+> [sly2-rust-port](https://github.com/Campfirecrucifix/sly2-rust-port).
+>
+> Everything below is the README as it stood during development.
+
 ### *Sly, Rewritten.* A Rust + Bevy rewrite of *Sly 2: Band of Thieves*.
 
 > *"The Cooper Gang never steals from honest folk. They only steal from the PS2."*

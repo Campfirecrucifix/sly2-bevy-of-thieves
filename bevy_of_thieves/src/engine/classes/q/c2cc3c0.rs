@@ -104,7 +104,7 @@ pub fn ee_sub_1453f0<M: QMem + ?Sized>(m: &mut M, s: u32) {
     let op = pos(m, o);
     let tp = pos(m, t);
     let dot = dist_xy(op, tp);
-    let h = ee_sub_1450e0(m, s);
+    let h = m.call(0x0014_50e0, &[s], &[]).0; // jal 0x1450e0
     let mut range = m.rf(0x002a_4e34);
     if h != 0 {
         let hp = pos(m, h);

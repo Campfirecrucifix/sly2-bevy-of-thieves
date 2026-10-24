@@ -59,7 +59,7 @@ pub enum VarOwner {
 /// 0x00161fc8
 pub fn FUN_00161fc8(s: i32) -> u32 {
     if s != -1 {
-        1u32.wrapping_shl(s as u32)
+        1u64.wrapping_shl(s as u32) as u32
     } else {
         0
     }

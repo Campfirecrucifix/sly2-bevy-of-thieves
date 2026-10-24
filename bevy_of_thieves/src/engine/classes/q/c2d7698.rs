@@ -27,10 +27,12 @@ pub fn ee_sub_1ceaa8<M: QMem + ?Sized>(m: &mut M, x: f32, p: u32) {
     let len = m.rf(p + 0x18);
     let rem = len - (clk - m.rf(p + 0x14));
     if x < rem {
-        let r = rem / len;
-        let nl = x / r;
+        // VER5: PS2 FPU semantics (div.s x/0 = +-max, overflow clamps), as the EE computes it
+        use crate::engine::math::ps2f::{ps2_div, ps2_mul, ps2_sub};
+        let r = ps2_div(rem, len);
+        let nl = ps2_div(x, r);
         m.wf(p + 0x18, nl);
-        m.wf(p + 0x14, clk - (1.0 - r) * nl);
+        m.wf(p + 0x14, ps2_sub(clk, ps2_mul(1.0 - r, nl)));
     }
 }
 
@@ -150,7 +152,8 @@ pub fn c2d7698_v7<M: QMem + ?Sized>(m: &mut M, p: u32, ctx: u32, cp: V4, n: V4) 
         m.call(0x001c_e980, &[p], &[]);
         1
     } else {
-        ee_sub_1ceb08(m, p, ctx, cp, n)
+        // jal 0x1ceb08 (C2d7468_v7) through the call table
+        m.call(0x001c_eb08, &[p, ctx], &[cp, n]).0
     }
 }
 

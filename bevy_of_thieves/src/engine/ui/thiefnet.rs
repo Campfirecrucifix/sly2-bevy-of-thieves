@@ -483,3 +483,18 @@ impl Shop {
         self.FUN_001dbef0(h);
     }
 }
+
+/// WIRE-UI: the drawn fields of the live 0x3da150 screen (read from the queue store by `ui::live_menu`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThiefNetRows {
+    /// +0x40 page (0 gadgets, 1 loot)
+    pub page: i32,
+    /// +0x30 dialog (-1 none, 0 confirm, 1 error), +0x38 message string id
+    pub dialog: i32,
+    pub dialog_msg: i32,
+    /// +0x4c entries {id, icon} (count +0x48)
+    pub ent: Vec<[i32; 2]>,
+    /// +0x24c selected row, +0x250 first visible row
+    pub sel: i32,
+    pub first: i32,
+}

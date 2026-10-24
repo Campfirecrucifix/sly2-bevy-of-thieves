@@ -66,6 +66,10 @@ pub struct Lead {
 /// Bentley instance state (the fields the ported clusters use; JT-layout offsets below +0x1320)
 #[derive(Clone, Debug, Default)]
 pub struct C2cb230 {
+    /// HEIST r37: +0x1084 = the k22 node this object is the action-0x23 / 0x24 / 0x1a / 0x2a subject of
+    /// (FUN_00143de8, set by the ClassSet from the nodes' +0x44). Kept apart from `m` +0x1084: the FUN_001e46a0
+    /// walk steering on it stays the host's k22_autowalk_1938c0.
+    pub k22_link: u32,
     /// +0x13d0 state
     pub state: i32,
     /// +0x16b0
@@ -106,6 +110,8 @@ pub struct C2cb230 {
     pub alo: super::actor::alo::Alo,
     /// K17: +0xf00 binocucom block (FUN_0019cbf8 layout)
     pub binoc: crate::engine::player::p15_binoc::Binoc,
+    /// ANIM-ALL R35: mode-1 slot 82 / 83 calls on the +0x40 partner (FUN_0019cd38), applied by `ClassSet`
+    pub binoc_ops: Vec<super::k22_seq::GuardOp>,
     /// K18: +0x150 joystick (REPLACED pointer: the JOY by value, fed by `ClassSet::k18_feed_joy`)
     pub joy: crate::engine::player::Joy,
     /// K18: joystick +0x80 control mode (None = no joystick: FUN_001c4080 returns -1) and +0x78 mask
@@ -398,6 +404,11 @@ impl ClassSet {
         }
     }
     /// K16 class-55 state at object index `obj`
+    /// TAKEN BY HEIST: `ClassGlobals::g_2dd5bc_13d0` = state (+0x13d0) of the DAT_002dd5bc Bentley
+    pub fn refresh_2dd5bc_13d0(&mut self) {
+        let b = self.g.g_2dd5bc;
+        self.g.g_2dd5bc_13d0 = (b as usize).checked_sub(1).and_then(|o| self.k16_get(o)).map_or(-1, |c| c.state);
+    }
     pub fn k16_get(&mut self, obj: usize) -> Option<&mut C2cb230> {
         self.k16.iter_mut().find(|x| x.0 == obj).and_then(|x| if let Inst::K16(c) = &mut x.1 { Some(&mut **c) } else { None })
     }

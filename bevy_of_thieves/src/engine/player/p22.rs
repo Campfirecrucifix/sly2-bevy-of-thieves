@@ -31,11 +31,32 @@ pub const LOCO_54: [(u32, i32, i32); 4] = [(0x1320, 0x1a0, 0x19e), (0x1460, 0x1e
 pub struct LocoEntry {
     pub v: V3,
     pub len: f32,
+    /// FEEL R49: the entry ASEG's +0x78 rate (property field 109, `Aseg::f78`). FUN_00137a30 copies the FIRST
+    /// entry's +0x78 into the blend ASEG (blk+4), whose ASEGA +0x48 (FUN_0012f9b8) then scales 0x20bb58.
+    pub rate: f32,
 }
 
 /// FUN_0020b868 per entry: the entry ASEG's root velocity (root(L) - root(0)) / L (None: no ASEG).
 pub fn ee_sub_20b868_entry(w: &World, obj: usize, oid: i32) -> Option<LocoEntry> {
     let o = crate::engine::playerdraw::ee_sub_15e938_below(w, obj, oid)?;
+    // FEEL R49: the root channel is FUN_0012ff10(aseg, alo = *blk (the po), 1, 1) (the channel of the po's own
+    // kind-1 bone), not the ASEG's first flagged kind-1 channel; that one stays the fallback (no ALO bones).
+    let a = crate::engine::playerdraw::aseg_of(w, o)?;
+    match crate::engine::anim::blends::ee_sub_12ff10(w, a, obj, 1, true).and_then(|c| a.channels[c].vec.as_ref()) {
+        Some(c) if a.length > 0.0 => {
+            let len = a.length;
+            let v = match (c.eval(0.0, 1.0), c.eval(len, 1.0)) {
+                (Some(p0), Some(p1)) => [0, 1, 2].map(|i| (p1[i] - p0[i]) / len),
+                _ => [0.0; 3],
+            };
+            Some(LocoEntry { v, len, rate: a.f78() })
+        }
+        _ => loco_entry_of(w, o),
+    }
+}
+
+/// FUN_0020b868 entry of the ASEG object `o`.
+pub fn loco_entry_of(w: &World, o: usize) -> Option<LocoEntry> {
     let a = crate::engine::playerdraw::aseg_of(w, o)?;
     let len = a.length;
     let ch = a.channels.iter().find(|c| c.flag && c.kind == 1).and_then(|c| c.vec.as_ref());
@@ -46,7 +67,7 @@ pub fn ee_sub_20b868_entry(w: &World, obj: usize, oid: i32) -> Option<LocoEntry>
         },
         _ => [0.0; 3],
     };
-    Some(LocoEntry { v, len })
+    Some(LocoEntry { v, len, rate: a.f78() })
 }
 
 /// FUN_0020b868 of every blend block of the po's class: (block, [entry 0, entry 1]).
@@ -93,6 +114,9 @@ pub struct PoMove {
     pub w_1e0: V3,
     /// +0x1f4 / +0x1f8 / +0x1fc / +0x200
     pub mv: [f32; 4],
+    /// POOL1 R53: the class state runs the +0x2c0 JMP (its Cross jump); Bentley's carry state 0xc does not
+    /// (FUN_0021f418 takes Cross (0xc0) as the throw), so the shadow JT must not jump there
+    pub jump: bool,
 }
 
 impl PoMove {
@@ -107,6 +131,7 @@ impl PoMove {
             f_1a4: i(0x1a4),
             w_1e0: v3(0x1e0),
             mv: [f(0x1f4), f(0x1f8), f(0x1fc), f(0x200)],
+            jump: true,
         }
     }
 }
@@ -166,20 +191,33 @@ pub fn po_motor(b: &AloPhys, m: &PoMove) -> crate::engine::physics::motor::PoMot
 /// 0xd; Murray FUN_001b67f8 unless state 0x14), with +0x190 from this frame's last FUN_0020bb58(u, blk) call
 /// (`bb58`: (obj, blk, u)) when there was one.
 pub fn po_move_of(set: &mut crate::engine::classes::ClassSet, o: usize, class: u16, loco: &[(u32, [Option<LocoEntry>; 2])], bb58: &[(usize, u32, f32)]) -> Option<PoMove> {
+    po_move_of_svt(set, o, class, loco, bb58, &|_| None)
+}
+
+/// `po_move_of` with the live ASEGA rate lookup (`K25::svt`).
+pub fn po_move_of_svt(set: &mut crate::engine::classes::ClassSet, o: usize, class: u16, loco: &[(u32, [Option<LocoEntry>; 2])], bb58: &[(usize, u32, f32)], svt: &dyn Fn(u32) -> Option<f32>) -> Option<PoMove> {
+    // FEEL R48: 0x20bb58 scales by (blk+4 ASEG)+0x50 live ASEGA +0x40 (effective rate); Murray's is his +0x1030
+    // slot (k19_54 replay_1030). REPLACED: Bentley keeps rate 1 (his slot is not traced).
+    let mut live = None;
     let mut m = match class {
         super::p20::CLASS_BENTLEY => {
             let b = set.k16_get(o)?;
-            PoMove::from_mem(b.state != 0xd, |x| b.m.f(x), |x| b.m.i(x))
+            PoMove { jump: b.state != 0xc, ..PoMove::from_mem(b.state != 0xd, |x| b.m.f(x), |x| b.m.i(x)) }
         }
         super::p20::CLASS_MURRAY => {
             let b = &set.k18_murray(o)?.b;
+            live = svt(b.m.u(0x1030));
             PoMove::from_mem(b.state != 0x14, |x| b.m.f(x), |x| b.m.i(x))
         }
         _ => return None,
     };
     if let Some(&(_, blk, u)) = bb58.iter().rev().find(|r| r.0 == o) {
         if let Some((_, e)) = loco.iter().find(|r| r.0 == blk) {
-            m.v190 = ee_sub_20bb58(e, u, 1.0);
+            // FEEL R49: no live blend ASEGA (the port does not build the blk+4 blend ASEG, FUN_00137a30 / 0x20b868 host
+            // hook is a no-op): its +0x40 = local 1 (FUN_001305b8(0, 1.0, blk+4)) * +0x48 (blend +0x78 = first live
+            // entry's +0x78) * +0x4c (blend +0x80..+0x94 FUN_0012f248 defaults -> 1).
+            let rate = live.unwrap_or_else(|| e.iter().flatten().next().map_or(1.0, |x| x.rate));
+            m.v190 = ee_sub_20bb58(e, u, rate);
         }
     }
     Some(m)
@@ -194,6 +232,66 @@ pub fn set_active_character(w: &World, set: &mut crate::engine::classes::ClassSe
         Some((o, super::p20::CLASS_BENTLEY | super::p20::CLASS_MURRAY)) => set.k18_set_active(Some(o), h),
         _ => set.k18_set_active(None, h),
     }
+}
+
+/// TAKEN BY HEIST: a character body's gravity (+0xe8 +0x80): EMU5 snapshots 005..250 read (0, 0, -2275) on
+/// Sly, Bentley and Murray (DAT_002e1e40 / 002dd5bc / 002f7900), not the ALO default -1750 (0x1f3590).
+/// UNVERIFIED: the writer of the 1.3x value is not traced yet (REQUEST POOL1); used for the K27 bodies here.
+pub const CHAR_GRAVITY: [f32; 3] = [0.0, 0.0, -2275.0];
+
+/// TAKEN BY HEIST: one body per character across a switch (C2d5898_v78 0x1c3ed8 -> FUN_001c4940 only moves
+/// world +0x3efc; every character object keeps its own xf, the one left behind stays where it was). The port's
+/// controlled Bentley / Murray body is the shadow JT and the uncontrolled one is its K27 `CharPo` body: on a
+/// switch the JT is written into the left character's K27 body, and the new character's K27 body (when one
+/// exists) is loaded into the JT before `follow_active`. While a character is controlled its K27 body follows
+/// the JT each frame (its xf is the JT's). Returns `follow_active`'s result.
+pub fn follow_active_bodies(w: &World, active: Option<usize>, cur: &mut super::p20::PoCurrent, jt: &mut super::Jt, host: &mut crate::engine::classes::plugin::EngineHost) -> bool {
+    if active == cur.obj {
+        if let Some(b) = cur.obj.and_then(|o| host.k27_po.get_mut(&o)) {
+            b.phys.pos = jt.phys.pos;
+            b.phys.rot = jt.phys.rot;
+            b.phys.v = jt.phys.v;
+        }
+        return false;
+    }
+    if let Some(o) = cur.obj {
+        let b = host.k27_po.entry(o).or_insert_with(|| crate::engine::classes::k27::CharPo { phys: crate::engine::physics::driver::AloPhys { kind: 2, ..Default::default() }, ..Default::default() });
+        b.phys.pos = jt.phys.pos;
+        b.phys.rot = jt.phys.rot;
+        b.phys.v = [0.0; 3];
+        b.phys.gravity = CHAR_GRAVITY;
+    }
+    let loaded = active.and_then(|n| host.k27_po.get(&n)).map(|b| (b.phys.pos, b.phys.rot));
+    let r = follow_active(w, active, cur, jt);
+    if let Some((p, rot)) = loaded {
+        jt.phys.pos = p;
+        jt.phys.rot = rot;
+        jt.phys.v = [0.0; 3];
+        jt.phys.w = [0.0; 3];
+    }
+    r
+}
+
+/// TAKEN BY HEIST: FUN_00228750 step 1 slot 37 MoveToObject (0x2052e0, PO) for the Bentley / Murray objects of
+/// `SpawnActivate::placed`: object a takes b's world position and rotation rows; the port's uncontrolled
+/// character body is its K27 `CharPo` (created here when absent). Other classes are left to their owners.
+/// Returns the moved character objects.
+pub fn apply_po_placements(w: &World, placed: &[(usize, usize)], host: &mut crate::engine::classes::plugin::EngineHost) -> Vec<usize> {
+    let mut out = vec![];
+    for &(a, b) in placed {
+        let c = w.objects.get(a).map(|o| o.class);
+        if c != Some(super::p20::CLASS_BENTLEY) && c != Some(super::p20::CLASS_MURRAY) {
+            continue;
+        }
+        let Some(m) = host.k24_world_xf(b as u32 + 1) else { continue };
+        let e = host.k27_po.entry(a).or_insert_with(|| crate::engine::classes::k27::CharPo { phys: crate::engine::physics::driver::AloPhys { kind: 2, ..Default::default() }, ..Default::default() });
+        e.phys.pos = m[3];
+        e.phys.rot = [0, 1, 2].map(|r| [m[r][0], m[r][1], m[r][2]]);
+        e.phys.v = [0.0; 3];
+        e.phys.gravity = CHAR_GRAVITY;
+        out.push(a);
+    }
+    out
 }
 
 /// Key of Sly's JT in `PoCurrent::bodies`.
@@ -232,4 +330,68 @@ pub fn follow_active(w: &World, active: Option<usize>, cur: &mut super::p20::PoC
     }
     jt.po_move = None;
     true
+}
+
+/// TAKEN BY HEIST: the team-jump links of the controlled Bentley (shadow JT) per frame.
+/// FUN_0019b110 category E: is_a(jt, 0x37) = the po is Bentley; partner o2 = DAT_002f7900 (the Murray
+/// instance), ready = o2 +0x13d0 (state) == 0xf && o2 +0x1914 == 0, X = o2 +0x191c (EMU5 239: Murray's child
+/// object oid 481, owner +0x10 = Murray; the setter is not traced, REPLACED: looked up by owner / oid), its
+/// position FUN_001a62e8(X) and velocity (vt +0x10c of Murray, REPLACED: X is rigid on Murray).
+/// jtbs 0x12 partner hand-over (`Jt::calls` (0x2206c8, 3)) and FUN_0019c688 case 0x12 (`Jt::calls` (0x135248, 8)): FUN_00135248(DAT_002dd5bc, 8) = Bentley SetState 8.
+pub fn team_link(w: &World, set: &mut crate::engine::classes::ClassSet, host: &mut crate::engine::classes::plugin::EngineHost, cur: &super::p20::PoCurrent, jt: &mut super::Jt) {
+    use crate::engine::classes::ClassHost;
+    jt.is_37 = cur.class == super::p20::CLASS_BENTLEY;
+    jt.partner = None;
+    let murray = w.objects.iter().position(|o| o.class == super::p20::CLASS_MURRAY);
+    // jtbs 0x12 (0x197500): *(DAT_002f7900 + 0x1914) = the partner's carry machine state; its FUN_002206c8(+0x1910,
+    // 3) request (recorded `Jt::calls`) goes through the class host's carry queue (p23::apply_switches next frame)
+    if let Some(o2) = murray {
+        jt.p5w.partner_1914 = set.k18_murray(o2).map_or(-1, |m| m.b.m.i(0x1914));
+        // only the Bentley JT's jtbs 0x12 asks (FUN_0019b110 runs on Bentley's own JT; once Murray is the po the
+        // shared shadow JT's leftover requests are not his)
+        while let Some(k) = jt.calls.iter().position(|c| *c == (0x0022_06c8, 3)) {
+            jt.calls.remove(k);
+            if jt.is_37 {
+                host.p23_switch.carry.push((o2, 0x1910, 3));
+            }
+        }
+    }
+    if let Some(o2) = murray {
+        let ready = set.k18_murray(o2).is_some_and(|m| m.b.state == 0xf && m.b.m.i(0x1914) == 0);
+        let x = w.objects[o2].children.iter().copied().chain(w.objects.iter().enumerate().filter(|(_, o)| o.owner == Some(o2)).map(|(i, _)| i)).find(|&i| w.objects[i].oid == 481);
+        if let Some(x) = x.filter(|_| jt.is_37) {
+            // REPLACED: X keeps its load offset from Murray, carried by Murray's K27 body (rotation static)
+            let (xl, ml) = (host.k24_world_xf(x as u32 + 1).map_or([0.0; 3], |m| m[3]), host.k24_world_xf(o2 as u32 + 1).map_or([0.0; 3], |m| m[3]));
+            let mp = host.ee_sub_1a62e8(o2 as u32 + 1);
+            let pos = [0, 1, 2].map(|k| mp[k] + xl[k] - ml[k]);
+            let vel = host.vcall_10c(o2);
+            jt.partner = Some(crate::engine::player::p5_target::Partner { o2, ready, x, pos, vel });
+        }
+    }
+    // REPLACED glue: Bentley's own JT is left at jtbs -1 by the mount (FUN_00135248 leave 2); once he is the po in
+    // class state 0 again (landed after the throw: FUN_001367d8 -> SetState 0) the shared shadow JT stands
+    if jt.is_37 && jt.jts == super::JTS_JUMP && jt.jtbs == -1 {
+        if let Some(b) = w.objects.iter().position(|o| o.class == super::p20::CLASS_BENTLEY) {
+            if set.k16_get(b).is_some_and(|c| c.state == 0) {
+                jt.set_jts(super::JTS_STAND, -1, &mut ());
+            }
+        }
+    }
+    if let Some(k) = jt.calls.iter().position(|c| *c == (0x0013_5248, 8)) {
+        jt.calls.remove(k);
+        // as the carry request above: only the Bentley JT's FUN_0019c688 case 0x12 mounts him
+        if !jt.is_37 {
+            return;
+        }
+        if let Some(b) = w.objects.iter().position(|o| o.class == super::p20::CLASS_BENTLEY) {
+            // the case-0x12 caller is Bentley's JT, i.e. state 2 (the port's class copy does not mirror the JT state)
+            let was2 = true;
+            set.k17_set_state(b, 8, host);
+            // FUN_00135248 leave 2: JmpSetJtbs(Bentley +0x2c0, -1, 0) on his own JT (= the shadow JT here), so his
+            // finished jtbs 0x12 does not re-run FUN_0019c688 case 0x12 when he is the po again after the throw
+            if was2 {
+                jt.jmp_set_jtbs_195fb8(-1);
+            }
+        }
+    }
 }

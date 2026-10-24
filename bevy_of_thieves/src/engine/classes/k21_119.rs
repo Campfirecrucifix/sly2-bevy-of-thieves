@@ -11,7 +11,7 @@
 //! (entry +0x68, 0x50 B) are a map copy -> owner spawner; the spawner +0xe8 list keeps only its head.
 //! K22: the FUN_0011a380(0x3dd4bc) set lives in `EngineHost::set_3dd4bc` (forwarded; FUN_001ca978's score 1
 //! still unused). UNPORTED: rail +0x180 interval lists (none
-//! loaded), the kind-1 helper object (FUN_0013e3c8(0x71) +8 flag / +0x54 routine -> guard +0x2e8), the 0xe
+//! loaded), the 0xe
 //! messages and vtable +0x154 / +0xd4 of FUN_001caec8, the copy-record transform copy.
 #![allow(non_snake_case)]
 use super::guard::{self, c56::Guard};
@@ -64,6 +64,14 @@ impl CamView {
             x /= l[0];
         }
         [x, y, l[0]]
+    }
+    /// CRAWL R120: FUN_0014f850 FInsideCmFrustrum on this copy (camera-local l: +0 forward, +1 left, +2 up;
+    /// side planes through the eye at |l1| = x_scale l0, |l2| = y_scale l0): every n.c - r < 0
+    pub fn sphere_visible(&self, c: [f32; 3], r: f32) -> bool {
+        let inv = crate::engine::camera::math::FUN_0011c318(&self.mat);
+        let l = crate::engine::camera::math::xform_point(&inv, c);
+        let side = |a: f32, s: f32| (a - s * l[0]) / (1.0 + s * s).sqrt() < r;
+        side(l[1], self.x_scale) && side(-l[1], self.x_scale) && side(l[2], self.y_scale) && side(-l[2], self.y_scale)
     }
 }
 
@@ -164,7 +172,7 @@ pub struct Host119<'a> {
     pub rng: &'a mut crate::engine::physics::driven::GameRng,
     pub k21: &'a mut K21,
     pub k6: &'a mut Vec<(usize, Inst)>,
-    pub k6l: &'a guard::K6Level,
+    pub k6l: &'a mut guard::K6Level,
     pub live: &'a mut Vec<u32>,
     pub players: Vec<u32>,
     pub out: Place,
@@ -311,7 +319,7 @@ impl Host119<'_> {
     pub fn spawner_of(w: &World, oid: i32) -> Option<usize> {
         w.find_oid(oid).iter().copied().find(|&k| Self::entry_of(w, k).is_some())
     }
-    fn entry_of(w: &World, k: usize) -> Option<usize> {
+    pub fn entry_of(w: &World, k: usize) -> Option<usize> {
         let crate::engine::world::objects::Payload::Loaded(crate::engine::world::objects::LoadData::B4(b)) = &w.objects[k].payload else { return None };
         let B4Load::Class6 { template, in_place: true, .. } = &**b else { return None };
         w.entries.iter().position(|e| e.dir.c == *template)
@@ -319,13 +327,20 @@ impl Host119<'_> {
 
     /// FUN_001ca978(spawner, copy): 0 locked, 4 unowned, else min over the copy objects (1 visible, 2 active,
     /// 3 out of the world)
-    fn ee_sub_1ca978(&self, e: usize, copy: i32) -> i32 {
-        let Some(_) = self.k21.copy_owner.get(&(e, copy)) else { return 4 };
-        let en = &self.w.entries[e];
+    fn ee_sub_1ca978(&mut self, e: usize, copy: i32) -> i32 {
+        if self.pool_owner(e, copy).is_none() {
+            return 4;
+        }
+        let w = self.w.clone();
+        let en = &w.entries[e];
         let m = en.objects.len();
         let mut r = 5;
         for j in 0..m {
             let Some(&o) = en.instances.get(copy as usize * m + j) else { continue };
+            // POOL1 R81: FUN_001ca978: in the world and FUN_001a61a0 (the 0x3dd4bc list) -> 1 at once
+            if self.active(o as u32 + 1) && self.h.ee_sub_1a61a0(o as u32 + 1) {
+                return 1;
+            }
             let s = if self.active(o as u32 + 1) { 2 } else { 3 };
             r = r.min(s);
         }
@@ -334,14 +349,18 @@ impl Host119<'_> {
 
     /// FUN_001cade0(spawner, min): the spawner's current copy while it scores >= 3, else the best scoring copy
     /// in [entry +0xc, n) with score >= min (later copies win ties)
-    fn k21_1cade0(&self, sp: u32, e: usize, mut min: i32) -> Option<i32> {
-        if let Some(&(ce, c)) = self.k21.cur.get(&sp) {
-            if self.ee_sub_1ca978(ce, c) < 3 {
-                return None;
+    fn k21_1cade0(&mut self, sp: u32, e: usize, mut min: i32) -> Option<i32> {
+        // POOL1 R75: spawner +0xe4 (field 1178, C2d5dc8) set: no current-copy check, every call scans the pool
+        if !self.f_e4(sp) {
+            if let Some((ce, c)) = self.pool_cur(sp) {
+                if self.ee_sub_1ca978(ce, c) < 3 {
+                    return None;
+                }
+                return Some(c);
             }
-            return Some(c);
         }
-        let en = &self.w.entries[e];
+        let w = self.w.clone();
+        let en = &w.entries[e];
         let mut best = None;
         for c in en.load_count..en.dir.n {
             let s = self.ee_sub_1ca978(e, c);
@@ -353,6 +372,42 @@ impl Host119<'_> {
         best
     }
 
+    /// POOL1 R79: the copy records are the host's (`ClassHost::k21_pool`, shared with the load claims) when
+    /// it has them, else the K21 state's
+    fn pool_owner(&mut self, e: usize, copy: i32) -> Option<u32> {
+        match self.h.k21_pool() {
+            Some((_, own)) => own.get(&(e, copy)).copied(),
+            None => self.k21.copy_owner.get(&(e, copy)).copied(),
+        }
+    }
+    fn pool_cur(&mut self, sp: u32) -> Option<(usize, i32)> {
+        match self.h.k21_pool() {
+            Some((cur, _)) => cur.get(&sp).copied(),
+            None => self.k21.cur.get(&sp).copied(),
+        }
+    }
+    /// FUN_001caec8 claim: copy +0 = sp, sp +0xe8 = copy; the old owner's record unlinks it (FUN_001caa60)
+    fn pool_claim(&mut self, sp: u32, e: usize, copy: i32) -> Option<u32> {
+        let (cur, own) = match self.h.k21_pool() {
+            Some(x) => x,
+            None => (&mut self.k21.cur, &mut self.k21.copy_owner),
+        };
+        let owned = own.insert((e, copy), sp);
+        if let Some(old) = owned {
+            if old != sp {
+                cur.remove(&old); // FUN_001caa60
+            }
+        }
+        cur.insert(sp, (e, copy));
+        owned
+    }
+
+    /// class-6 spawner +0xe4 (field 1178 of the C2d5dc8 load + the record's mode-1 override list, as
+    /// `classes::class6_e4`; POOL1 R79: emu_rec3 025 hub records 141727/29/31 have +0xe4 = 1)
+    fn f_e4(&self, sp: u32) -> bool {
+        self.idx(sp).is_some_and(|i| super::class6_e4(&self.w, i))
+    }
+
     /// FUN_001cb250(spawner, k) -> copy object handle placed by the spawner matrix `pl` (0 = none)
     pub fn ee_sub_1cb250(&mut self, sp: u32, k: i32, pl: Place) -> u32 {
         let Some(si) = self.idx(sp) else { return 0 };
@@ -362,14 +417,14 @@ impl Host119<'_> {
         }
         // FUN_001caec8
         let Some(copy) = self.k21_1cade0(sp, e, if k != 0 { 1 } else { 2 }) else { return 0 };
-        if let Some(old) = self.k21.copy_owner.insert((e, copy), sp) {
-            if old != sp {
-                self.k21.cur.remove(&old); // FUN_001caa60
-            }
-        }
-        self.k21.cur.insert(sp, (e, copy));
+        let owned = self.pool_claim(sp, e, copy);
         // FUN_001ca930 -> entry +4 [copy]
         let Some(&o) = self.w.entries[e].instances.get(copy as usize) else { return 0 };
+        // POOL1 R59: FUN_001caa60(old owner, slot) (FUN_001caec8, *slot != 0, any owner): the template copy
+        // vt +0x4c (Remove, FUN_001a5630) before the claim's FUN_001c99d8 re-adds it below (lo_rt true)
+        if owned.is_some() {
+            self.h.lo_rt(o, false);
+        }
         let place: Affine = [pl.mat[0], pl.mat[1], pl.mat[2], pl.pos];
         // vtable +0x12c / +0x44: (re)build the copy at the place and add it to the world
         self.k6.retain(|x| x.0 != o);
@@ -379,9 +434,16 @@ impl Host119<'_> {
         let mut g = guard::k6_make_guard(&self.w, &mut bw, o, vt, Some(place), self.h);
         g.ee_sub_2061d8(o, self.h);
         g.ee_sub_206518(o, &self.players, self.t, self.h);
+        // FUN_00206518 tail: +0x494 set -> FUN_001f1a40 loot list
+        if g.f_494_oid != 0 {
+            g.ee_sub_1f1a40(o, self.rng, self.h);
+        }
         g.ee_sub_2079e0(o, self.live, self.h);
         self.k6.push((o, Inst::Guard(g)));
         self.k21.spawned.push(o);
+        // POOL1 R80: FUN_001caec8 vt +0x54(copy, sp +0x10, sp +0x50, 0): parent = the record's owner
+        self.h.k21_pool_parent(o, sp);
+        self.h.lo_rt(o, true);
         o as u32 + 1
     }
 
@@ -413,12 +475,32 @@ impl Host119<'_> {
                     if g == 0 {
                         return 0;
                     }
-                    // helper +8 = flag, guard +0x2e8 = helper +0x54 (UNPORTED helper object)
+                    // ANIM R26: param_2[4] (the routine's +0x54 entry) +8 = flag, guard +0x2e8 = param_2[3] (the
+                    // point's FUN_001733f8 routine: one kind-6 rail command on the point object, start -1)
+                    let key = (self.obj, pi);
+                    let ri = match self.k6l.pt_routines.get(&key) {
+                        Some(&r) => r,
+                        None => {
+                            let c = vec![guard::patrol::Cmd::Rail(guard::rail_by_oid(&self.w, pt.oid), 1, -1.0)];
+                            self.k6l.routines.push((self.obj, c.clone()));
+                            self.k6l.cmds.push(c);
+                            self.k6l.pt_routines.insert(key, self.k6l.cmds.len() - 1);
+                            self.k6l.cmds.len() - 1
+                        }
+                    };
+                    for c in [&mut self.k6l.cmds[ri][0], &mut self.k6l.routines[ri].1[0]] {
+                        if let guard::patrol::Cmd::Rail(_, d, _) = c {
+                            *d = pl.flag as i32;
+                        }
+                    }
                     let routines = &self.k6l.cmds;
                     let (t, dt, o) = (self.t, self.dt, g as usize - 1);
                     if let Some((_, Inst::Guard(gd))) = self.k6.iter_mut().find(|x| x.0 == o) {
+                        gd.f_2e8 = Some(ri);
+                        std::mem::swap(&mut *self.rng, &mut gd.body.rng);
                         gd.k21_goal(o, -1, t, dt, routines, self.h);
                         gd.k21_goal(o, 1, t, dt, routines, self.h);
+                        std::mem::swap(&mut *self.rng, &mut gd.body.rng);
                     }
                 }
             }
@@ -480,9 +562,25 @@ impl ClassHost for Host119<'_> {
                 _ => 0,
             };
         }
-        if self.guard(obj).is_some() {
+        if let Some(g) = self.guard(obj) {
             return match off {
-                // +0x330 / +0x84 (dead flag / last-active time): not modelled on the K6 guard
+                // CRAWL R120: +0x84 = ALO +0x80 draw record +4: FUN_00168638 (guard slot 18 FUN_00207690) stores
+                // DAT_002dded0 there whenever the VU0 cull (FUN_0014f850) passes = the last time the guard was on
+                // screen (savestates: clk - 1 frame for on-screen guards, older for the rest). Evaluated on demand:
+                // FUN_00173d18 max-accumulates it every frame, so "now if visible, else 0" gives the same slot time.
+                0x84 if std::env::var_os("SLY2_NO_R120_DRAWT").is_none() => {
+                    let (pos, yaw) = (g.body.pos, g.body.yaw);
+                    let (c, r) = self.idx(obj).and_then(|i| { use crate::engine::gfx::attach::alo_of; alo_of(&self.w, i).or_else(|| alo_of(&self.w, self.w.objects[i].clone_of?)) }).map_or(([0.0; 3], 0.0), |a| (a.mesh.center, a.mesh.radius));
+                    let (sn, cs) = yaw.sin_cos();
+                    let wc = [pos[0] + cs * c[0] - sn * c[1], pos[1] + sn * c[0] + cs * c[1], pos[2] + c[2]];
+                    let vis = self.h.k21_cam_sphere(wc, r);
+                    if std::env::var_os("SLY2_R120_DRAWDBG").is_some() {
+                        eprintln!("R120 drawt guard {} t {:.2} c {wc:?} r {r} cam {:?} vis {vis:?}", obj - 1, self.t, self.h.k21_cam_pos());
+                    }
+                    // no g_cm (headless harness without the camera plugin) = drawn: the original always has one
+                    if vis != Some(false) { self.t.to_bits() as i32 } else { 0 }
+                }
+                // +0x330 (dead flag): not modelled on the K6 guard
                 _ => 0,
             };
         }
@@ -497,8 +595,12 @@ impl ClassHost for Host119<'_> {
     fn vcall(&mut self, obj: u32, off: u32) {
         if off == 0x4c && self.guard(obj).is_some() {
             let i = obj as usize - 1;
+            if std::env::var_os("SLY2_R119_K6DBG").is_some() {
+                eprintln!("R119 k21 vcall 0x4c guard {i}\n{}", std::backtrace::Backtrace::force_capture());
+            }
             self.k6.retain(|x| x.0 != i);
             self.live.retain(|&g| g != obj);
+            self.h.lo_rt(i, false);
             return;
         }
         self.h.vcall(obj, off)
@@ -524,10 +626,15 @@ impl ClassSet {
         let t = self.g.t;
         let dt = self.g.dt;
         let cam = h.k21_cam_pos().unwrap_or(self.g.g_2ddfd0);
-        let players: Vec<u32> = self.g.k6_players.iter().map(|p| p.0).collect();
+        let players = self.g.player_globals();
         let mut k20 = std::mem::take(&mut self.k20);
         for (i, x) in &mut k20 {
             let Inst::K20Spawner(c) = x else { continue };
+            // POOL1 R75: as frame_k20_119 (FEEL R33): slot 15 FUN_00173a68 runs from the world update list
+            // only (LO +0x28 bit 60), so an out-of-world spawner does not tick
+            if h.lo_removed(*i) {
+                continue;
+            }
             let mut hh = Host119 {
                 h: &mut *h,
                 w: w.clone(),
@@ -539,7 +646,7 @@ impl ClassSet {
                 rng: &mut self.rng,
                 k21: &mut self.k21,
                 k6: &mut self.k6,
-                k6l: &self.k6l,
+                k6l: &mut self.k6l,
                 live: &mut self.g.k7_live,
                 players: players.clone(),
                 out: Place::default(),

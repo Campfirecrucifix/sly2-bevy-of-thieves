@@ -2,6 +2,8 @@
 //! Each class keeps the object fields its overrides touch (named by offset) in a state struct;
 //! base-class and engine calls that are not ported elsewhere go through [`ClassHost`] hooks.
 pub mod actor;
+pub mod laser_gate;
+pub mod sw_prox;
 pub mod guard;
 pub mod c2cabd8;
 pub mod c2cad78;
@@ -42,6 +44,7 @@ pub mod k12;
 pub mod k13;
 pub mod k14;
 pub mod k15;
+pub mod k16_sensor;
 pub mod k15_101;
 pub mod k15_79;
 pub mod k15_83;
@@ -83,11 +86,48 @@ pub mod shared;
 pub mod plugin;
 pub mod q;
 
+/// ANIM-ALL R65F: FUN_0013e510 copies its source's built state, so a copy of a copy reads the loaded source's
+/// props: follow clone_of until an object with props (SLY2_R65FOFF = one level, as before)
+/// ANIM-ALL R66: object `i` (or the source its copy chain clones) has the class-10 path load (FUN_001e5df8)
+fn path_loaded(w: &crate::engine::world::World, i: usize) -> bool {
+    use crate::engine::world::loads_b4::B4Load;
+    use crate::engine::world::objects::{LoadData, Payload};
+    let mut k = i;
+    for _ in 0..64 {
+        if let Payload::Loaded(LoadData::B4(bx)) = &w.objects[k].payload {
+            return matches!(&**bx, B4Load::L1e5df8 { .. });
+        }
+        match w.objects[k].clone_of.filter(|&c| c != k) {
+            Some(c) => k = c,
+            None => return false,
+        }
+    }
+    false
+}
+
+pub fn clone_src(w: &crate::engine::world::World, i: usize) -> usize {
+    let mut src = w.objects[i].clone_of.unwrap_or(i);
+    while std::env::var_os("SLY2_R65FOFF").is_none() && crate::engine::game::fields::object_props(&w.objects[src]).is_none() {
+        match w.objects[src].clone_of.filter(|&c| c != src) { Some(c) => src = c, None => break }
+    }
+    src
+}
+
 use crate::engine::physics::driven::GameRng;
 use crate::engine::world::loads_b4::B4Load;
 use crate::engine::world::objects::{LoadData, Payload};
 use crate::engine::world::props::Prop;
 use crate::engine::world::{class::ClassId, World};
+
+/// ANIM-ALL R62: the FUN_0013f810 rows object `i` got at load: `own` (its source's stream props), then the
+/// FUN_001c9b08 key-5/6 placement override rows run on the copy itself (`World::override_props`, stream order,
+/// later rows win). SLY2_R62OFF = `own` only (the pre-R62 builders).
+pub fn props_ov<'a>(w: &'a World, i: usize, own: &'a [Prop]) -> std::borrow::Cow<'a, [Prop]> {
+    match w.override_props.get(&i) {
+        Some(ov) if !ov.is_empty() && std::env::var_os("SLY2_R62OFF").is_none() => std::borrow::Cow::Owned(own.iter().chain(ov.iter()).cloned().collect()),
+        _ => std::borrow::Cow::Borrowed(own),
+    }
+}
 
 /// Load-time property list of object `i` (B4 loads that carry FUN_00231170 props).
 pub fn props_of(w: &World, i: usize) -> Option<&[Prop]> {
@@ -109,6 +149,8 @@ pub struct ClassGlobals {
     pub g_3e1204: i32,
     /// *(DAT_003e1a5c + 0x28)
     pub g_3e1a5c_28: i32,
+    /// DAT_002de578 loot-drop counters {+0 coins, +4 items} (FUN_00154e10; table +0x14 = DAT_002bdc00)
+    pub g_2de578: [i32; 2],
     /// DAT_003dd268 (non-zero once the emitter/sound manager exists)
     pub g_3dd268: i32,
     /// DAT_002ddf54 (render mask)
@@ -118,6 +160,10 @@ pub struct ClassGlobals {
     /// DAT_002dded0 clock t / DAT_002dded4 clock dt (J: clock 0x2dded0)
     pub t: f32,
     pub dt: f32,
+    /// DAT_003e1be0 (clock time of the last look-mode frame) / DAT_003e1be4 (LOOK R34: K12 marker fade; not
+    /// written by the port yet -> 0, TODO the camera look mode / job event writers)
+    pub g_3e1be0: f32,
+    pub g_3e1be4: f32,
     /// DAT_002ddf5c (LOD distance scale) / DAT_002ddfd0 (LOD reference point, camera)
     pub g_2ddf5c: f32,
     pub g_2ddfd0: [f32; 3],
@@ -139,6 +185,8 @@ pub struct ClassGlobals {
     pub g_3e1114: u32,
     /// DAT_002dd5bc: the Bentley object (handle; K17 FUN_00134648)
     pub g_2dd5bc: u32,
+    /// TAKEN BY HEIST: DAT_002dd5bc +0x13d0 (that Bentley's state; FUN_0021f418 case 3), refreshed per frame
+    pub g_2dd5bc_13d0: i32,
     /// DAT_002de240 (K4: class-15 volume override)
     pub g_2de240: i32,
     /// DAT_003e1118 / DAT_003e111c (K4: return level / spawn set by class 132)
@@ -156,6 +204,8 @@ pub struct ClassGlobals {
     pub l_3e1450: Vec<u32>,
     /// K6: the player-character globals (DAT_002e1e40 / 2f7900 / 2dd5bc / 2dd648): handle, world position
     pub k6_players: Vec<(u32, [f32; 3])>,
+    /// WIRE-B3: Sly's sensor facts (hidden / undetectable / cover) from PlayerFocus (None: position only)
+    pub k6_player_tgt: Option<guard::sensor::Tgt>,
     /// K7: guard list 0x3e1444 (slots 22 / 21)
     pub k7_live: Vec<u32>,
     /// K7: the two class-45 highlight slots DAT_003e1a78 (stride 0x28, +0x20 owner handle)
@@ -174,8 +224,26 @@ pub struct ClassGlobals {
     pub w_3d84: i32,
     /// K10: object lists by address (DAT_003e1414 / 3e1438 / 3e13b4 / 3e1408 / 3e1474 / 3e1420 / 3e142c / 3e13f0)
     pub k10_lists: std::collections::BTreeMap<u32, Vec<u32>>,
+    /// TAKEN BY MURRAY: +0xe8 flag word of the DAT_003e13b4 members (class 19, read by FUN_001b5e98)
+    pub l3e13b4_e8: std::collections::BTreeMap<u32, u32>,
+    /// CRAWL R85: +0xf4 of the DAT_003e13b4 members and +0x19c of the class-36 carry points (FUN_00184380)
+    pub l3e13b4_f4: std::collections::BTreeMap<u32, i32>,
+    pub pt_19c: std::collections::BTreeMap<u32, i32>,
     /// K13: act record pool 0x3e123c (REPLACED free list, shared::act)
     pub act_pool: shared::act::ActPool,
+}
+
+impl ClassGlobals {
+    /// The player globals FUN_00206518 reads (DAT_002e1e40 / 2f7900 / 2dd5bc / 2dd648). Sly's global is
+    /// set by his own load before any guard's post-load, so it is present even before the player layer
+    /// feeds `k6_players` (no per-frame re-registration needed).
+    pub fn player_globals(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.k6_players.iter().map(|p| p.0).collect();
+        if !v.contains(&guard::PLAYER_HANDLE) {
+            v.insert(0, guard::PLAYER_HANDLE);
+        }
+        v
+    }
 }
 
 /// Missing engine calls (K: Findings). Defaults are no-ops / zero results.
@@ -311,6 +379,8 @@ pub trait ClassHost {
     fn ee_sub_1c4840(&mut self) -> u32 { 0 }
     fn ee_sub_1a6f00(&mut self, obj: usize, pos: [f32; 3]) -> [f32; 3] { pos }
     fn ee_sub_118fb0(&mut self, obj: usize, pos: [f32; 3]) -> bool { false }
+    /// FUN_00227c90 on the object's VOL solid (world-space point)
+    fn vol_contains(&mut self, obj: usize, pos: [f32; 3]) -> bool { false }
     fn ee_sub_1b3a48(&mut self, obj: usize, k: i32) {}
     fn ee_sub_22b490(&mut self, obj: usize, level: i32, flags: i32, a: i32) {}
     /// class 120 +0xb0 binding: FUN_002090d0(obj + 0xb0, anc) init, FUN_00209130 bind, FUN_00209590 clone,
@@ -478,6 +548,8 @@ pub trait ClassHost {
     // ---- K6 (guards, class 56 family)
     /// FUN_0020f1b8(0x3dd490): global "no detection"
     fn ee_sub_20f1b8(&mut self) -> bool { false }
+    /// CRAWL R97: FUN_0020f198 (d = 1) / FUN_0020f1a8 (d = -1): world +0x3d84 counter (read by FUN_0020f1b8)
+    fn world_3d84_add(&mut self, d: i32) {}
     /// DAT_003e1480 vision-blocker walk (FUN_001a6f00 + FUN_00118668 segment eye -> target): any hit
     fn ee_sub_118668_blockers(&mut self, eye: [f32; 3], tp: [f32; 3]) -> bool { false }
     /// FUN_001545f0(sensor, t): eye -> target LOS raycast (FUN_0020faa0 + FUN_0014cc58) hit; `f8` = sensor flags
@@ -495,6 +567,8 @@ pub trait ClassHost {
     fn contacts(&mut self, guard: usize) -> Vec<guard::slots::Contact> { Vec::new() }
     /// length (s) of guard anim `anim`: task 0x9d reaches state 1 (FUN_00174fb8) when it has played
     fn anim_len(&mut self, guard: usize, anim: i32) -> f32 { 0.0 }
+    /// ANIM R25: (length, +0x78 rate) of the ASEG `oid` FUN_0015e938 finds under the guard (script anim commands)
+    fn aseg_oid_len(&mut self, guard: usize, oid: i32) -> Option<(f32, f32)> { None }
     /// FUN_00209098(guard): routine interrupt
     fn ee_sub_209098(&mut self, guard: usize) -> bool { false }
     // ---- K8 (pickups, classes/k8.rs)
@@ -512,6 +586,8 @@ pub trait ClassHost {
     fn ee_sub_161868(&mut self) {}
     /// FUN_00164640(obj, k, src)
     fn ee_sub_164640_src(&mut self, obj: u32, k: i32, src: u32) {}
+    /// CRAWL R26: task +0x54 state of the task object `obj` (handle); -1 when unknown
+    fn task_state_54(&mut self, obj: u32) -> i32 { let _ = obj; -1 }
     /// FUN_001ce888(world, 9, 0) collect effect bound to obj with descriptor `desc` at pos
     fn ee_sub_1ce888_fx(&mut self, obj: usize, desc: u32, pos: [f32; 3]) {}
     /// player vt+0x28c (slot 80: FUN_00144268 hp / mp gift)
@@ -520,6 +596,8 @@ pub trait ClassHost {
     fn ee_sub_1a58d0(&mut self, obj: usize, a: i32, b: i32) {}
     /// FUN_001cb4b8(host, obj): clear the attachment record (FUN_001cb410 +8 = 0)
     fn ee_sub_1cb4b8(&mut self, host: u32, obj: u32) {}
+    /// POOL1: obj vt +0x124 (SetVelocity) with a world velocity (FUN_002205a8 throw release)
+    fn so_set_v_124(&mut self, obj: u32, v: [f32; 3]) {}
     /// FUN_001f0598 + anim vt+0x14: stop the pickup's anim
     fn ee_sub_1f0598(&mut self, obj: usize) {}
     /// FUN_001f10f0(anim): blend in
@@ -562,6 +640,8 @@ pub trait ClassHost {
     fn ee_sub_1dfeb8(&mut self, seq: u32) {}
     fn ee_sub_1dfd58(&mut self, seq: u32, player: u32) {}
     fn ee_sub_1e0020(&mut self, seq: u32, ev: i32) {}
+    /// BOSS: the FUN_001e0020 signals posted through the host since the last call (seq handle, signal)
+    fn take_seq_signals(&mut self) -> Vec<(u32, i32)> { Vec::new() }
     /// FUN_001daf38(id, on): save flag "%d" write (+ FUN_001619a0(0x2deb30, 0x3b) when on)
     fn ee_sub_1daf38(&mut self, id: i32, on: bool) {}
     /// FUN_001a3078 (on) / FUN_001a30d0 (off) of 0x2e1e60 (world +0x3d80 edges)
@@ -590,10 +670,15 @@ pub trait ClassHost {
     fn k22_sma_20fff0(&mut self, _ctx: u32, _entry: &[u32; 4], _mode: u32, _owner: u32) -> u32 { 0 }
     /// PLAN1: FUN_001e5410 release owner's +0x58 SMA (slot 1), clear +0x5c.
     fn k22_release_1e5410(&mut self, _owner: u32) {}
+    /// CRAWL R77: FUN_001e1bc8 (C2d8c08_v4): a message 10 of the node's SMA (+0x58) with new label `label`
+    /// arrived (consumed)
+    fn k22_sma_msg10(&mut self, _sma: u32, _label: i32) -> bool { false }
     /// FUN_00161f48(0x2deb30, n, entries, obj) over the +0x160 entries (method-1076 arguments)
     fn ee_sub_161f48_list(&mut self, obj: usize, entries: &[[u32; 2]]) {}
     /// FUN_001b7000(bentley, point): +0x13ec set -> +0x13f0 = point, FUN_001b6078(4), FUN_002046f0(point +0x180)
     fn ee_sub_1b7000(&mut self, user: u32, point: u32) {}
+    /// POOL1: FUN_001b7000 requests on Murray (is-a 0x36) queued by the host, applied by the class frame
+    fn take_1b7000(&mut self) -> Vec<(u32, u32)> { Vec::new() }
     /// FUN_00227bb8 +0x110: local bounding-sphere centre of a class-22 volume
     fn vol_centre_110(&mut self, obj: usize) -> [f32; 3] { [0.0; 3] }
     /// FUN_001a6f00(obj, 0, p): obj-local point -> world
@@ -622,6 +707,10 @@ pub trait ClassHost {
     // ---- K14 (classes/k14.rs, classes/shared/c71.rs)
     /// FUN_0015c198(0, 0, emitter, kind, 0, 0, pos): emitter vtable +0x19c (slot 50) with that request
     fn ee_sub_15c198(&mut self, emitter: u32, kind: i32, pos: [f32; 3]) {}
+    /// the hit parts of `obj`'s collision parts (FUN_001f31e0 0xb0 records: +0x18 kind != 0, +0x14 amount)
+    fn so_hit_parts(&mut self, obj: usize) -> Vec<(i32, i16)> { Vec::new() }
+    /// ALO +0x110 per-kind bytes of `obj` (FUN_001f7918; read by FUN_001f78d8)
+    fn alo_110(&mut self, obj: u32) -> [u8; 26] { [0; 26] }
     /// FUN_001f7598(hit) with its result (delivered / accepted)
     fn ee_sub_1f7598_ok(&mut self, hit: &guard::slots::GuardHit) -> bool {
         self.ee_sub_1f7598(hit);
@@ -644,6 +733,16 @@ pub trait ClassHost {
     }
     /// FUN_00154c90(0x2de578): BIF 103 (game::vm_state; mean of the save's suck history) -> 0 without a game
     fn ee_sub_154c90(&mut self) -> f32 { 0.0 }
+    /// FUN_00210ae0(): DAT_003e1c44[mission] (BIF 99, level-table slot index) -> -1 without a game
+    fn ee_sub_210ae0(&mut self) -> i32 { -1 }
+    /// FUN_0014cc58(0, a, b, parts): closest segment hit over the FUN_0020faa0 parts (FUN_0014c6a0 per part,
+    /// first record, smallest +0x40 below DAT_002a4ff4) -> None without collision
+    fn ee_sub_14cc58(&mut self, parts: &[k8::K8Part], a: [f32; 3], b: [f32; 3]) -> Option<crate::engine::physics::bsp::Lsg> { None }
+    /// FUN_001c0940(region, p, out, 1): snap onto the region's +0xe0 nav mesh. Default = the FUN_001c0648
+    /// default mesh (+-100000 square): every point is on it (z replaced by the caller)
+    fn ee_sub_1c0940(&mut self, region: i32, p: [f32; 3]) -> Option<[f32; 3]> { Some(p) }
+    /// FUN_001c0980(region, a, b, 0): a nav-mesh edge blocks a -> b. Default mesh: never
+    fn ee_sub_1c0980(&mut self, region: i32, a: [f32; 3], b: [f32; 3]) -> bool { false }
     /// FUN_0015c150(emitter, obj): fire the hit-fx emitter at `obj`
     fn ee_sub_15c150(&mut self, emitter: u32, obj: u32) {}
     // ---- K15 class 101 (classes/k15_101.rs)
@@ -663,13 +762,19 @@ pub trait ClassHost {
     fn ee_sub_1f0730(&mut self, snd: u32, id: i32) {}
     /// FUN_0015e9c8(0x3dd490, 0x105, class, 0, 0x20, out): objects of `class` (handles)
     fn query_15e9c8(&mut self, class: i32) -> Vec<u32> { Vec::new() }
+    /// HEIST r21: FUN_0015e9c8(0x3dd490, 0x505, class, 0, max, out): every world object of `class` or a
+    /// subclass (mode 5 = any, no scope; handles), e.g. a class-24 volume's +0x2b0 list (row 433)
+    fn ee_sub_15e9c8_505(&mut self, class: i32, max: usize) -> Vec<u32> { Vec::new() }
     /// SO contacts of class-101 object `obj` (slot 57 walk of +0xec +0x64)
     fn so_contacts_57(&mut self, obj: usize) -> Vec<k15_101::Contact57> { Vec::new() }
     /// FUN_00224bf8 explosion (REPLACED, see k15_101.rs)
-    fn explode_224bf8(&mut self, obj: u32, pos: [f32; 3], radius: f32, damage: i32) {}
+    fn explode_224bf8(&mut self, obj: u32, kind: u32, pos: [f32; 3], radius: f32, damage: i32) {}
     // ---- K15 projectiles 79-82 (classes/k15_79.rs)
     /// SO contacts of projectile `obj` (slot 57 FUN_0013aeb0 walk of +0xec +0x64)
-    fn proj_contacts_13aeb0(&mut self, obj: usize) -> Vec<k15_79::ProjContact> { Vec::new() }
+    fn proj_contacts_13aeb0(&mut self, obj: usize, pos: [f32; 3]) -> Vec<k15_79::ProjContact> { Vec::new() }
+    /// HEIST r15: the SO solver's swept contact of a flying projectile over this frame's motion `p0` -> `p1`
+    /// (REPLACED continuous collision): the first surface hit (Sly's hull or the static SO world), if any
+    fn proj_sweep_13aeb0(&mut self, obj: usize, p0: [f32; 3], p1: [f32; 3]) -> Option<k15_79::ProjContact> { None }
     /// FUN_0013b5e8 victims of an explosion at `pos` (query radius `r`, line radius `r_obj` / `r_34` for class
     /// 0x34 targets): object handles
     fn proj_victims_13b5e8(&mut self, obj: u32, pos: [f32; 3], r: f32, r_obj: f32, r_34: f32) -> Vec<u32> { Vec::new() }
@@ -704,6 +809,17 @@ pub trait ClassHost {
     fn beam_hit_14c6a0(&mut self, other: u32, p0: [f32; 3], p1: [f32; 3]) -> Option<[f32; 3]> { None }
     /// objects whose SO overlaps the class-85 beam geometry of `obj` (the slot 59 / 53 callers, REPLACED)
     fn so_overlaps_85(&mut self, obj: usize) -> Vec<u32> { Vec::new() }
+    /// CRAWL: removed from the world by a script LO remove (classes/laser_gate.rs)
+    fn lo_removed(&mut self, obj: usize) -> bool { false }
+    /// ANIM-ALL R64: FUN_001a61a0's SW-root half (root in the 0x3dd4bc proximity set; classes/sw_prox.rs)
+    fn sw_active(&mut self, obj: usize) -> bool { true }
+    /// ANIM-ALL R64: once per frame: camera mask + proximity pass (None = host without a world)
+    fn sw_frame(&mut self, cam: [f32; 3]) -> Option<u8> { None }
+    /// ANIM-ALL R66: run-time +0x2d changes (spawner claim FUN_001caec8 vt +0xd4) since the last call
+    fn sw_take_masks(&mut self) -> Vec<(usize, u8)> { Vec::new() }
+    /// FEEL R34: a class-code LO Add (vtable +0x44, `on`) / Remove (+0x4c) of object index `obj` at run time
+    /// (pool / spawner copies FUN_001caec8): reaches the scripts' object state (`ObjectFields::set_in_world`)
+    fn lo_rt(&mut self, obj: usize, on: bool) {}
     /// slot 18 FUN_001df5b0 (REPLACED): the clipped beams of `obj`
     fn beam_draw_85(&mut self, obj: usize, segs: &[([f32; 3], [f32; 3])]) {}
     /// FUN_001a64e8(obj, k, desc)
@@ -720,6 +836,8 @@ pub trait ClassHost {
     /// K27: one physics frame (FUN_001f3980 / FUN_001f8dd8 with the PO motor `m`) of a non-JT character body
     /// after its slot 69 forces (classes/k27.rs)
     fn k27_po_step(&mut self, obj: usize, m: crate::engine::physics::motor::PoMotor, dt: f32) {}
+    /// TAKEN BY HEIST: the character body stands on ground after its last step
+    fn k27_grounded(&mut self, obj: usize) -> bool { false }
     /// `addr`(obj + `off`): an embedded JT-layout component function (FUN_00196df8 +0x2c0, FUN_00194170 +0x4c0,
     /// FUN_001a1148 +0xdf0, FUN_0019df70 +0xf50) of a non-JT player character
     fn po_part(&mut self, addr: u32, obj: usize, off: u32) {}
@@ -735,6 +853,9 @@ pub trait ClassHost {
     fn ee_sub_221268(&mut self, vol: u32, s: i32) {}
     /// (vtable +0x1c)(obj, k, 0, 0, 0, &msg): query message `msg` (+0 kind, +4 value) as the object leaves it
     fn vcall_1c_query(&mut self, obj: usize, k: i32, msg: (i32, i32)) -> (i32, i32) { msg }
+    /// BOSS R30: FUN_001758a0's vt +0x1c(guard, 0x18, {record oid}, &{0x17, 1}) over the candidate records (index,
+    /// oid) in order -> the first allowed one (default: no script handler, the reply stays {0x17, 1})
+    fn atk_msg18(&mut self, guard: usize, cands: &[(usize, i32)]) -> Option<usize> { cands.first().map(|c| c.0) }
     /// DAT_002de1a0 (object handle, 0 none)
     fn g_2de1a0(&mut self) -> u32 { 0 }
     // ---- K17 class 55 Bentley (classes/k17_55.rs)
@@ -782,6 +903,8 @@ pub trait ClassHost {
     fn ee_sub_136298(&mut self, obj: usize) {}
     /// FUN_00136530(obj, s): Bentley state-8 sub-state
     fn ee_sub_136530(&mut self, obj: usize, s: i32) {}
+    /// TAKEN BY HEIST: the FUN_00136530 calls queued by `ee_sub_136530` (run by the class set on its Bentley)
+    fn take_136530(&mut self) -> Vec<(usize, i32)> { vec![] }
     /// anim handle +0x1c / (*(handle +0x14)) +0x74: playback phase of an anim slot (0 none)
     fn anim_slot_phase(&mut self, slot: u32) -> f32 { 0.0 }
     /// anim +0x74 (length)
@@ -797,6 +920,8 @@ pub trait ClassHost {
     /// / 19cce8 / 19d330 +0xf00, FUN_0019e1e0 / 19ea60 / 19eef0 +0xf50, FUN_0021f418 / 2206c8 +0x11b0, FUN_0019feb0
     /// +0x9e0, FUN_0020bb58 / 20bc08 on a blend block, FUN_00140af8 / 194a40 / 1a0450 / 1403d0 on the object)
     fn po_call(&mut self, addr: u32, obj: usize, off: u32, args: &[u32]) -> i64 { 0 }
+    /// ANIM-ALL R21: the JMP body state (+0x2c0 +0x1c) of the controlled po's shadow JT (None = not the po)
+    fn po_jtbs(&self, obj: usize) -> Option<i32> { None }
     /// (vtable `off`)(obj, arg) -> value
     fn vcall_ret_arg(&mut self, obj: u32, off: u32, arg: i32) -> i64 { 0 }
     /// FUN_00133448(carried, carrier): release
@@ -846,6 +971,8 @@ pub trait ClassHost {
     fn ee_sub_1f09d8(&mut self, sm: u32, label: i32) {}
     /// FUN_001f0638(sm): state machine finished
     fn ee_sub_1f0638(&mut self, sm: u32) -> bool { false }
+    /// CRAWL R50: FUN_001f07e8(sma): label of the SMA's current state (-1: none)
+    fn ee_sub_1f07e8(&mut self, _sma: u32) -> i32 { -1 }
     /// FUN_001f1350(sm, mask)
     fn ee_sub_1f1350(&mut self, sm: u32, mask: i32) {}
     /// FUN_001357c0(obj, k): Bentley gadget fire (class-81 launcher FUN_001d6b00 path)
@@ -854,6 +981,8 @@ pub trait ClassHost {
     fn ground_208(&mut self, ground: u32) -> Option<(u32, u32)> { None }
     /// FUN_001cb250(host, k) -> spawned carry object (0 none)
     fn ee_sub_1cb250(&mut self, host: u32, k: i32) -> u32 { 0 }
+    /// HEIST: a pool copy pulled by FUN_001cb250 that FUN_001caec8 has not placed at its spawner yet (taken)
+    fn pool_take_place(&mut self, copy: u32) -> bool { false }
     /// FUN_001cb488(host, obj)
     fn ee_sub_1cb488(&mut self, host: u32, obj: u32) {}
     /// FUN_001cade0(host, k)
@@ -884,6 +1013,8 @@ pub trait ClassHost {
     fn ee_sub_1a28b0_push(&mut self, obj: usize, other: u32, p: [f32; 3]) {}
     /// FUN_001c4940(world, obj): focus change camera / HUD part (0 = none)
     fn ee_sub_1c4940(&mut self, obj: u32) {}
+    /// POOL1 R98: world +0x3efc as the follow-po list sees it (handle, 0 = none): the controlled player object
+    fn sw_focus_po(&mut self) -> u32 { 0 }
     /// FUN_001f82b8(obj, v, 0)
     fn ee_sub_1f82b8(&mut self, obj: usize, v: i32) {}
     // ---- K19 (Murray, classes/k19_54.rs)
@@ -893,6 +1024,20 @@ pub trait ClassHost {
     fn phys_e8_80(&mut self, obj: usize) -> [f32; 3] { [0.0; 3] }
     /// (vtable +0x11c)(obj, v): set velocity
     fn vcall_11c_v(&mut self, obj: u32, v: [f32; 3]) {}
+    /// TAKEN BY MURRAY: carry attach of SO object `x` to `carrier` (0 = detach) (FUN_0012de58 / 12dc18 acts)
+    fn so_carry(&mut self, x: u32, carrier: u32) {}
+    /// TAKEN BY MURRAY: integrate thrown SO objects one frame: (obj, pos, hit-part kind)
+    fn so_fly_step(&mut self, dt: f32) -> Vec<(u32, [f32; 3], u32)> { Vec::new() }
+    /// TAKEN BY MURRAY: a thrown object hit something: its flight ends there
+    fn so_land(&mut self, x: u32) {}
+    /// CRAWL R95: the hand position of a carried SO object (`so_carry`), None when not carried
+    fn so_carried_pos(&mut self, x: u32) -> Option<[f32; 3]> { None }
+    /// TAKEN BY MURRAY: SO pair contact of moving object `x` (centre `p`) with `other`'s collision parts
+    /// (FUN_00133a38 AABB + FUN_001a7c18 narrowphase, see EngineHost); None = `other` has no collision geometry
+    fn so_touch(&mut self, x: u32, p: [f32; 3], other: u32) -> Option<bool> { None }
+    /// R53: world-space bounding sphere (centre, radius) of `obj`'s SO collision parts (the world sphere list
+    /// +0x3d1c entry, +0x20 centre / +0x30 radius, FUN_0020fc60); None = no collision geometry
+    fn so_bsphere(&mut self, obj: u32) -> Option<([f32; 3], f32)> { None }
     /// DAT_003e13b4 object list (chained through +0xe0)
     fn list_3e13b4(&mut self) -> Vec<u32> { Vec::new() }
     /// FUN_0012ff10(anim, obj, 1, 1) root track: (pose at 0, pose at the anim end +0x74) (None: no track)
@@ -910,10 +1055,24 @@ pub trait ClassHost {
     fn vcall_124_v(&mut self, obj: u32, v: [f32; 3]) {}
     /// K21: the loaded world (the run-time spawns of FUN_001cb250 build their objects from it)
     fn k21_world(&mut self) -> Option<std::sync::Arc<World>> { None }
+    /// K21: the class-6 copy records shared by every FUN_001caec8 caller (spawner +0xe8 list heads, copy +0
+    /// owners): the load claims (FUN_001ca8c0) and the C119 spawners' FUN_001cb250 use the same records.
+    /// None = the K21 state keeps its own
+    #[allow(clippy::type_complexity)]
+    fn k21_pool(&mut self) -> Option<(&mut std::collections::HashMap<u32, (usize, i32)>, &mut std::collections::HashMap<(usize, i32), u32>)> { None }
+    /// POOL1 R80: FUN_001caec8 vt +0x54(copy, sp +0x10, ..): the claimed copy object's parent = record `sp`'s owner
+    fn k21_pool_parent(&mut self, copy: usize, sp: u32) {}
+    /// CRAWL R76: the live K6 guard bodies (handle, pos) for FUN_001a62e8
+    fn k6_live_pos(&mut self, live: &[(u32, [f32; 3])]) {}
+    /// CRAWL R85: the live K6 guard body yaws (handle, yaw) next to k6_live_pos (child ALOs follow the body xf)
+    fn k6_live_yaw(&mut self, live: &[(u32, f32)]) {}
     /// K21: FUN_0014f308(0x2ddf40, q) camera projection (x, y, depth); None = no camera
     fn k21_cam_14f308(&mut self, q: [f32; 3]) -> Option<[f32; 3]> { None }
     /// K21: DAT_002ddfd0 camera position (0x2ddf40 +0x90); None = `ClassGlobals::g_2ddfd0`
     fn k21_cam_pos(&mut self) -> Option<[f32; 3]> { None }
+    /// CRAWL R120: the FUN_00168638 VU0 cull (microprogram 0x1c0 = FUN_0014f850 FInsideCmFrustrum): world sphere
+    /// (c, r) at least partly inside the 4 camera side planes; None = no camera
+    fn k21_cam_sphere(&mut self, c: [f32; 3], r: f32) -> Option<bool> { None }
     /// K21: a global word of the EE data (DAT_<addr>; 0 = unset)
     fn k21_global(&mut self, addr: u32) -> u32 { 0 }
     /// K21: FUN_0014cc58 segment a -> b against the world collision: any record = blocked
@@ -955,6 +1114,37 @@ pub trait ClassHost {
     fn k22_title_active_1d9880(&mut self) -> bool { false }
     /// K22: an UNPORTED sequence action (owner handle, subject, the record)
     fn k22_seq_action(&mut self, owner: u32, subj: u32, rec: &[u32; 20]) {}
+    /// EMU5: FUN_001e1e30 case 0x16 teleport: `subj` to the FUN_001e4d40 position / matrix of locator `loc`
+    /// (0 = the subject itself); for a 0x34 subject jt+0x1060 and, when `rec5` == 0 and +0x12f4 == 0,
+    /// FUN_00195a00(jt+0x2c0, 0xb, 0, 0) (-> jts 2) + FUN_001f4e28. Default no-op.
+    fn k22_teleport_1e1e30_16(&mut self, subj: u32, loc: u32, rec5: u32) {}
+    /// FEEL R81: FUN_001e1e30 case 0x2a on a 0x34 subject: FUN_0019f590(subj, {target, pos}) = the jtbs-0x15 hop
+    /// to the target (rec[5] == 1 -> +0x2e8 = 1). Default no-op.
+    fn k22_hop_1e1e30_2a(&mut self, subj: u32, target: u32, rec5: u32) {}
+    /// FEEL R81: FUN_001e3890 case 0x2a: subject +0x2dc (JMP jtbs) == -1. None = no live JT layer drains the hops
+    /// (headless harness) -> the old immediate done.
+    fn k22_hop_done_2a(&mut self, subj: u32) -> Option<bool> { None }
+    /// FEEL R92: FUN_001e1e30 case 0x1a: the subject's +0xf54 != -1 (riding a path, jts 8). None = no live JT
+    /// layer (headless) -> the old behaviour (subject attached).
+    fn k22_on_path_1a(&mut self, subj: u32) -> Option<bool> { None }
+    /// FEEL R92: FUN_001e3890 case 0x1a: request the pipe climb toward `pos` this frame (FUN_001e46a0 case 0x1a)
+    /// and return the last |u - clamp(target u)|. None = done (no live JT layer / not on a path).
+    fn k22_climb_1a(&mut self, subj: u32, pos: [f32; 3]) -> Option<f32> { None }
+    /// FEEL R86: FUN_001e1e30 case 0x2b on a 0x34 subject: FUN_00141968(subj, pos(target), f12, f13) = the ballistic
+    /// launch to the target (bounce pad). Default no-op.
+    fn k22_launch_1e1e30_2b(&mut self, subj: u32, target: u32, f12: f32, f13: f32) {}
+    /// CRAWL R43: FUN_001e1e30 case 0x24 -> FUN_001938c0(subj +0x4c0, mask, target): the JT auto-walk to `target`
+    fn k22_autowalk_1938c0(&mut self, subj: u32, mask: u32, target: u32) {}
+    /// CRAWL R46: FUN_001e3890 case 0x24 -> FUN_001448f0(subj + 0xfd0, pos): the JT walk-to goal, refreshed each
+    /// frame while the record waits
+    /// CRAWL R50: `speed` = rec[5] (FUN_001e46a0 case 0x24 |op[5]|)
+    fn k22_walkto_1448f0(&mut self, subj: u32, pos: [f32; 3], speed: f32) {}
+    /// CRAWL R122: one frame of a k22 0x24 walk of an NPC subject (Murray / Bentley) towards `goal`
+    fn k22_npc_walk_1e46a0(&mut self, subj: u32, goal: [f32; 3], speed: f32) {}
+    /// FEEL R93: FUN_001e46a0 case 0x24 rec[9] != 0 -> joy +0x30 |= 8 (the R1 bit: jts 1 run, not the 0xc walk)
+    fn k22_walk_r1_1e46a0(&mut self, subj: u32) {}
+    /// CRAWL R52: a live player JT exists (EngineHost::jt_live); hosts without one never walk a 0x24 subject
+    fn k22_jt_live(&mut self) -> bool { true }
     /// WP-SCR2: FUN_00143ee0(subj, oid, flags, idx) - slot-87 pose dispatch, routed by the subject's class
     /// (every class 0x34-derived PLAYER-parent impl plays `oid` into subj +0x1030 anim / +0x1034 sm with
     /// the slot-87 index). Default no-op: unported subjects record nothing.
@@ -964,6 +1154,9 @@ pub trait ClassHost {
     fn k22_posing_144038(&mut self, subj: u32) -> bool { false }
     /// K22 sequence action 7: (po vtable +0x27c)(po, 1) = slot 78, switch the controlled character
     fn k22_po_switch(&mut self, po: u32) {}
+    /// HEIST r23: (vtable + `off`)(obj, arg) on an object whose class runs only in the live image (queue port),
+    /// applied by `SpliceState::flush_live_deferred` at the next world update
+    fn live_vcall(&mut self, off: u32, obj: u32, arg: u32) {}
     /// K22: the action-7 switches of this frame (applied by `ClassSet::frame_k22` through `k18_set_active`)
     fn k22_take_po_switches(&mut self) -> Vec<u32> { Vec::new() }
     // ---- K23 (classes/k23_*.rs)
@@ -989,6 +1182,9 @@ pub trait ClassHost {
     fn k26_take_msgs(&mut self) -> Vec<(u32, i32, crate::engine::anim::sm::SmaMsg)> { Vec::new() }
     /// K26: how many of them a ported slot-4 handler received (statistics)
     fn k26_handled(&mut self, n: usize) {}
+    /// WIRE-BM2: FUN_00131290 case 0xb messages of the tick: (target ALO handle, {asega, time, payload}) for
+    /// the owner's slot 4 msg 9 (vt +0x24 of the ASEGA forwards to it)
+    fn k26_take_msg9(&mut self) -> Vec<(u32, [u32; 3])> { Vec::new() }
     /// K27: the owner's slot 4 (vtable +0x2c) is the base FUN_00133590 (empty: the message is consumed)
     fn k27_slot4_base(&mut self, obj: usize) -> bool { false }
     /// K27: FUN_001331f8(obj, msg, 0, 1, args, 0): the object's level-script message `msg` (posted)
@@ -1007,6 +1203,8 @@ pub trait ClassHost {
     fn k27_world_20f0f0(&mut self) {}
     /// K23: FUN_001c6fd8(0x3dd490, kind, pos, src, k) (1644 B, unported)
     fn k23_world_1c6fd8(&mut self, kind: i32, pos: [f32; 3], src: u32, k: i32) {}
+    /// WIRE-OBJ: queued FUN_001c6fd8 requests (kind, pos, src, n) for `ClassSet::k8_drop`
+    fn k8_take_drops(&mut self) -> Vec<(i32, [f32; 3], u32, i32)> { Vec::new() }
     /// K23: FUN_0014d1d0(v, 0x2dded0, index): set a scale of the global clock (sequence action 0x10)
     fn k23_clock_14d1d0(&mut self, v: f32, index: usize) {}
     /// K23: FUN_001fe848(0x3dd040, id): stream `id` (started by FUN_001fe5f0) still playing
@@ -1100,7 +1298,21 @@ pub enum Inst {
 /// Ported instances of a level (object index, state).
 #[derive(Clone, Debug, Default)]
 pub struct ClassSet {
+    /// CRAWL R106: class-44 cameras follow script Add / Remove (k4::frame_k4; also SLY2_R106_CAMWORLD)
+    pub r106_camworld: bool,
     pub g: ClassGlobals,
+    /// ANIM-ALL R34: Sly's (class 53 JT, ported in player/) +0x2a0..+0x2b4 slot-82/83 layer counters
+    /// (FUN_00205478 / FUN_00205588) and +0x12f4 nesting count, by object index
+    pub jt_2a0: std::collections::BTreeMap<usize, ([i32; 6], i32)>,
+    /// ANIM-ALL R45: ASEG (class 109) field 107 -> +0xb0 {t, svt, flags} (FUN_0012f8f0 slot 14 defers
+    /// FUN_0012f8c0 through FUN_00149a50): (ASEG object, t, svt, flags), started at post-load
+    pub aseg_auto: Vec<(usize, f32, f32, u32)>,
+    /// ANIM-ALL R59: class-99 (C2d5450) holders' +0x16c SMA (FUN_001c2d20): (object index, SMA handle)
+    pub sma_99: Vec<(usize, u32)>,
+    /// ANIM-ALL R35: sequence action 0x3b / 0x3c binocucom calls on Sly's JT (FUN_0019cc50 / FUN_0019cce8,
+    /// drained by player/plugin.rs) and the JT's (object handle, HUD state +0xf28) for the sequence waits
+    pub jt_binoc_ops: Vec<k22_seq::GuardOp>,
+    pub jt_binoc_hud: Option<(u32, i32)>,
     pub insts: Vec<(usize, Inst)>,
     /// K3+ classes, kept apart so the K/K2 per-class counts of `insts` stay exact. Objects the overrides
     /// create at run time (class-29 groups) get indices from `w.objects.len()` up.
@@ -1119,6 +1331,11 @@ pub struct ClassSet {
     /// K6 guards (`guard::PORTED_K6`) and the level routines they resolve against
     pub k6: Vec<(usize, Inst)>,
     pub k6l: guard::K6Level,
+    /// HEIST: standalone class-16 sensors (`k16_sensor`)
+    pub sensor16: Vec<(usize, k16_sensor::Sensor16)>,
+    /// HEIST: class-112 launcher record -> its owner's loaded world position (the FUN_001a62e8 origin of a
+    /// record with no transform of its own)
+    pub launcher_owner: std::collections::HashMap<usize, [f32; 3]>,
     /// K7 classes (`k7::PORTED_K7`)
     pub k7: Vec<(usize, Inst)>,
     /// K8 pickups (`k8::PORTED_K8`)
@@ -1133,6 +1350,8 @@ pub struct ClassSet {
     pub k31: Vec<(usize, k31::C2cb9f8)>,
     /// K12 classes (`k12::PORTED_K12`)
     pub k12: Vec<(usize, Inst)>,
+    /// WIRE-EP8 class 24 trigger volumes (`k15_83::C2cc7b0`)
+    pub k24v: Vec<(usize, k15_83::C2cc7b0)>,
     /// K13 classes (`k13::PORTED_K13`)
     pub k13: Vec<(usize, Inst)>,
     /// K14 classes (`k14::PORTED_K14`)
@@ -1149,6 +1368,11 @@ pub struct ClassSet {
     pub k18: Vec<(usize, Inst)>,
     /// K18: DAT_003e138c / world +0x3efc focus among the ported Bentley / Murray instances (object index)
     pub k18_active: Option<usize>,
+    /// POOL1 R98: world +0x4778 / +0x477c (max 4): the objects that follow the focus, registered at load by the
+    /// class-29 method row 489 (thunk 0x105af0 -> FUN_001594d8 -> FUN_001c4848), and the focus they were last
+    /// re-parented to (FUN_001c48c0, handle; 0 = not yet)
+    pub follow_po: Vec<usize>,
+    pub follow_po_at: u32,
     /// K20 classes (class 77 `k20_77`, class 119 `k20_119`)
     pub k20: Vec<(usize, Inst)>,
     /// K21: class-119 spawn state (alert records, template copy owners, spawned guards)
@@ -1159,36 +1383,86 @@ pub struct ClassSet {
     pub k28_sys: Vec<(usize, usize)>,
     /// K22 classes (classes/k22_*.rs)
     pub k22c: Vec<(usize, Inst)>,
+    /// WIRE-MG: DAT_003e138c focus when it is a class-69 turret / scope (player::p23::apply_switches)
+    pub mg_focus: Option<usize>,
     /// K23 classes (classes/k23_*.rs)
     pub k23c: Vec<(usize, Inst)>,
     /// K25 classes (classes/k25_*.rs)
     pub k25c: Vec<(usize, Inst)>,
+    /// WIRE-OBJ: guards whose first knock-out (+0x330) already dropped their coins (FUN_00154e10)
+    pub k8_ko_dropped: Vec<usize>,
 }
+
+static PROF: std::sync::Mutex<Vec<(&'static str, std::time::Duration)>> = std::sync::Mutex::new(Vec::new());
+/// CRAWL R36: add a timed stage to the SLY2_CLS_PROF table
+pub fn prof_add(n: &'static str, e: std::time::Duration) {
+    let mut m = PROF.lock().unwrap();
+    match m.iter_mut().find(|x| x.0 == n) { Some(x) => x.1 += e, None => m.push((n, e)) }
+}
+/// CRAWL R36: scope timer into the SLY2_CLS_PROF table (no-op unless the env var is set)
+pub struct ProfGuard(&'static str, Option<std::time::Instant>);
+impl ProfGuard {
+    pub fn new(n: &'static str) -> Self {
+        let on = *PROF_ON.get_or_init(|| std::env::var_os("SLY2_CLS_PROF").is_some());
+        ProfGuard(n, on.then(std::time::Instant::now))
+    }
+}
+impl Drop for ProfGuard {
+    fn drop(&mut self) {
+        if let Some(t) = self.1 { prof_add(self.0, t.elapsed()); }
+    }
+}
+static PROF_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 impl ClassSet {
     /// Construct + init (slot 6) every ported-class object of `w` (clones included).
     pub fn build(w: &World, h: &mut dyn ClassHost) -> ClassSet {
         let mut s = ClassSet::default();
+        // ANIM-ALL R65: DAT_002c3b90 = 400.0 (.data, never written; PCSX2 000/001/060/150) -> C2d9978 +0x13c (SLY2_R65DOFF)
+        if std::env::var_os("SLY2_R65DOFF").is_none() {
+            s.g.g_2c3b90 = 0x43c8_0000;
+        }
         for (i, o) in w.objects.iter().enumerate() {
             let inst = match o.class {
                 43 => {
                     // K26: the +0xe8 / +0xf4 entry lists from the property methods (FUN_0012eb78)
                     let mut c = c2cabd8::C2cabd8 { added: !crate::engine::game::fields::out_of_world_at_load(w, i), ..Default::default() };
-                    if let Some(p) = props_of(w, o.clone_of.unwrap_or(i)) {
+                    // ANIM-ALL R65: a copy of a copy (FUN_0013e510) carries its source's lists: follow the clone chain to
+                    // the loaded source (hub row 8: 13149 x19 copies of copies had none). SLY2_R65EOFF = one level only
+                    let mut src = o.clone_of.unwrap_or(i);
+                    while std::env::var_os("SLY2_R65EOFF").is_none() && props_of(w, src).is_none() {
+                        match w.objects[src].clone_of.filter(|&c| c != src) { Some(c) => src = c, None => break }
+                    }
+                    if let Some(p) = props_of(w, src) {
                         c.feed(p);
                     }
                     Inst::C2cabd8(c)
                 }
                 33 => {
+                    // ANIM-ALL R63: a copy of a copy (FUN_0013e510 -> vt +0x144) carries its source's state, override
+                    // rows included (PCSX2 EP1 060: the 10 copies of hub obj 83 under 120664 all have +0xf0 {0xdb, ..});
+                    // SLY2_R63OFF = rebuilt from the (absent) source props
+                    let prev = o.clone_of.filter(|_| std::env::var_os("SLY2_R63OFF").is_none()).and_then(|s0| {
+                        s.insts.iter().rev().find(|x| x.0 == s0).and_then(|x| if let Inst::C2ce4d0(c) = &x.1 { Some(c.clone()) } else { None })
+                    });
                     let mut c = c2ce4d0::C2ce4d0 { tpl: k23_32::tpl_new(), ..Default::default() };
-                    if let Some(Payload::Loaded(LoadData::B4(b))) = w.objects.get(o.clone_of.unwrap_or(i)).map(|x| &x.payload) {
-                        if let B4Load::L258598 { props, kind, .. } = &**b {
-                            // K23: class-32 template fields (FUN_002590f0) + load kind
-                            k23_32::feed_tpl(&mut c.tpl, &mut c.f_e0, &mut c.bx, props, *kind);
+                    if let Some(pc) = prev.filter(|_| props_of(w, o.clone_of.unwrap_or(i)).is_none()) {
+                        c = pc;
+                    } else {
+                        if let Some(Payload::Loaded(LoadData::B4(b))) = w.objects.get(o.clone_of.unwrap_or(i)).map(|x| &x.payload) {
+                            if let B4Load::L258598 { props, kind, .. } = &**b {
+                                // K23: class-32 template fields (FUN_002590f0) + load kind
+                                k23_32::feed_tpl(&mut c.tpl, &mut c.f_e0, &mut c.bx, props, *kind);
+                            }
+                        }
+                        if let Some(p) = props_of(w, o.clone_of.unwrap_or(i)) {
+                            c.feed(p);
                         }
                     }
-                    if let Some(p) = props_of(w, o.clone_of.unwrap_or(i)) {
-                        c.feed(p);
+                    // ANIM-ALL R63: the copy's FUN_001c9b08 override rows (555 +0xf4, 590..593 +0xf0 sound, template
+                    // setters) go through the same field table after its own; SLY2_R63OFF = own rows only
+                    if let Some(ov) = w.override_props.get(&i).filter(|_| std::env::var_os("SLY2_R63OFF").is_none()) {
+                        c.feed(ov);
                     }
                     Inst::C2ce4d0(c)
                 }
@@ -1210,7 +1484,16 @@ impl ClassSet {
                 Inst::C2cabd8(c) => c.ee_sub_12eb48(i, h),
                 Inst::C2ce4d0(_) => {}
                 Inst::C2d5120(c) => c.ee_sub_1c2048(i, h),
-                Inst::C2d9040(c) => c.ee_sub_1e5d80(i, h),
+                Inst::C2d9040(c) => {
+                    c.ee_sub_1e5d80(i, h);
+                    // ANIM-ALL R66: the class-10 load FUN_001e5df8 ends in FUN_001e6180 -> FUN_001e6330 (+0x178 = 0,
+                    // +0x148 = -1); copies take the loaded source's state (FUN_0013e510). PCSX2 rec5 024: +0x178 0 on
+                    // the loaded paths (port kept the ctor's 1). Opt-out SLY2_R66BOFF.
+                    if std::env::var_os("SLY2_R66BOFF").is_none() && path_loaded(w, i) {
+                        c.f_178 = 0;
+                        c.f_148 = -1;
+                    }
+                }
                 Inst::C2d9978(c) => c.ee_sub_1f2108(i, owner_bit, s.g.g_2c3b90, h),
                 _ => {}
             }
@@ -1219,18 +1502,30 @@ impl ClassSet {
         s.build_k4(w, h);
         s.build_k5(w, h);
         s.build_k6(w, h);
+        s.build_sensor16(w);
         s.build_k7(w, h);
         s.build_k8(w, h);
         s.build_k9(w, h);
         s.build_k10(w, h);
         s.build_k11(w, h);
         s.build_k12(w, h);
+        s.aseg_auto = aseg_autoplay(w);
         s.build_k13(w, h);
         s.build_k14(w, h);
         s.build_k15(w, h);
         s.build_k15_101(w, h);
         s.build_k15_79(w, h);
         s.build_k15_83(w, h);
+        s.build_k24v(w, h);
+        // POOL1 R98: FUN_001594d8 per load method row 489 (EP3 hub pe_rain_fireflies 67257 / 97630: rec11 012 both
+        // under Sly (+0x10 = oid 7), rec11 005 under the hub focus 17239). Opt-out SLY2_R98_NO_FOLLOWPO.
+        if std::env::var_os("SLY2_R98_NO_FOLLOWPO").is_none() {
+            for (i, o) in w.objects.iter().enumerate() {
+                if o.class == 29 && s.follow_po.len() < 4 && crate::engine::game::fields::object_props(o).is_some_and(|p| p.iter().any(|p| p.field == 489)) {
+                    s.follow_po.push(i);
+                }
+            }
+        }
         s.build_k15_85(w, h);
         s.build_k16(w, h);
         s.build_k18_54(w, h);
@@ -1242,6 +1537,8 @@ impl ClassSet {
         s.build_k23(w, h);
         s.build_k25(w, h);
         s.build_k31(w, h);
+        // ANIM-ALL R65: the C2d9978 +0x2d render mask byte from the load (sw_prox::set_masks; SLY2_R65BOFF)
+        sw_prox::set_masks(&mut s, w);
         s
     }
     /// Fire slot 51 (FUN_0015c690) of every class-33 instance with request flags `r`.
@@ -1283,9 +1580,37 @@ impl ClassSet {
         self.post_load_k15_101(h);
         self.post_load_k15_79(h);
         self.post_load_k15_83(h);
+        self.post_load_k24v(h);
         self.post_load_k15_85(h);
         self.post_k18_55(h);
         self.post_k18_54(h);
+        // ANIM-ALL R57: every Bentley / Murray gets its slot-13 FUN_001a64e8 bind rows at load (FUN_00134770 /
+        // FUN_001b4888 + slot-14 FUN_001400b8 0x2bc9f0), not only when the player switches to it: the parked po's
+        // SetState(0) links its +0x1028 SM (PCSX2 emu_rec5 000 / 025: inactive Bentley / Murray have a live SMA of
+        // SM 418 at +0x1034). REPLACED: the rows are applied after slot 14 (p23::bind_all, which re-enters state 0).
+        if std::env::var_os("SLY2_R57OFF").is_none() {
+            if let Some(w) = h.k21_world() {
+                crate::engine::player::p23::bind_all(&w, self, h);
+            }
+        }
+        // ANIM-ALL R59: class 99 (C2d5450, guard loot holder) post-load FUN_001c2d20: FUN_001a64e8(this, 4,
+        // 0x2c0cb0) binds +0x168 = SM 0x2b2 (row 0x300 -> FUN_0015e938 mode 1), then FUN_001f1448(+0x168, this, -1,
+        // 0, &+0x16c) links its SMA (PCSX2 EP1 060 / EP2 079 / EP3 012: ASEG 20472 on holders 12787, port none).
+        // The +0x16c anim changes of FUN_001f17f8 (loot shine) stay unported. SLY2_R59OFF = no SMA.
+        if std::env::var_os("SLY2_R59OFF").is_none() {
+            if let Some(w) = h.k21_world() {
+                for (i, o) in w.objects.iter().enumerate() {
+                    if o.class != 99 || self.sma_99.iter().any(|x| x.0 == i) {
+                        continue;
+                    }
+                    let sm = h.ee_sub_15e938(1, 0x2b2, i as u32 + 1);
+                    if sm != 0 {
+                        let s = h.ee_sub_1f1448(sm, i as u32 + 1, 0);
+                        self.sma_99.push((i, s));
+                    }
+                }
+            }
+        }
         self.post_load_k20_77(h);
         self.post_load_k20_119(h);
         self.post_load_k21(h);
@@ -1294,6 +1619,12 @@ impl ClassSet {
         self.post_load_k25(h);
         self.post_load_k26(h);
         self.post_load_k31(h);
+        // ANIM-ALL R45: ASEG slot 14 FUN_0012f8f0: +0xb0 set -> FUN_00149a50(world, this, DAT_002a46c8) = the
+        // deferred FUN_0012f8c0(this, +0xb0) = FUN_0012f9b8(p[0], p[1], this, 0, p[2], 0) (q6_runs::ee_sub_12f8c0).
+        // REPLACED: the FUN_00149a50 deferred-call list runs it here, at the end of the post-load pass
+        for &(i, t, svt, flags) in &self.aseg_auto {
+            h.ee_sub_12f9b8(t.to_bits(), svt, i as u32 + 1, 0, flags);
+        }
     }
     /// WP-SCR10: feed warp-volume task entries from SpawnLists into C2dc6f0 instances.
     pub fn feed_warp_tasks(&mut self, wt: &std::collections::HashMap<usize, Vec<[i32; 2]>>) {
@@ -1308,52 +1639,129 @@ impl ClassSet {
         }
     }
     /// One frame of the per-frame overrides (C2d9040 slot 16, C2d9978 slot 18).
+    /// CRAWL R36: SLY2_CLS_PROF per-stage times of `frame` (printed by `prof_dump`)
+    pub fn prof_dump() {
+        {
+            let mut v: Vec<_> = PROF.lock().unwrap().clone();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            for (k, d) in v.iter().take(12) { eprintln!("CLSPROF {k} {:.0} ms", d.as_secs_f64() * 1000.0); }
+        }
+    }
     pub fn frame(&mut self, h: &mut dyn ClassHost) {
+        let prof = *PROF_ON.get_or_init(|| std::env::var_os("SLY2_CLS_PROF").is_some());
+        let mut t0 = std::time::Instant::now();
+        macro_rules! st { ($n:expr) => { if prof { let e = t0.elapsed(); { let mut m = PROF.lock().unwrap(); match m.iter_mut().find(|x| x.0 == $n) { Some(x) => x.1 += e, None => m.push(($n, e)) } } t0 = std::time::Instant::now(); } } }
+        // ANIM-ALL R64: FUN_0014e078 (DAT_002ddf54) + FUN_00147f40 (root proximity set) before the updates
+        if !sw_prox::off() {
+            if let Some(m) = h.sw_frame(self.g.g_2ddfd0) {
+                self.g.g_2ddf54 = m;
+            }
+        }
+        let ch = h.sw_take_masks();
+        sw_prox::apply_masks(self, &ch);
+        st!("sw_frame");
         // K25: live ASEGAs / SMAs (FUN_00130918 over 0x3e1218) before the class slots read them
         h.k25_tick(self.g.dt);
+        st!("k25_tick");
         // K25: velocities / gravity of the class-owned bodies for vcall_10c / FUN_0022d348 / +0xe8 reads
         h.k25_bodies(self.k25_bodies());
+        st!("k25_bodies");
         // K26: SMA state-change messages FUN_001f13a8 of the tick -> owner slot 4 (classes/k26.rs)
         self.frame_k26(h);
+        st!("frame_k26");
         for (i, x) in &mut self.insts {
+            // FEEL R32: slot 15 runs for objects in the world's update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             match x {
                 Inst::C2d9040(c) => c.ee_sub_1e6340(*i, h),
                 Inst::C2d9978(c) => c.ee_sub_1f3c70(*i, self.g.g_2ddf54, h),
                 _ => {}
             }
         }
+        st!("insts");
         self.frame_more(h);
+        st!("frame_more");
         self.frame_k4(h);
+        st!("frame_k4");
         self.frame_k5(h);
+        st!("frame_k5");
         self.frame_k6(h);
+        st!("frame_k6");
+        self.frame_sensor16(h);
         self.frame_k7_classes(h);
+        st!("frame_k7_classes");
+        self.k8_drops(h);
+        st!("k8_drops");
         self.frame_k8(h);
+        st!("frame_k8");
         self.frame_k9(h);
+        st!("frame_k9");
         self.frame_k10(h);
+        st!("frame_k10");
         self.frame_k11(h);
+        st!("frame_k11");
         self.frame_k12(h);
-        self.frame_k13(h);
+        st!("frame_k12");
+        // POOL1: projectile hits / contacts route to the guards (classes/k24.rs)
+        self.with_k24(h, |s, h| s.frame_k13(h));
+        st!("frame_k13");
         self.frame_k14(h);
+        st!("frame_k14");
         self.frame_k15(h);
+        st!("frame_k15");
         // K24: class 101 / 102 with the guard-routing host (classes/k24.rs)
         self.with_k24(h, |s, h| s.frame_k15_101(h));
-        self.frame_k15_79(h);
+        st!("frame_k15_101");
+        self.with_k24(h, |s, h| s.frame_k15_79(h));
+        st!("frame_k15_79");
         self.frame_k15_83(h);
+        st!("frame_k15_83");
+        self.frame_k24v(h);
+        self.frame_follow_po(h);
+        st!("frame_k24v");
         self.frame_k15_85(h);
-        self.frame_k18_55(h);
+        st!("frame_k15_85");
+        // POOL1: Bentley / Murray frames with the guard-routing host (Murray's pick-up reads guard goals)
+        self.with_k24(h, |s, h| s.frame_k18_55(h));
+        st!("frame_k18_55");
         self.frame_k18_54(h);
+        st!("frame_k18_54");
         self.frame_k20_77(h);
+        st!("frame_k20_77");
         self.frame_k21_119(h);
+        st!("frame_k21_119");
         self.frame_k21(h);
+        st!("frame_k21");
         self.frame_k22(h);
+        st!("frame_k22");
         self.frame_k25(h);
+        st!("frame_k25");
     }
 
     /// K3: construct + feed + init (slot 6) the `PORTED_K3` classes.
     fn build_more(&mut self, w: &World, h: &mut dyn ClassHost) {
         self.next_obj = w.objects.len();
         for (i, o) in w.objects.iter().enumerate() {
-            let src = o.clone_of.unwrap_or(i);
+            let mut src = o.clone_of.unwrap_or(i);
+            // ANIM-ALL R58: a copy of a copy (FUN_0013e510 of a copy) carries the root's load state, e.g. the hub's
+            // class-111 SMs under the switch 127865 copies (the 4 second-level 126181 copies played no ASEG 129304);
+            // ANIM-ALL R59: the chain for every class (1:1 FUN_0013e510) no longer breaks the EP2 rail guard, but it
+            // breaks wired_guards_hear_search_and_return_live / wired_guards_sly_knocks_out_guard_live (guard vanishes
+            // from the set; row-8 copy-of-copy classes 6 / 10 / 29 / 33 / 43) -> still class 111 only. SLY2_R58OFF = none.
+            // ANIM-ALL R60: the chain for every class (1:1) except class 29 (C2ceb78 emitters): the hub's ~66
+            // copy-of-copy emitters then run slot 14 (FUN_00159500) with the root's props and draw GameRng, which
+            // shifts the C119 spawner's guard picks (guards [1855,1731] -> [1855,1448], 1855 recycled at frame 760)
+            // and breaks the RNG-dependent wired_guards tests; SLY2_R60CHAIN=29 adds it, SLY2_R60OFF = class 111 only.
+            let chain = o.class == 111
+                || (std::env::var_os("SLY2_R60OFF").is_none() && o.class != 29)
+                || std::env::var("SLY2_R60CHAIN").map_or(false, |v| v.split(',').any(|c| c.trim().parse::<u32>().ok() == Some(o.class as u32)));
+            if std::env::var_os("SLY2_R58OFF").is_none() && chain {
+                while !matches!(&w.objects[src].payload, Payload::Loaded(LoadData::B4(_))) {
+                    match w.objects[src].clone_of.filter(|&c| c != src) { Some(c) => src = c, None => break }
+                }
+            }
             let b4 = match w.objects.get(src).map(|x| &x.payload) {
                 Some(Payload::Loaded(LoadData::B4(b))) => Some(b.as_ref()),
                 _ => None,
@@ -1443,8 +1851,16 @@ impl ClassSet {
                     Inst::C2ce828(c)
                 }
                 6 => {
-                    h.base(0x1ca788, i); // slot 6 inherited from C2d5dc8 (unported)
-                    Inst::C2d6e08(c2d6e08::C2d6e08::default())
+                    h.base(0x1ca788, i); // slot 6 inherited from C2d5dc8
+                    // ANIM-ALL R90: FUN_001ca788's FUN_001a6ca8(o, 0): class-6 roots are SW mode 0 (rec11 012: the
+                    // vt 0x2d6e08 spawners 100068/100159/100294 are mode-0 roots in the R64 set; the port left the LO
+                    // default 2, so R99's sp_watch never claimed their copies). Opt-out SLY2_R90_NO_C6MODE.
+                    if std::env::var_os("SLY2_R90_NO_C6MODE").is_none() {
+                        h.ee_sub_1a6ca8(i, 0);
+                    }
+                    let mut c = c2d6e08::C2d6e08::default();
+                    c.f_e4 = class6_e4(w, i);
+                    Inst::C2d6e08(c)
                 }
                 _ => continue,
             };
@@ -1457,7 +1873,13 @@ impl ClassSet {
         for k in 0..self.more.len() {
             let i = self.more[k].0;
             match &mut self.more[k].1 {
-                Inst::C2d6e08(c) => c.ee_sub_1a5c48(i, h),
+                Inst::C2d6e08(c) => {
+                    c.ee_sub_1a5c48(i, h);
+                    // FEEL R35: slot 22 (FUN_001ca8e0) of an object in the world, as class 7's (K4)
+                    if !h.lo_removed(i) {
+                        c.ee_sub_1ca8e0(i, h);
+                    }
+                }
                 Inst::C2d97a8(c) => c.ee_sub_1f00c8(i, h),
                 Inst::C2da840(c) => {
                     let (anc, oid) = (c.anc, c.oid);
@@ -1484,7 +1906,7 @@ impl ClassSet {
                 None => {
                     let g = self.next_obj;
                     self.next_obj += 1;
-                    let n = c.new_group(h, g);
+                    let n = c.new_group(h, i, g);
                     created.push((oid, g));
                     self.more.push((g, Inst::C2ceb78(n)));
                     g
@@ -1493,6 +1915,20 @@ impl ClassSet {
             // FUN_0011a220(group + 0x11c, obj)
             if let Some((_, Inst::C2ceb78(gc))) = self.more.iter_mut().find(|x| x.0 == g) {
                 gc.f_11c.push(i as u32 + 1);
+            }
+        }
+        // ANIM-ALL R90: FUN_0013e3c8 appends the new group to DAT_003e0e74 (the load's created list), whose slot 14
+        // (FUN_00159500) runs too: PCSX2 EP2 002 groups 34066/34067/17893/105212/17199/119860 have +0x130 =
+        // FUN_0011d448(+0xf8, +0xfc) (24.5 in [20,25], ...). Without it +0x130 = 0 = no emission (the EP2
+        // balcony sparkles). Run after the load objects (batch order assumed). Opt-out SLY2_R90_NO_GRPPOST.
+        // (part of the SLY2_R64 package: the extra load draws shift the R64-off rand stream the old tests pin)
+        if !sw_prox::off() && std::env::var_os("SLY2_R90_NO_GRPPOST").is_none() {
+            for (_, g) in &created {
+                if let Some(k) = self.more.iter().position(|x| x.0 == *g) {
+                    if let Inst::C2ceb78(c) = &mut self.more[k].1 {
+                        let _ = c.ee_sub_159500(*g, &mut self.rng, &self.g, h);
+                    }
+                }
             }
         }
     }
@@ -1510,17 +1946,42 @@ impl ClassSet {
         // K27: sequence guard actions 0x55 / 0x56 (FUN_00171cf8 / FUN_00171d58), run on the guards after
         // the sequence object's update
         let mut running = self.k27_running();
+        // ANIM-ALL R35: the binocucom HUD states the action-0x3b / 0x3c waits read (Bentleys + Sly's JT)
+        let huds: Vec<(u32, i32)> = self
+            .k16
+            .iter()
+            .filter_map(|x| if let Inst::K16(c) = &x.1 { Some((x.0 as u32 + 1, c.binoc.hud)) } else { None })
+            // ANIM-ALL R46: Murray's +0xf28 too (his action-0x3b waits read it the same way)
+            .chain(self.k18.iter().filter_map(|x| if let Inst::K18Murray(c) = &x.1 { Some((x.0 as u32 + 1, c.b.binoc.hud)) } else { None }))
+            .chain(self.jt_binoc_hud)
+            .collect();
         let mut ops = Vec::new();
+        let sigs = h.take_seq_signals();
+        // HEIST r37: FUN_001e4eb8 -> FUN_00143de8(subject, node): the k22 node an is-a-0x34 subject is linked to
+        let mut links: Vec<(u32, u32)> = Vec::new();
         for (i, x) in &mut self.more {
             match x {
                 Inst::C2dc6f0(c) => chain.extend(c.ee_sub_228538(*i, &mut self.g, h)),
-                Inst::C2ceb78(c) => c.ee_sub_159c80(*i, &mut self.rng, &self.g, h),
+                // POOL1 R55: slot 15 runs off the update list only (LO +0x28 bit 60, as FEEL R33's frame loops)
+                Inst::C2ceb78(c) => {
+                    // ANIM-ALL R64: on the update list only while FUN_001a61a0 (root in the proximity set)
+                    if !h.lo_removed(*i) && (sw_prox::off() || h.sw_active(*i)) {
+                        c.ee_sub_159c80(*i, &mut self.rng, &self.g, h);
+                    }
+                }
                 Inst::C2cf1e8(c) => c.ee_sub_163b48(*i, &self.g, h),
                 Inst::C2d8c48(c) => {
+                    // BOSS: FUN_001e0020 signals posted by other classes (guard routine kind 0xf, class 31)
+                    for (_, s) in sigs.iter().filter(|x| x.0 as usize == *i + 1) {
+                        k22_seq::ee_sub_1e0020(c, *s);
+                    }
                     c.k27_running.clone_from(&running);
+                    c.binoc_huds.clone_from(&huds);
                     c.ee_sub_1dfc50(*i, &self.g, h);
                     running.clone_from(&c.k27_running);
                     ops.append(&mut c.k27_ops);
+                    let base = (*i as u32 + 1) << 8;
+                    links.extend(c.k22_nodes.iter().enumerate().filter(|(_, n)| n.f_44 != 0).map(|(k, n)| (n.f_44, base | (k as u32 + 1))));
                     for f in c.k27_world.drain(..) {
                         h.k27_world_20f030(f);
                         h.k27_world_20f0f0();
@@ -1529,7 +1990,23 @@ impl ClassSet {
                 _ => {}
             }
         }
+        // HEIST r37: subject +0x1084 (FUN_00143de8 link / unlink) for Bentley and Murray (C2cb230)
+        let link = |o: usize| links.iter().find(|l| l.0 == o as u32 + 1).map_or(0, |l| l.1);
+        for (o, x) in self.k16.iter_mut().chain(self.k18.iter_mut()) {
+            match x {
+                Inst::K16(c) => c.k22_link = link(*o),
+                Inst::K18Murray(c) => c.b.k22_link = link(*o),
+                _ => {}
+            }
+        }
         for op in ops {
+            self.k27_guard_op(op, h);
+        }
+        // ANIM-ALL R35: Bentley's mode-1 binocucom partner calls (FUN_0019cd38 vt+0x29c / 0x2a4 on +0x40)
+        let mut bops: Vec<_> = self.k16.iter_mut().flat_map(|x| if let Inst::K16(c) = &mut x.1 { std::mem::take(&mut c.binoc_ops) } else { Vec::new() }).collect();
+        // ANIM-ALL R43: Murray's (K19 C2d44c8 +0xf00, the same FUN_0019cd38)
+        bops.extend(self.k18.iter_mut().flat_map(|x| if let Inst::K18Murray(c) = &mut x.1 { std::mem::take(&mut c.b.binoc_ops) } else { Vec::new() }));
+        for op in bops {
             self.k27_guard_op(op, h);
         }
         // FUN_002283d0 hand-over (FUN_002280d0 object); ends because it only acts in state 3 and leaves it
@@ -1539,4 +2016,49 @@ impl ClassSet {
             }
         }
     }
+}
+
+/// FEEL R35 / R37: field 1178 (+0xe4) of a class-6 object's inherited C2d5dc8 load: its (or its load-time
+/// source's) props, then the FUN_001c9b08 mode-1 property list (override kind 5) of the class-6 object itself
+/// (FEEL R39: also the pool host's FUN_001cade0 +0xe4 test)
+pub fn class6_e4(w: &World, i: usize) -> bool {
+    // FEEL R35: field 1178 (+0xe4) of the inherited C2d5dc8 load
+    let mut d = c2d5dc8::C2d5dc8::default();
+    d.feed(w.objects.get(w.objects[i].clone_of.unwrap_or(i)).and_then(crate::engine::game::fields::object_props).unwrap_or(&[]));
+    // the FUN_001c9b08 mode-1 property list (override kind 5) of the class-6 object itself
+    // (FEEL R37: a FUN_0013e510 copy carries its source's +0xe4, e.g. guards' coin spawner 691 copies)
+    let mut src = i;
+    while !matches!(&w.objects[src].payload, Payload::Loaded(LoadData::B4(_))) {
+        match w.objects[src].clone_of.filter(|&c| c != src) { Some(c) => src = c, None => break }
+    }
+    if let Payload::Loaded(LoadData::B4(b)) = &w.objects[src].payload {
+        if let B4Load::Class6 { overrides, .. } = &**b {
+            for o in overrides.iter().filter(|o| o.key == 5 && o.class == 6) {
+                d.feed(o.props.as_deref().unwrap_or(&[]));
+            }
+        }
+    }
+    d.f_e4
+}
+
+/// ANIM-ALL R45: the ASEGs with property field 107 (array {f32 t, f32 svt, u32 flags} at +0xb0; EP4 K12 sign
+/// ASEGs oid 21853 / 19914: {0, 1, 8 = loop}) -> (object, t, svt, flags)
+pub fn aseg_autoplay(w: &World) -> Vec<(usize, f32, f32, u32)> {
+    use crate::engine::world::props::{ArrayItem, PropValue};
+    let mut out = Vec::new();
+    for (i, o) in w.objects.iter().enumerate() {
+        if o.class != 109 {
+            continue;
+        }
+        let Some(a) = crate::engine::playerdraw::aseg_of(w, i) else { continue };
+        let Some(PropValue::Array(v)) = a.props.iter().rev().find(|p| p.field == 107).map(|p| &p.value) else { continue };
+        let words: Vec<u32> = v.iter().filter_map(|x| match x {
+            ArrayItem::One(_, b) if b.len() >= 4 => Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            _ => None,
+        }).collect();
+        if words.len() >= 3 {
+            out.push((i, f32::from_bits(words[0]), f32::from_bits(words[1]), words[2]));
+        }
+    }
+    out
 }

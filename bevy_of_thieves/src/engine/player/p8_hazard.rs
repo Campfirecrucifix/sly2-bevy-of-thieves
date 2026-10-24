@@ -65,6 +65,8 @@ pub struct VolPart {
 #[derive(Clone, Debug)]
 pub struct Water {
     pub obj: usize,
+    /// FEEL R88: out of the world at load (LO +0x28 bit 60 clear: the update 0x228e50 never runs)
+    pub oow: bool,
     pub oid: i32,
     pub isa: Vec<i32>,
     /// FUN_001a62e8(water)
@@ -81,6 +83,44 @@ pub struct Water {
 }
 
 impl Water {
+    /// FEEL R88: 0x00229468(water, obj, 0, 0) for the segment a -> b: the parts FUN_001f7e08(water, 0x229d60)
+    /// gathers (0x229d60: part +0x10 bit 50 clear = !PART_SKIP), FUN_0014cdb0 segment clip of each (BSP: 0x118668;
+    /// sphere parts: segment / sphere); returns the clipped fraction t_exit - t_enter (0 = no hit).
+    pub fn FUN_00229468(&self, a: V3, b: V3) -> f32 {
+        let mut best = 0.0f32;
+        for pt in &self.parts {
+            if pt.flags & PART_SKIP != 0 {
+                continue;
+            }
+            if pt.flags & PART_SPHERE != 0 {
+                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let f = [a[0] - pt.centre[0], a[1] - pt.centre[1], a[2] - pt.centre[2]];
+                let qa = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                let qb = 2.0 * (f[0] * d[0] + f[1] * d[1] + f[2] * d[2]);
+                let qc = f[0] * f[0] + f[1] * f[1] + f[2] * f[2] - pt.radius * pt.radius;
+                let disc = qb * qb - 4.0 * qa * qc;
+                if qa > 0.0 && disc > 0.0 {
+                    let r = disc.sqrt();
+                    let (t0, t1) = (((-qb - r) / (2.0 * qa)).max(0.0), ((-qb + r) / (2.0 * qa)).min(1.0));
+                    if t1 > t0 {
+                        best = best.max(t1 - t0);
+                    }
+                }
+            }
+            if let Some((g, bsp)) = &pt.bsp {
+                if bsp.nodes.is_empty() {
+                    continue;
+                }
+                let mut out = Vec::new();
+                let n = crate::engine::physics::bsp::FUN_00118668(g, bsp, 0, 0x7fffffff, a, b, 0x10, &mut out);
+                for l in out.iter().take(n) {
+                    best = best.max(l.t[1] - l.t[0]);
+                }
+            }
+        }
+        best
+    }
+
     /// 0x001f72f8 (slot 72): point in any non-skipped part (sphere or BSP solid).
     pub fn FUN_001f72f8(&self, p: V3) -> bool {
         for pt in &self.parts {
@@ -167,6 +207,7 @@ impl Hazards {
             let pos = if alo.base.bones.is_empty() { [0.0; 3] } else { bw.get(w, i, 0)[3] };
             waters.push(Water {
                 obj: i,
+                oow: crate::engine::game::fields::out_of_world_at_load(w, i),
                 oid: o.oid as i32,
                 isa: class_isa(o.class),
                 pos,
@@ -193,14 +234,27 @@ pub struct JtP8 {
     pub water: Option<usize>,
     /// jt+0x10a0
     pub off_10a0: f32,
-    /// ALO +0x110 kind bytes (0x1f78d8 input; REPLACED: zeros)
+    /// ALO +0x110 kind bytes (0x1f78d8 input). BOSS R21: the JT init FUN_0013ff70 sets them with
+    /// FUN_001f7918(jt, 0x3ffffff, 0) then FUN_001f7918(jt, 0x10ff00, 8) (rec7 / rec11 Sly +0x110 match)
     pub zap_110: [u8; 26],
 }
 
 impl Default for JtP8 {
     fn default() -> Self {
-        Self { water: None, off_10a0: JT_10A0, zap_110: [0; 26] }
+        Self { water: None, off_10a0: JT_10A0, zap_110: FUN_001f7918([0; 26], 0x10ff00, 8) }
     }
+}
+
+/// 0x001f7918(obj, mask, v): +0x110 byte i = v for every mask bit i < 26 (on a copy of the table).
+pub const fn FUN_001f7918(mut t: [u8; 26], mask: u32, v: u8) -> [u8; 26] {
+    let mut i = 0;
+    while i < 26 {
+        if mask & (1 << i) != 0 {
+            t[i] = v;
+        }
+        i += 1;
+    }
+    t
 }
 
 /// 0x001f78d8: OR of the +0x110 bytes of every kind bit < 26.
@@ -288,9 +342,42 @@ pub fn FUN_001a2460(jt: &mut Jt, hz: &mut Hazards, now: f32, anim: &mut dyn JtAn
 /// REPLACED 0x228e50 / 0x229468 / 0x140f90 cases 4 and 5: jt+0x108c = the water holding the JT position or
 /// the 0x1a2460 sample point.
 pub fn water_contacts(jt: &mut Jt, hz: &Hazards) {
+    if r88_water() {
+        let (a, b) = water_segment_229468(jt);
+        jt.p8.water = hz.waters.iter().position(|w| !w.oow && w.FUN_00229468(a, b) != 0.0);
+        if std::env::var_os("SLY2_FEEL_WATERDBG").is_some() {
+            if let Some(wi) = jt.p8.water {
+                let w = &hz.waters[wi];
+                eprintln!("WATERDBG oow {} pos {:?} seg {a:?}->{b:?} water oid {} frac {} in(c) {} in(a) {} in(b) {} jts {} jtbs {} att {}", w.oow, jt.phys.pos, w.oid, w.FUN_00229468(a, b), w.FUN_001f72f8(jt.phys.pos), w.FUN_001f72f8(a), w.FUN_001f72f8(b), jt.jts, jt.jtbs, jt.attach.kind);
+            }
+        }
+        return;
+    }
     let p = sample_point(jt);
     let c = jt.phys.pos;
     jt.p8.water = hz.waters.iter().position(|w| w.FUN_001f72f8(c) || w.FUN_001f72f8(p));
+}
+
+/// FEEL R88: the 0x228e50 membership test 1:1 (SLY2_FEEL_R88WATER=0 = the REPLACED point test above).
+pub fn r88_water() -> bool {
+    std::env::var("SLY2_FEEL_R88WATER").map_or(true, |v| v != "0")
+}
+
+/// FEEL R88: FUN_00229468's segment for the JT (is-a 0x33): a = SO position (port pos + 45) with z += jt+0x248
+/// (-75, = port pos - 30, the feet) and, with a ground record (+0x208), max'd with the ground point z +0x238;
+/// b = the same xy at the SO bounds node max z (*(jt+0xec)+0x18; the hull's world top, REPLACED pos + 150 without
+/// a hull).
+pub fn water_segment_229468(jt: &Jt) -> (V3, V3) {
+    let so = [jt.phys.pos[0], jt.phys.pos[1], jt.phys.pos[2] - super::JT_RADIUS - super::JT_K248];
+    let mut za = so[2] + super::JT_K248;
+    if jt.rec_208 {
+        za = za.max(jt.z_contact);
+    }
+    let zb = match jt.hull.as_ref() {
+        Some(h) => h.world_so(&jt.phys.rot, so).0.verts.iter().fold(f32::MIN, |m, v| m.max(v[2])),
+        None => jt.phys.pos[2] + 150.0,
+    };
+    ([so[0], so[1], za], [so[0], so[1], zb])
 }
 
 /// Per frame after `Jt::update` (world update 0x226550 order: 0x1f77c0, water updates, JT 0x1a2460).

@@ -335,6 +335,8 @@ pub struct AttachTarget {
     /// +0x1c0 / +0x1c4: edge force params (p4 FUN_00194170)
     pub f_1c0: f32,
     pub f_1c4: f32,
+    /// FEEL R95: class 0xb (pipe) +0x1c0 frame axis (object-local, prop 838; FUN_001c3390 default DAT_002a2da0 = (1,0,0))
+    pub axis_1c0: V3,
     /// path data when IsA(class, 10) (rope / rail): +0xe0.. (+0xe4 looped)
     pub path: Option<Path>,
     /// +0x1c8 guide path
@@ -358,6 +360,7 @@ impl AttachTarget {
             f_1bc: 0,
             f_1c0: 0.0,
             f_1c4: 0.0,
+            axis_1c0: [1.0, 0.0, 0.0],
             path: None,
             guide: None,
             anchor: None,

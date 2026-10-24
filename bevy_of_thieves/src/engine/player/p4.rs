@@ -230,10 +230,14 @@ fn seg_in_grab(c: V3, a: V3, b: V3) -> bool {
 impl Jt {
     /// Contacts of the JT this frame (REPLACED source of jt+0xec+100).
     pub fn contacts(&self, cw: &CollisionWorld) -> Vec<JtContact> {
-        let c = self.phys.pos;
+        let c = add(self.phys.pos, self.hang_so_ofs()); // FEEL R78: SO position
         let v = self.velocity();
         let mut out = Vec::new();
         for (k, col) in cw.colliders.iter().enumerate() {
+            // CRAWL R61: SO parts: the FUN_0020faa0 bounds node gather
+            if col.bbox.is_some() && !col.near(c, LEDGE_GRAB_R) {
+                continue;
+            }
             if let Some((sc, sr)) = col.sphere {
                 let d = sub3(sc, c);
                 if dot(d, d) > (sr + LEDGE_GRAB_R) * (sr + LEDGE_GRAB_R) {
@@ -277,11 +281,24 @@ impl Jt {
             Some(h) => {
                 let ctx = super::p5_hull::JtCtx {
                     rot: self.phys.rot,
-                    pos: self.phys.pos,
+                    // FEEL R78: hull frame = SO position (pos + 45 for Sly, as the motor's world_so)
+                    pos: add(self.phys.pos, self.hang_so_ofs()),
                     v: self.velocity(),
                     w: self.phys.w,
                     jts: self.jts,
                     jtbs: self.jtbs,
+                    // FEEL R77: also on the ledge climb-up jump (JMP kind 3, FUN_00195a00(3) from the hang): the
+                    // replacement sphere (radius 105 around P0) reached the climbed edge ~115 under Sly at the apex and
+                    // FUN_00199d48 re-grabbed it; the hull itself is far above it (capture cap_feel_wall_step3_ledge:
+                    // lands on top at +86.8 over the hang). SLY2_FEEL_CLIMBTOUCH=0 = old (full sphere).
+                    // FEEL R79: every jump (the 0x1aa1d8 hull pairs cannot reach outside the hull + 8 on any jump;
+                    // R56's all-jump try predates the 1:1 hang height, R77). Opt-in SLY2_FEEL_R79TOUCH=1: the no-stick climb
+                    // test then picks a new ledge (edge z 381.7) whose climb re-grabs (jtbs 17); open.
+                    // FEEL R90: DEFAULT (SLY2_FEEL_R79TOUCH=0 = old full sphere): the sphere grabbed an object's top
+                    // edge ~150 under a Sly falling onto that top and the hang pulled him down through it (USER
+                    // PLAYTEST 'falls through the floor when jumping on top of objects', feel_r90_probe_object_land:
+                    // 6 of 106 drops -> 0); the edge-381.7 re-grab is a top Sly slides back off (test skips it).
+                    rope_jump: (self.rope_jump || std::env::var("SLY2_FEEL_R79TOUCH").map_or(true, |v| v != "0") || (self.kind == 3 && std::env::var("SLY2_FEEL_CLIMBTOUCH").map_or(true, |v| v != "0"))) && self.jts == super::JTS_JUMP,
                     t_18d4: self.t_jtbs,
                     t: self.t,
                 };
@@ -294,7 +311,7 @@ impl Jt {
     /// 0x001999d0(jmp, geom obj, pos, kind, feature, &dir): ledge direction from the contact feature, then
     /// FUN_001997d8 (REPLACED, see module doc).
     pub fn FUN_001999d0(&self, cw: &CollisionWorld, ct: &JtContact) -> Option<V3> {
-        let g = &cw.colliders[ct.collider].geom;
+        let g = &cw.colliders.get(ct.collider)?.geom; // original holds a geom pointer; a stale port index (list shrank) = no contact
         let dir = match ct.kind {
             2 => {
                 let s = g.surfs.get(ct.feature)?;
@@ -310,8 +327,10 @@ impl Jt {
                         // (1:1), else the P4 stand-in (REPLACED grab volume, sphere mode)
                         let (va, vb) = (g.verts[ed.a as usize], g.verts[ed.b as usize]);
                         let grab = match &self.hull {
-                            Some(h) => h.clip_edge(&self.phys.rot, self.phys.pos, va, vb),
-                            None => seg_in_grab(self.phys.pos, va, vb),
+                            // FEEL R78: the hull frame is the SO position (as world_so in the contact gen), not the
+                            // port pos (45 below); SLY2_FEEL_HANGSO=0 = old
+                            Some(h) => h.clip_edge(&self.phys.rot, add(self.phys.pos, self.hang_so_ofs()), va, vb),
+                            None => seg_in_grab(add(self.phys.pos, self.hang_so_ofs()), va, vb), // FEEL R78: SO frame
                         };
                         if grab {
                             found = true;
@@ -567,6 +586,17 @@ impl Jt {
         if let Some(tg) = self.target_attach(target) {
             self.calls.push((CALL_ATTACH, kind));
             self.attach_real(kind, target, member, tg, anim);
+            return;
+        }
+        // BOSS R22: kind 1 (TNT barrel, jtbs 6 arrival) needs no target data: the real FUN_00192bd8
+        if kind == 1 && target.is_some() {
+            self.calls.push((CALL_ATTACH, kind));
+            let mut x = std::mem::take(&mut self.att);
+            let mut ev = Vec::new();
+            super::p5_attach::attach_to(self, &mut x, None, kind, target, member, &mut ev);
+            self.att = x;
+            self.att_tg = None;
+            self.apply_attach_ev(ev, anim);
             return;
         }
         self.calls.push((0x00192bd8, -1));

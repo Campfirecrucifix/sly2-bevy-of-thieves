@@ -327,7 +327,7 @@ pub fn ee_sub_16da48<M: QMem + ?Sized>(m: &mut M, this: u32, pass_a: i32, pass_b
     let tag = stack_push(m, 0x10); // tag[0]=uStack_a0, tag[1]=auStack_9c[0]
     let s9c = tag + 4;
     let w64 = |m: &mut M, b: u32, reg: u32, val: u64| {
-        m.call(0x0016_6e90, &[b, reg, val as u32, (val >> 32) as u32], &[]);
+        crate::engine::game::q_00166008::ee_sub_166e90(m, b, reg as u64, val); // VER3: full 64-bit data (adapter drops a3)
     };
     m.call(0x0016_0918, &[this, 0x0025_c1c0, 0x0025_e040], &[]);
     m.call(0x0015_74b8, &[this], &[]);

@@ -597,6 +597,8 @@ pub struct PickIn<'a> {
     pub vel: V3,
     pub centre: V3,
     pub hofs: V3,
+    /// FEEL R98: FUN_001a62e8 xform translation - `pos` (port pos is the JT point, Sly SO = pos + 45 up)
+    pub so_ofs: V3,
     /// *(jt+0xe8)+0x80 gravity
     pub g: V3,
     /// jt+0x1020 reach radius, jt+0x1f30 surface standoff
@@ -1053,6 +1055,11 @@ pub fn FUN_0019b110(inp: &PickIn, forced: Option<usize>, world: &dyn ClearWorld)
             continue;
         }
         let f = is_f(x.id);
+        // FEEL R98: 0x19abf0 / 0x19c300 run on p = FUN_001a62e8 (the xform translation = port pos + so_ofs); the aim
+        // is that xform's target, so it goes back to the port pos frame (- so_ofs). Capture cap_feel_r97_pipe_hop_fixed:
+        // pick lq 50, T 0.325, xf aim (-1749.2,-3897.1,568.9) = ballistic(T) from the xform. Opt-out SLY2_FEEL_NO_R98PICKSO.
+        let so = if std::env::var_os("SLY2_FEEL_NO_R98PICKSO").is_some() { ZERO } else { inp.so_ofs };
+        let p = add(p, so);
         let pc = path.FUN_001e6f60(p);
         if !f {
             if p[2] - pc.cp[2] > x.range {
@@ -1080,9 +1087,11 @@ pub fn FUN_0019b110(inp: &PickIn, forced: Option<usize>, world: &dyn ClearWorld)
         let wp = path.FUN_001e6f10(lq).0;
         let (T, _) = inner(wp);
         let (_, aim, av) = FUN_0019c300(p, v, g, inp.reach, T, add(wp, mul(x.vel, T)));
+        let aim = sub(aim, so);
         if !f && clear(T, v, aim, av, Some(wp), ClearFilter::Layer) {
             continue;
         }
+        if std::env::var_os("SLY2_K22DBG").is_some() { eprintln!("R93DBG 0xf pc.l {} lq {lq} wp {wp:?} T {T} aim {aim:?} hofs {hofs:?} p {p:?} v {v:?} reach {}", pc.l, inp.reach); }
         kind = 0xf;
         obj = x.id;
         aim_pt = add(aim, hofs);
@@ -1290,6 +1299,14 @@ pub fn FUN_00195fb8(st: &mut JmpFlight, new: i32, target: Option<usize>, vel: V3
                 fx.push(if is_player { Fx::Call(0x0018e540, -1) } else { Fx::Call(0x001ccac0, -1) });
             }
         }
+        // BOSS R22: exit 6 (barrel flight): jmp+0xc = 0; unless worn (jt+0x4c8 == 1, checked by the lead)
+        // FUN_00134320 + (barrel +0x17c == 1) FUN_00183b80(barrel, 0); xf kind 2, jt+0x190 = 0
+        6 => {
+            fx.push(Fx::Call(0x0018_3b80, 0));
+            st.xf.kind = 2;
+            fx.push(Fx::XfKind(2));
+            fx.push(Fx::Clear190);
+        }
         -1..=5 => {}
         _ => fx.push(Fx::ExitUnported(old)),
     }
@@ -1307,6 +1324,14 @@ pub fn FUN_00195fb8(st: &mut JmpFlight, new: i32, target: Option<usize>, vel: V3
             // *(jmp+0x174) ledge-hang cleanup (FUN_00204da8 / FUN_00140c88) belongs to jtbs 0x11 (mod.rs)
             st.last = None;
             st.kind = -1;
+        }
+        // BOSS R22: entry 6 (barrel flight): xf kind 0x11, FUN_00134320, FUN_00183b80(barrel, 1), jt+0x190 = 0
+        // (ASEG *(jt+0x1030)+0x14 not modelled)
+        6 => {
+            st.xf.kind = 0x11;
+            fx.push(Fx::XfKind(0x11));
+            fx.push(Fx::Call(0x0018_3b80, 1));
+            fx.push(Fx::Clear190);
         }
         9 | 0xa | 0x10 | 0x12 => {
             st.xf.kind = 0x11;
@@ -1598,6 +1623,7 @@ mod tests {
             vel,
             centre: pos,
             hofs: [0.0, 0.0, 0.0],
+            so_ofs: [0.0, 0.0, 0.0],
             g: G,
             reach: 30.0,
             standoff: 20.0,

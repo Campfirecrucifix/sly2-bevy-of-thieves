@@ -17,6 +17,38 @@ use crate::engine::classes::{ClassHost, ClassSet};
 use crate::engine::playerdraw::vis::{PO_BIND_2BC390, PO_BIND_2C0270};
 use crate::engine::world::World;
 
+/// ANIM R25: FUN_001a0300 plain blends of a Bentley / Murray: (out field, first entry ASEG member; 8 entries
+/// stride 0x20) - Bentley FUN_001347a8 (+0x13e0 -> +0x14e0, +0x14f0 -> +0x15f0), Murray (+0x16f0 -> +0x17f0).
+pub fn plain_fields(class: u16) -> &'static [(u32, u32)] {
+    match class {
+        CLASS_BENTLEY => &[(0x14e0, 0x13e4), (0x15f0, 0x14f4)],
+        CLASS_MURRAY => &[(0x17f0, 0x16f4)],
+        _ => &[],
+    }
+}
+
+/// ANIM R25: the plain blend the po's +0x1030 slot plays now: Bentley SetState 5 (FUN_00135248: +0x14e0,
+/// flags 9) / state-6 sub-state 1 (FUN_00136040: +0x15f0), Murray state-9 sub-state 2 (FUN_001b5d30: +0x17f0).
+/// REPLACED: the blend is not a run-time ASEG handle (the class layer's FUN_001a0300 hook builds nothing), so the
+/// request is read back from the class state.
+pub fn po_plain(set: &mut crate::engine::classes::ClassSet, o: usize, class: u16) -> Option<u32> {
+    match class {
+        CLASS_BENTLEY => {
+            let b = set.k16_get(o)?;
+            match b.state {
+                5 => Some(0x14e0),
+                6 if b.f_16b0 == 1 => Some(0x15f0),
+                _ => None,
+            }
+        }
+        CLASS_MURRAY => {
+            let b = &set.k18_murray(o)?.b;
+            (b.state == 9 && b.m.i(0x17f4) == 2).then_some(0x17f0)
+        }
+        _ => None,
+    }
+}
+
 /// Slot-13 FUN_001a64e8 table of a Bentley / Murray class.
 pub fn bind_table(class: u16) -> &'static [(u32, i32, u32)] {
     match class {
@@ -62,6 +94,8 @@ pub fn bind_all(w: &World, set: &mut ClassSet, h: &mut dyn ClassHost) -> Vec<usi
     let objs: Vec<(usize, u16)> = w.objects.iter().enumerate().filter(|(_, o)| o.class == CLASS_BENTLEY || o.class == CLASS_MURRAY).map(|(i, o)| (i, o.class)).collect();
     for (o, class) in objs {
         let rows = ee_sub_1a64e8(o, bind_table(class), h);
+        // slot 14 base JtVis_load_1400b8: FUN_001a64e8(self, 0x35, 0x2bc9f0) (carry-machine ASEGs +0x11b0 / +0x1910 ...)
+        let base_rows = ee_sub_1a64e8(o, &crate::engine::playerdraw::vis::JT_BIND_2BC9F0, h);
         let mem = match class {
             CLASS_BENTLEY => set.k16_get(o).map(|b| &mut b.m),
             _ => set.k18_murray(o).map(|m| &mut m.b.m),
@@ -71,11 +105,12 @@ pub fn bind_all(w: &World, set: &mut ClassSet, h: &mut dyn ClassHost) -> Vec<usi
         if m.u(0x1028) != 0 {
             continue;
         }
-        for (off, r) in rows {
+        for (off, r) in rows.into_iter().chain(base_rows) {
             if (off as usize) / 4 < m.0.len() {
                 m.set_u(off, r);
             }
         }
+        crate::engine::player::p26::ee_sub_21f388_k(m, if class == CLASS_BENTLEY { 0x11b0 } else { 0x1910 });
         match class {
             CLASS_BENTLEY => {
                 set.k18_with(o, h, |c, cx| {
@@ -152,8 +187,28 @@ pub fn apply_switches(w: &World, set: &mut ClassSet, h: &mut dyn ClassHost, q: S
             _ => None,
         };
         let Some(m) = mem else { continue };
-        let cx = super::p26::CarryCx { owner: o as u32 + 1, bentley: bh, bentley_1800: b1800, t, dt, ..Default::default() };
+        // carried [4] +0x10 / reference [3] +0x10 (FUN_002206c8 -1: same parent -> the carried is dropped, state 4)
+        let (carried, refo) = (m.u(off + 0x10), m.u(off + 0xc));
+        let (carried_10, ref_10) = (h.parent_10(carried), h.parent_10(if refo != 0 { refo } else { o as u32 + 1 }));
+        let cx = super::p26::CarryCx { owner: o as u32 + 1, bentley: bh, bentley_1800: b1800, t, dt, carried_10, ref_10, ..Default::default() };
         let Some(r) = super::p26::ee_sub_2206c8(m, off, s, &cx, h, &mut |_, _| None) else { continue };
+        // POOL1: run the machine's anim play (FUN_001305b8(0, 1.0, anim, owner, mode, owner + 0x1030)) and the
+        // carried's vt +0x264 state calls (pool copies: FUN_00224ec8)
+        for &(a, x, k) in &r.calls {
+            match a {
+                0x001305b8 if x != 0 => {
+                    let mut sl = m.u(0x1034);
+                    h.ee_sub_1f15b8(&mut sl);
+                    m.set_u(0x1034, sl);
+                    let mut a = m.u(0x1030);
+                    crate::engine::classes::shared::anim::ee_sub_1305b8(0, 1.0, x, o as u32 + 1, k as u32, &mut a, h);
+                    m.set_u(0x1030, a);
+                    h.vcall(o as u32 + 1, 0x2d4);
+                }
+                0x264 if x != 0 => h.vcall_arg(x, 0x264, k),
+                _ => {}
+            }
+        }
         // the leave-3 call precedes the state write in the original; both precede the enter-3 call
         calls.extend(r.slot78.into_iter().map(|x| (x, 1)));
     }
@@ -173,6 +228,24 @@ pub fn apply_switches(w: &World, set: &mut ClassSet, h: &mut dyn ClassHost, q: S
             super::p20::CLASS_SLY if k == 1 && set.k18_active.is_some() => {
                 super::p22::set_active_character(w, set, h, None);
                 out.push(None);
+            }
+            // WIRE-MG: class 69 (C2dbd80 turret / scope) inherits C2d5898 slot 78 FUN_001c3ed8: k == 1 makes it
+            // the DAT_003e138c focus (old focus +0x27c(0), FUN_001c4940 -> +0x274(1) = slot 77 camera policy 9 on);
+            // k <= 0 on the focus drops it (FUN_001c4940(0) -> +0x274(0))
+            69 if k == 1 && set.mg_focus != Some(o) => {
+                if set.k18_active.is_some() {
+                    super::p22::set_active_character(w, set, h, None);
+                }
+                set.mg_focus = Some(o);
+                if let Some(crate::engine::classes::Inst::K22C69(c)) = set.k22c(o) {
+                    c.ee_sub_225ae8(o, true, h);
+                }
+            }
+            69 if k <= 0 && set.mg_focus == Some(o) => {
+                set.mg_focus = None;
+                if let Some(crate::engine::classes::Inst::K22C69(c)) = set.k22c(o) {
+                    c.ee_sub_225ae8(o, false, h);
+                }
             }
             // other classes' slot 78 is their own (vault class 78, class 70 FUN_001d7418): no switch
             _ => {}
@@ -223,15 +296,22 @@ pub fn blend_events_between(w: &crate::engine::world::World, b: &crate::engine::
 
 /// FUN_00131290 for fired events `(index, reverse)` of `aseg` into `sink` (+0x1c = the event time, as
 /// anim::play::fire sets it). Returns the effect calls made (kind 6 retract has none).
+/// event index of a `dispatch_events` entry meaning the whole retract list (+0xa8, `Aseg::events2`)
+pub const RETRACT_EVENTS: usize = usize::MAX;
+/// HEIST r16: event index meaning the whole start list (+0x98, `Aseg::events0`) FUN_0012f9b8 fires at creation
+pub const START_EVENTS: usize = usize::MAX - 1;
 pub fn dispatch_events(aseg: &crate::engine::anim::aseg::Aseg, fired: &[(usize, bool)], sink: &mut dyn crate::engine::anim::events::EffectSink) -> usize {
     use crate::engine::anim::play::Asega;
     let mut n = 0;
     for &(i, rev) in fired {
-        let Some(ev) = aseg.events1.get(i) else { continue };
-        let mut a = Asega { t: ev.time.unwrap_or(0.0), ..Default::default() };
-        if let Some(c) = crate::engine::anim::events::ee_sub_131290(&mut a, ev, rev) {
-            sink.call(&mut a, c);
-            n += 1;
+        // R53: `RETRACT_EVENTS` = the +0xa8 list FUN_00130b18 fires when the ASEGA is retracted
+        let evs: &[crate::engine::anim::aseg::Event] = if i == RETRACT_EVENTS { &aseg.events2 } else if i == START_EVENTS { &aseg.events0 } else { aseg.events1.get(i..=i).unwrap_or(&[]) };
+        for ev in evs {
+            let mut a = Asega { t: ev.time.unwrap_or(0.0), ..Default::default() };
+            if let Some(c) = crate::engine::anim::events::ee_sub_131290(&mut a, ev, rev) {
+                sink.call(&mut a, c);
+                n += 1;
+            }
         }
     }
     n

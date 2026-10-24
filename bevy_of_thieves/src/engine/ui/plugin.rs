@@ -42,7 +42,8 @@ use super::settings::{self as opt, GraphicsOpts, SavePaths, SavedOpts};
 use super::title::{self, TitleInput};
 use crate::engine::audio::AudioSystem;
 use crate::engine::game::app::LevelGame;
-use crate::engine::game::settings::{Lighting, Settings};
+use crate::engine::game::settings::Lighting;
+use crate::settings::PortSettings as Settings;
 use crate::engine::gfx::game::GfxSettings;
 use super::strings::{LevelStrings, StringTable};
 use crate::engine::camera::hud::{Anchor, HudLayout};
@@ -138,6 +139,7 @@ impl Plugin for UiPlugin {
         let cap = std::env::var("SLY2_UI_CAPTION").ok().filter(|s| !s.is_empty());
         let cap_id = std::env::var("SLY2_UI_CAPTION_ID").ok().and_then(|s| parse_int(&s));
         let flag = |k: &str| std::env::var(k).ok().is_some_and(|v| !v.is_empty() && v != "0");
+        app.add_plugins(super::live_menu::LiveMenuPlugin);
         app.insert_resource(UiCaption(cap))
             .insert_resource(UiCaptionId(cap_id))
             .insert_resource(UiGame {
@@ -184,9 +186,18 @@ impl Plugin for UiPlugin {
             .add_systems(Update, (capture_strings.after(crate::engine::disc::poll_level_loads).before(crate::engine::world::build_world), (port_mouse, ui_update, title_from_sequence.after(crate::engine::classes::plugin::tick_classes).before(crate::engine::game::app::lend_classes), episode_update, port_options, hud_meter, draw_ui).chain()))
             // A11: draw_ui in Update (was PostUpdate): Bevy's sprite_mesh `add_mesh` (PostUpdate, unordered)
             // queued `insert(Mesh2d)` on sprites draw_ui despawned in the same frame -> panic with any open menu
-            .add_systems(Update, sync_overlay_camera)
+            // C4: same frame as the GI switch (else one frame with CM Msaa::Off vs overlay Msaa 4 -> wgpu
+            // "Attachments have differing sample counts" and the app quits)
+            .add_systems(PostUpdate, {
+                #[cfg(feature = "rt")]
+                let s = sync_overlay_camera.after(crate::engine::gfx::rt::rt_switch);
+                #[cfg(not(feature = "rt"))]
+                let s = sync_overlay_camera;
+                s
+            })
             .init_resource::<RtState>()
-            .add_systems(Update, sync_gi.after(port_options));
+            .add_systems(Update, (sync_gi.after(port_options), sync_live_graphics.after(port_options)))
+            .add_systems(Update, cursor_grab.after(ui_update));
     }
 }
 
@@ -202,7 +213,7 @@ pub struct UiCamera;
 pub fn sync_overlay_camera(
     mut commands: Commands,
     cm: Query<(Has<bevy::camera::Hdr>, Option<&Msaa>, Option<&bevy::camera::CameraMainTextureUsages>), (With<crate::engine::camera::bevy_sync::CmCamera>, Without<UiCamera>)>,
-    ui: Query<(Entity, Has<bevy::camera::Hdr>, Option<&Msaa>, Option<&bevy::camera::CameraMainTextureUsages>), With<UiCamera>>,
+    ui: Query<(Entity, Has<bevy::camera::Hdr>, Option<&Msaa>, Option<&bevy::camera::CameraMainTextureUsages>), With<Camera2d>>, // C4: every 2D overlay (HUD, wipe, FMV)
 ) {
     let Some((hdr, msaa, usages)) = cm.iter().next() else { return };
     let msaa = msaa.copied().unwrap_or_default();
@@ -304,19 +315,38 @@ fn load_settings() -> Option<(std::path::PathBuf, Settings)> {
 
 /// Graphics page values from settings.toml; "Ray traced" only offered with feature `rt` and a GPU that has
 /// Solari's wgpu features.
-fn init_graphics_opts(mut game: ResMut<UiGame>, pad: Option<Res<PadInput>>, #[cfg(feature = "rt")] dev: Option<Res<bevy::render::renderer::RenderDevice>>) {
+fn init_graphics_opts(mut game: ResMut<UiGame>, pad: Option<Res<PadInput>>, st: Option<Res<RtState>>, live: Option<Res<crate::settings::LiveGraphics>>, #[cfg(feature = "rt")] dev: Option<Res<bevy::render::renderer::RenderDevice>>) {
     #[cfg(feature = "rt")]
     let rt_available = dev.is_some_and(|d| d.features().contains(bevy::solari::SolariPlugins::required_wgpu_features()));
     #[cfg(not(feature = "rt"))]
     let rt_available = false;
     let s = game.settings.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
-    game.menu.gfx = GraphicsOpts { raytraced: rt_available && s.lighting == Lighting::Raytraced, rt_available, hor_plus: s.hor_plus, ink_outlines: s.ink_outlines };
+    // C4: the GI the app was BUILT with (RtState::requested = settings.toml or `--gi`) wins over a re-read of
+    // settings.toml, else sync_gi would immediately switch a `--gi raytraced` start back to raster
+    let raytraced = initial_gi(st.map(|st| st.requested), s.lighting == Lighting::Raytraced, rt_available);
+    game.menu.gfx = GraphicsOpts { raytraced, rt_available, hor_plus: s.hor_plus, ink_outlines: s.ink_outlines, rt_quality: s.rt_quality.index(), hud_stretch: s.hud_stretch, upscale: s.upscale };
+    // PERF2: the app's start values (settings.toml + `--rt-quality` / `--hud`) win, as for the GI above
+    if let Some(l) = live {
+        game.menu.gfx.rt_quality = l.rt_quality.index();
+        game.menu.gfx.hud_stretch = l.hud_stretch;
+        game.menu.gfx.upscale = l.upscale;
+    }
     // A11: the GI the app runs with = what bin/game.rs gave gfx::rt::RtPlugin at App build
     let rt_running = game.menu.gfx.raytraced;
-    game.menu.video = VideoOpts { width: s.width, height: s.height, fullscreen: s.fullscreen, vsync: s.vsync, win_w: s.width as f32, win_h: s.height as f32, rt_running };
+    game.menu.video = VideoOpts { width: s.width, height: s.height, fullscreen: s.fullscreen, exclusive: s.window_mode == crate::settings::WindowModeOpt::Fullscreen, vsync: s.vsync, win_w: s.width as f32, win_h: s.height as f32, rt_running };
     game.menu.audio = AudioOpts { master: s.master_volume, music: s.music_volume, sfx: s.sfx_volume };
     game.menu.mods = ModsOpts::scan(&crate::engine::game::settings::exe_dir().join("mods"), &s.mods);
     game.menu.controls = pad.map(|p| controls_rows(&p.bindings)).unwrap_or_default();
+}
+
+/// C4: Graphics-page GI at startup: `requested` (RtState = settings.toml or `--gi`, as given to RtPlugin) wins
+/// over the settings.toml re-read; ray tracing only when the GPU has Solari's features (else warn + raster).
+pub fn initial_gi(requested: Option<bool>, settings_rt: bool, rt_available: bool) -> bool {
+    let want = requested.unwrap_or(settings_rt);
+    if want && !rt_available {
+        warn!("global illumination: ray tracing requested but this GPU lacks the required features; using raster");
+    }
+    want && rt_available
 }
 
 /// A12: Graphics-page GI choice -> `RtState::requested` (live switch in rt builds), greyed-row reason, and the
@@ -417,7 +447,7 @@ fn port_options(
                     if w.resolution.width() as u32 != v.width || w.resolution.height() as u32 != v.height {
                         w.resolution.set(v.width as f32, v.height as f32);
                     }
-                    w.mode = if v.fullscreen { bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary) } else { bevy::window::WindowMode::Windowed };
+                    w.mode = v.window_mode().bevy();
                     w.present_mode = if v.vsync { bevy::window::PresentMode::AutoVsync } else { bevy::window::PresentMode::AutoNoVsync };
                 }
             }
@@ -431,7 +461,8 @@ fn port_options(
     let mods = game.menu.mods.enabled();
     let any_mods = events.contains(&MenuEvent::Mods);
     if let Some((path, s)) = game.settings.as_mut() {
-        (s.width, s.height, s.fullscreen, s.vsync) = (v.width, v.height, v.fullscreen, v.vsync);
+        (s.width, s.height, s.vsync) = (v.width, v.height, v.vsync);
+        s.window_mode = v.window_mode();
         (s.master_volume, s.music_volume, s.sfx_volume) = (a.master, a.music, a.sfx);
         if any_mods {
             s.mods = mods;
@@ -450,20 +481,41 @@ fn parse_int(s: &str) -> Option<i32> {
 }
 
 /// FUN_0013df80 tail: level strings + FUN_00210be0(0x3e1c20) when a level load result arrives.
-fn capture_strings(mut game: ResMut<UiGame>, res: Option<Res<LevelLoadResult>>) {
+/// WIRE-C3: mod text overrides (`ModOverlay::text_overrides`, keyed by original string id), applied to
+/// the level strings on every level load. Insert from the binary; absent = original text.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ModText(pub std::collections::BTreeMap<i32, Vec<u8>>);
+
+/// Replace (or add) the overridden ids in the level strings.
+pub fn apply_mod_text(strings: &mut LevelStrings, text: &ModText) {
+    for (id, t) in &text.0 {
+        match strings.0.iter_mut().find(|(k, _)| k == id) {
+            Some(e) => e.1 = t.clone(),
+            None => strings.0.push((*id, t.clone())),
+        }
+    }
+}
+
+fn capture_strings(mut game: ResMut<UiGame>, res: Option<Res<LevelLoadResult>>, text: Option<Res<ModText>>) {
     let Some(res) = res else { return };
     if !res.is_changed() {
         return;
     }
     let Ok(l) = &res.0 else { return };
     game.strings = LevelStrings::from_header(&l.header.strings);
+    if let Some(t) = text {
+        apply_mod_text(&mut game.strings, &t);
+    }
     game.table = StringTable::with_level_ids(&game.strings);
     game.meter_init = false;
 }
 
 /// A12: FUN_001d9968 (level init, FUN_001d9520) / FUN_001d9df8 (per frame, FUN_001d9648) on the HUD meter.
 /// The port JT is Sly (class 0x35); dt = frame time (DAT_002dded4).
-fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>, classes: Option<Res<crate::engine::classes::plugin::Classes>>) {
+fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>, classes: Option<Res<crate::engine::classes::plugin::Classes>>, lent: Option<NonSend<crate::engine::game::vm_state::SpliceState>>) {
+    // CRAWL R111 (ANIM-ALL R80): between lend_classes and return_classes the live host is the scripts' copy
+    // (SpliceState.sched.cls.host) and Classes::host an empty default -> HUD counts read 0 (SLY2_NO_R111_HUDLENT = old)
+    let host = lent.as_deref().filter(|s| s.sched.cls.set.is_some() && std::env::var_os("SLY2_NO_R111_HUDLENT").is_none()).map(|s| &s.sched.cls.host).or(classes.as_deref().map(|c| &c.host));
     let jt = players.iter().next().map(|p| super::meter::MeterJt {
         id: 1,
         cls: 0x35,
@@ -488,11 +540,11 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
         if let Some(t) = game.countdown_carry.take() {
             game.slots.FUN_001618f8(t, time.elapsed_secs());
         }
-        game.slot_feed = classes.as_ref().map_or((0, 0), |c| (c.host.hud_coins, c.host.hud_bottles));
-        game.timer_feed = classes.as_ref().map_or(0, |c| c.host.hud_timer.0);
+        game.slot_feed = host.map_or((0, 0), |c| (c.hud_coins, c.hud_bottles));
+        game.timer_feed = host.map_or(0, |c| c.hud_timer.0);
         // WP-UI4: FUN_001a3020 (level init) resets the vault HUD object to hidden; sync the request counter
         game.hud_vault = false;
-        game.vault_feed = classes.as_ref().map_or(0, |c| c.host.hud_vault.0);
+        game.vault_feed = host.map_or(0, |c| c.hud_vault.0);
         // debug hook (port): SLY2_HUD_POP=1 pops the coin / bottle labels and a 30 s countdown
         if std::env::var("SLY2_HUD_POP").is_ok_and(|v| v == "1") {
             let now = time.elapsed_secs();
@@ -505,8 +557,8 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
     }
     // A14: FUN_00161868 / FUN_001618b0 requests of the class runtime (K8 coin / bottle pickups, K9 vault)
     let now = time.elapsed_secs();
-    if let Some(c) = classes.as_ref() {
-        let feed = (c.host.hud_coins, c.host.hud_bottles);
+    if let Some(c) = host {
+        let feed = (c.hud_coins, c.hud_bottles);
         if feed.0 > game.slot_feed.0 {
             game.slots.FUN_00161868(now);
         }
@@ -515,19 +567,19 @@ fn hud_meter(mut game: ResMut<UiGame>, players: Query<&Player>, time: Res<Time>,
         }
         game.slot_feed = feed;
         // WP-K33: loot countdown (FUN_001618f8 / FUN_00161958 of the loot system)
-        if c.host.hud_timer.0 != game.timer_feed {
-            game.timer_feed = c.host.hud_timer.0;
-            if c.host.hud_timer.1 >= 0.0 {
-                game.slots.FUN_001618f8(c.host.hud_timer.1, now);
+        if c.hud_timer.0 != game.timer_feed {
+            game.timer_feed = c.hud_timer.0;
+            if c.hud_timer.1 >= 0.0 {
+                game.slots.FUN_001618f8(c.hud_timer.1, now);
             } else {
                 game.slots.FUN_00161958(now);
             }
         }
         // WP-UI4: vault / safe HUD object 0x2e1e60 (FUN_001a3078 show / FUN_001a30d0 hide) on the
         // class-78 vault +0x3d80 edges
-        if c.host.hud_vault.0 != game.vault_feed {
-            game.vault_feed = c.host.hud_vault.0;
-            game.hud_vault = c.host.hud_vault.1;
+        if c.hud_vault.0 != game.vault_feed {
+            game.vault_feed = c.hud_vault.0;
+            game.hud_vault = c.hud_vault.1;
         }
     }
     game.slots.meter_shown = game.meter.health_shown || game.meter.power_shown;
@@ -634,6 +686,9 @@ fn ui_update(
     if game.menu.depth > 0 && *prev_depth == 0 {
         card_refresh(game, &card, slots.as_deref(), lg.as_deref());
     }
+    if game.menu.depth != *prev_depth {
+        info!("ui: menu depth {} -> {}", *prev_depth, game.menu.depth);
+    }
     *prev_depth = game.menu.depth;
     // WP-EP1e: the memory-card dialog 0x2e6550 (FUN_001accc8) runs before the menu; while one of its
     // messages is up the menu gets no input
@@ -683,6 +738,10 @@ fn ui_update(
                     game.menu.depth = 0;
                     game.menu.state = 0;
                     game.title = true;
+                    // LOOK M2: FUN_001660f8 = FUN_001a4e08(0x2e1e88): the boot queue again (was only the title flag)
+                    if e == MenuEvent::Quit {
+                        crate::engine::game::boot::FUN_001660f8();
+                    }
                 }
             }
             MenuEvent::Graphics => apply_graphics(game, gfx.as_deref()),
@@ -706,6 +765,7 @@ fn ui_update(
             game.menu.depth = 0;
             game.menu.state = 0;
             game.title = true;
+            crate::engine::game::boot::FUN_001660f8();
         }
     }
     // the dialog message (REPLACED: screen string 0x52c) as the caption
@@ -731,6 +791,22 @@ fn ui_update(
             a.music_volume = o.music;
             a.sfx_volume = o.effects;
         }
+    }
+}
+
+/// FEEL R80 (port addition, user playtest: the mouse left the window while it turned the camera): while a level
+/// is being played (no menu / title) and the window has focus, the cursor is hidden and confined to the window;
+/// menus, the title and focus loss give it back. SLY2_FEEL_R80CURSOR=0 = never grab.
+fn cursor_grab(game: Res<UiGame>, players: Query<&Player>, mut windows: Query<(&Window, &mut bevy::window::CursorOptions), With<bevy::window::PrimaryWindow>>, mut off: Local<Option<bool>>) {
+    if *off.get_or_insert_with(|| std::env::var("SLY2_FEEL_R80CURSOR").is_ok_and(|v| v == "0")) {
+        return;
+    }
+    let Ok((w, mut c)) = windows.single_mut() else { return };
+    let grab = w.focused && game.menu.depth == 0 && !game.title && !players.is_empty();
+    let mode = if grab { bevy::window::CursorGrabMode::Confined } else { bevy::window::CursorGrabMode::None };
+    if c.grab_mode != mode || c.visible == grab {
+        c.grab_mode = mode;
+        c.visible = !grab;
     }
 }
 
@@ -817,6 +893,9 @@ fn apply_graphics(game: &mut UiGame, _gfx: Option<&GfxSettings>) {
     };
     s.hor_plus = o.hor_plus;
     s.ink_outlines = o.ink_outlines;
+    s.rt_quality = crate::settings::RtQuality::from_index(o.rt_quality);
+    s.hud_stretch = o.hud_stretch;
+    s.upscale = o.upscale;
     if o.rt_available {
         s.lighting = if o.raytraced { Lighting::Raytraced } else { Lighting::Raster };
     }
@@ -841,6 +920,7 @@ fn draw_ui(
     old: Query<Entity, With<UiSprite>>,
     time: Res<Time>,
     mut last: Local<Option<(UiFrame, HudLayout)>>,
+    live_menu: Option<Res<super::live_menu::LiveMenuView>>,
 ) {
     let Some(mut ui) = ui else { return };
     let mut f = UiFrame::default();
@@ -874,6 +954,10 @@ fn draw_ui(
         hud::binoc(&game.binoc, &mut f);
         // WP-UI4: vault / safe HUD object 0x2e1e60 (FUN_001a3078 / FUN_001a30d0)
         hud::vault(game.hud_vault, &mut f);
+    }
+    // WIRE-UI: the live ThiefNet screen 0x3da150 (queue store, `ui::live_menu`)
+    if let Some(tn) = live_menu.as_ref().and_then(|v| v.thiefnet.as_ref()) {
+        hud::thiefnet(&mut ui.fonts, tn, &|id| game.table.FUN_00210ca8(id as i32).to_vec(), &mut f);
     }
     if game.menu.depth > 0 {
         hud::menu(&mut ui.fonts, &game.bindings, &game.strings, &ctx, &mut f);
@@ -1140,4 +1224,13 @@ fn play_movies(q: &mut crate::engine::game::fmv::MovieQueue, f: &mut crate::engi
         q.special = [crate::engine::game::flow::static_desc(0x2a3968), crate::engine::game::flow::static_desc(0x2a39a8)];
     }
     q.ee_sub_1b3b08(FREE_MEM, f);
+}
+
+/// WIRE-OPT: Graphics page -> `settings::LiveGraphics` (RT quality and HUD layout apply live).
+fn sync_live_graphics(game: Res<UiGame>, live: Option<ResMut<crate::settings::LiveGraphics>>) {
+    let Some(mut live) = live else { return };
+    let want = crate::settings::LiveGraphics { rt_quality: crate::settings::RtQuality::from_index(game.menu.gfx.rt_quality), hud_stretch: game.menu.gfx.hud_stretch, upscale: game.menu.gfx.upscale };
+    if *live != want {
+        *live = want;
+    }
 }

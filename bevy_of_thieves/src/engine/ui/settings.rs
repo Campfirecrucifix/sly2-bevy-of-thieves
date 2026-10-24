@@ -333,7 +333,21 @@ pub struct GraphicsOpts {
     pub rt_available: bool,
     pub hor_plus: bool,
     pub ink_outlines: bool,
+    /// WIRE-OPT: settings.toml `[graphics] rt_quality` (0 low, 1 medium, 2 high, 3 auto; live)
+    pub rt_quality: u8,
+    /// WIRE-OPT: `[graphics] hud = "stretch"` (else the centred 16:9 safe area; live)
+    pub hud_stretch: bool,
+    /// UPSCALE: `[graphics] render_scale / gi_scale / sharpness / upscaler` (live)
+    pub upscale: crate::engine::gfx::upscale::UpscaleOpts,
 }
+
+impl Default for GraphicsOpts {
+    fn default() -> Self {
+        GraphicsOpts { raytraced: false, rt_available: false, hor_plus: true, ink_outlines: true, rt_quality: 3, hud_stretch: false, upscale: Default::default() }
+    }
+}
+
+use crate::engine::gfx::upscale::opts::SCALES as UP_SCALES;
 
 /// Rows of the Graphics page (row kind, label).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +355,12 @@ pub enum GfxRow {
     Lighting,
     HorPlus,
     Ink,
+    RtQuality,
+    Hud,
+    RenderScale,
+    GiScale,
+    Sharpness,
+    Upscaler,
 }
 
 impl GraphicsOpts {
@@ -348,9 +368,17 @@ impl GraphicsOpts {
         let mut r = Vec::new();
         if self.rt_available {
             r.push(GfxRow::Lighting);
+            r.push(GfxRow::RtQuality);
         }
         r.push(GfxRow::HorPlus);
         r.push(GfxRow::Ink);
+        r.push(GfxRow::Hud);
+        r.push(GfxRow::RenderScale);
+        if self.rt_available {
+            r.push(GfxRow::GiScale);
+        }
+        r.push(GfxRow::Sharpness);
+        r.push(GfxRow::Upscaler);
         r
     }
 
@@ -361,6 +389,12 @@ impl GraphicsOpts {
             GfxRow::Lighting => format!("GI: {}", if self.raytraced { "Ray traced" } else { "Off" }),
             GfxRow::HorPlus => format!("Aspect: {}", if self.hor_plus { "Hor+" } else { "Original" }),
             GfxRow::Ink => format!("Ink Outlines: {}", on(self.ink_outlines)),
+            GfxRow::RtQuality => format!("RT Quality: {}", ["Low", "Medium", "High", "Auto"][self.rt_quality.min(3) as usize]),
+            GfxRow::Hud => format!("HUD: {}", if self.hud_stretch { "Stretch" } else { "Centre" }),
+            GfxRow::RenderScale => format!("Render Scale: {}", UP_SCALES[(self.upscale.scale as usize).min(3)].1),
+            GfxRow::GiScale => format!("RT Scale: {}", if self.upscale.gi_scale == 0 { "Same" } else { UP_SCALES[(self.upscale.gi_scale as usize).min(3)].1 }),
+            GfxRow::Sharpness => format!("Sharpness: {}%", self.upscale.sharp.min(10) * 10),
+            GfxRow::Upscaler => format!("Upscaler: {}", crate::engine::gfx::upscale::opts::METHODS[(self.upscale.method as usize).min(1)].1),
         }
     }
 
@@ -369,6 +403,12 @@ impl GraphicsOpts {
             GfxRow::Lighting => self.raytraced = self.rt_available && !self.raytraced,
             GfxRow::HorPlus => self.hor_plus = !self.hor_plus,
             GfxRow::Ink => self.ink_outlines = !self.ink_outlines,
+            GfxRow::RtQuality => self.rt_quality = (self.rt_quality.min(3) + 1) % 4,
+            GfxRow::Hud => self.hud_stretch = !self.hud_stretch,
+            GfxRow::RenderScale => self.upscale.scale = (self.upscale.scale.min(3) + 1) % 4,
+            GfxRow::GiScale => self.upscale.gi_scale = (self.upscale.gi_scale.min(3) + 1) % 4,
+            GfxRow::Sharpness => self.upscale.sharp = (self.upscale.sharp.min(10) + 1) % 11,
+            GfxRow::Upscaler => self.upscale.method = (self.upscale.method.min(1) + 1) % 2,
         }
     }
 }

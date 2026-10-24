@@ -5,25 +5,28 @@ use crate::engine::classes::q::q5util::f4;
 
 const UP: u32 = 0x002a_2dc0;
 
+// all lane ops saturate like the VU0 (no inf / NaN, denormals flush): math::vu0::fix
+use crate::engine::math::vu0::fix;
 fn sub(a: V4, b: V4) -> V4 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
+    std::array::from_fn(|i| fix(a[i] - b[i]))
 }
 fn add(a: V4, b: V4) -> V4 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+    std::array::from_fn(|i| fix(a[i] + b[i]))
 }
 fn scale(a: V4, s: f32) -> V4 {
-    [a[0] * s, a[1] * s, a[2] * s, a[3] * s]
+    a.map(|x| fix(x * s))
 }
 /// vmul + vaddabc + vmaddbc: x*x + y*y + z*z, then vsqrt / vdiv vf00w: 1 / |a|
 fn inv_len(a: V4) -> f32 {
-    1.0 / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+    crate::engine::math::vu0::vdiv(1.0, crate::engine::math::vu0::vsqrt(dot3(a, a)))
 }
 /// vopmula(s, t) / vopmsub(t, s): s x t on xyz, w kept from `w`
 fn cross(s: V4, t: V4, w: f32) -> V4 {
-    [s[1] * t[2] - t[1] * s[2], s[2] * t[0] - t[2] * s[0], s[0] * t[1] - t[0] * s[1], w]
+    let c = |a: f32, b: f32, d: f32, e: f32| fix(fix(a * b) - fix(d * e));
+    [c(s[1], t[2], t[1], s[2]), c(s[2], t[0], t[2], s[0]), c(s[0], t[1], t[0], s[1]), w]
 }
 fn dot3(a: V4, b: V4) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    fix(fix(fix(a[0] * b[0]) + fix(a[1] * b[1])) + fix(a[2] * b[2]))
 }
 
 /// FUN_00221408(track, q, out_local, out_dir): camera-track frame at the track's current
@@ -52,7 +55,7 @@ pub fn ee_sub_221408<M: QMem + ?Sized>(m: &mut M, o: u32, q: V4, out: u32, dir: 
     } else {
         let rad = m.rf(o + 0x160);
         let u = m.rf(o + 0x140);
-        let r = m.call(0x0011_e1a0, &[], &[f4(u / rad), f4(rad), f4(0.0)]).1;
+        let r = m.call(0x0011_e1a0, &[], &[f4(crate::engine::math::ps2f::ps2_div(u, rad)), f4(rad), f4(0.0)]).1;
         origin = add(m.rv(o + 0x150), r);
         let up = m.rv(UP);
         let t = cross(up, r, up[3]);
@@ -261,6 +264,169 @@ mod tests {
     use super::*;
     use crate::engine::classes::q::q2mem::FlatMem;
 
+    /// FUN_001a8b50 (disassembly 0x1a8b50-0x1a90d0): one A edge whose B faces have no BSP path (0x1a86b8 = 0) ->
+    /// the face with the smaller plane distance to [A]+0x70, its vertex u16[e+0x54 + sel*2], kind 1 contact
+    /// (d = plane . v - w); n1 = 0 and the list head unchanged -> the kind 0xd fallback at [A]+0x70 / DAT_002a2dc0.
+    #[test]
+    fn mesh_1a8b50_vertex_face_and_fallback() {
+        fn route(m: &mut FlatMem, addr: u32, a: &[u32], _v: &[V4]) -> Option<(u32, V4)> {
+            match addr {
+                0x001a_80d8 => Some((1, [0.0; 4])),
+                0x001a_8410 if a[0] == 1 => {
+                    m.w32(a[5], 0x5000);
+                    Some((0, [0.0; 4]))
+                }
+                _ => None,
+            }
+        }
+        let mut m = FlatMem { route: Some(route), ..Default::default() };
+        let (a, b, o, pts, e, ee, fa, fb, list) = (0x1000, 0x2000, 0x1800, 0x3000, 0x5000, 0x5800, 0x6000, 0x6020, 0x7000);
+        m.w32(a, o);
+        m.wv(o + 0x70, [0., 0., 0., 1.]);
+        m.w32(a + 0x94, pts);
+        m.wv(pts, [1., 2., 3., 1.]);
+        m.wv(pts + 16, [4., 5., 6., 1.]);
+        m.w32(b + 0x9c, fa);
+        m.w32(e + 0x4c, fa);
+        m.w32(e + 0x50, fb);
+        m.w32(e + 0x54, ee);
+        m.w16(ee + 2, 1);
+        m.wv(e + 0x20, [0., 0., 1., 5.]); // d1 = -5
+        m.wv(e + 0x30, [0., 0., 1., -2.]); // d2 = 2 -> face +0x50, sel = +0x58 = 0
+        m.wv(fb, [1., 0., 0., 0.5]);
+        m.wv(0x002a_2dc0, [0., 0., 1., 0.]);
+        ee_sub_1a8b50(&mut m, 0x100, a, b, 0, 0, 0, list);
+        let c: Vec<_> = m.calls.iter().filter(|c| c.0 == 0x001a_7c18).cloned().collect();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].1, vec![0x100, a, b, 1, pts, fb, list]);
+        assert_eq!(c[0].2, vec![[0.5, 0., 0., 0.], [1., 2., 3., 1.], [1., 0., 0., 0.5]]);
+        assert_eq!(c[1].1, vec![0x100, a, b, 0xd, 0, 0, list]);
+        assert_eq!(c[1].2, vec![[0.0; 4], [0., 0., 0., 1.], [0., 0., 1., 0.]]);
+        let ord: Vec<u32> = m.called().into_iter().filter(|&x| x != 0x0025_64b8).collect();
+        assert_eq!(ord, vec![0x001a_80d8, 0x001a_81f8, 0x001a_8410, 0x001a_8410, 0x001a_87f0, 0x001a_87f0, 0x001a_86b8, 0x001a_7c18, 0x001a_7c18]);
+    }
+
+    /// FUN_001a8b50 edge / edge: 0x1a86b8 finds one B segment, FUN_0011ea60 st = (0.5, 0.25) -> pa = lerp(A seg),
+    /// pb = lerp(B seg), kind 3 contact with depth -|pa - pb|, pos pa, the 0x11ea60 normal; no fallback (n1 = 0 but
+    /// the list head is FUN_001a7c18's job: FlatMem leaves it, so the 0xd add follows).
+    #[test]
+    fn mesh_1a8b50_edge_edge() {
+        fn route(m: &mut FlatMem, addr: u32, a: &[u32], _v: &[V4]) -> Option<(u32, V4)> {
+            match addr {
+                0x001a_80d8 => Some((1, [0.0; 4])),
+                0x001a_8410 if a[0] == 1 => {
+                    m.w32(a[5], 0x5000);
+                    Some((0, [0.0; 4]))
+                }
+                0x001a_86b8 => {
+                    m.w32(a[4], 0x5100);
+                    Some((1, [0.0; 4]))
+                }
+                0x0011_ea60 => {
+                    m.wf(a[0], 0.5);
+                    m.wf(a[0] + 4, 0.25);
+                    m.wv(a[1], [0., 1., 0., 0.]);
+                    Some((1, [0.0; 4]))
+                }
+                _ => None,
+            }
+        }
+        let mut m = FlatMem { route: Some(route), ..Default::default() };
+        let (a, b, pa_, pb_, list) = (0x1000, 0x2000, 0x3000, 0x3800, 0x7000);
+        m.w32(a + 0x94, pa_);
+        m.w32(b + 0x94, pb_);
+        m.wv(pa_, [0., 0., 0., 1.]);
+        m.wv(pa_ + 16, [2., 0., 0., 1.]);
+        m.wv(pb_, [0., 3., 0., 1.]);
+        m.wv(pb_ + 16, [4., 3., 0., 1.]);
+        m.w32(b + 0x9c, 0x6000);
+        m.w32(0x5000 + 0x4c, 0x6000);
+        m.w32(0x5000 + 0x50, 0x6040);
+        m.w32(0x5000 + 0x54, 0x5800);
+        m.w16(0x5802, 1);
+        m.w32(0x5100 + 0x54, 0x5900);
+        m.w16(0x5902, 1);
+        ee_sub_1a8b50(&mut m, 0x100, a, b, 0, 0, 0, list);
+        let i = m.calls.iter().position(|c| c.0 == 0x001a_86b8).unwrap();
+        assert_eq!(m.calls[i].1, vec![0x6000, 0, 2, 0, m.calls[i].1[4]]);
+        let c: Vec<_> = m.calls.iter().filter(|c| c.0 == 0x001a_7c18).cloned().collect();
+        assert_eq!(c[0].1, vec![0x100, a, b, 3, 0x5800, 0x5900, list]);
+        assert_eq!(c[0].2, vec![[-3.0, 0., 0., 0.], [1., 0., 0., 1.], [0., 1., 0., 0.]]);
+        assert_eq!(m.calls.iter().find(|c| c.0 == 0x0011_ea60).unwrap().2, vec![[0., 0., 0., 1.], [2., 0., 0., 1.], [0., 3., 0., 1.], [4., 3., 0., 1.]]);
+    }
+
+    /// FUN_001a87f0 (decomp text_001a0000.c): vertex P = b+0x94[verts[0]]; chain faces F1 (dmin 1) / F2 (dmin 0.5)
+    /// -> F1 kept (largest min distance over P and the chain's far vertices u16[+0x54 + (1 - sel) * 2]); visited bit
+    /// 8 cleared; kind 1 (d0 = 1, P, F1) then kind 2 for each chain point +0x10 below d0 (node 1 only).
+    #[test]
+    fn mesh_1a87f0_pick_face() {
+        let mut m = FlatMem::default();
+        let (b, pts, verts, chains, n1, n2, f1, f2, e1, e2) = (0x1000, 0x3000, 0x4000, 0x4100, 0x5000, 0x5100, 0x6000, 0x6040, 0x5800, 0x5900);
+        m.w32(b + 0x94, pts);
+        m.wv(pts, [0., 0., 0., 1.]);
+        m.wv(pts + 16, [1., 0., 0., 1.]);
+        m.wv(pts + 32, [0., 1., 0., 1.]);
+        m.wf(0x002a_6ad0, -1.0e30);
+        m.w32(chains, n1);
+        for (n, f, e, nx, q) in [(n1, f1, e1, n2, [0., 0., -0.5, 1.]), (n2, f2, e2, 0, [0., 0., 5., 1.])] {
+            m.w32(n + 0x50, f);
+            m.w32(n + 0x54, e);
+            m.w32(n + 0x5c, nx);
+            m.wv(n + 0x10, q);
+        }
+        m.w16(e1 + 2, 1);
+        m.w16(e2 + 2, 2);
+        m.wv(f1, [0., 0., 1., -1.]);
+        m.wv(f2, [1., 0., 0., -0.5]);
+        ee_sub_1a87f0(&mut m, 0x100, b, 0x200, 1, verts, chains, 0x7000);
+        let c: Vec<_> = m.calls.iter().filter(|c| c.0 == 0x001a_7c18).cloned().collect();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].1, vec![0x100, b, 0x200, 1, pts, f1, 0x7000]);
+        assert_eq!(c[0].2, vec![[1., 0., 0., 0.], [0., 0., 0., 1.], [0., 0., 1., -1.]]);
+        assert_eq!(c[1].1, vec![0x100, b, 0x200, 2, e1, f1, 0x7000]);
+        assert_eq!(c[1].2, vec![[0.5, 0., 0., 0.], [0., 0., -0.5, 1.], [0., 0., 1., -1.]]);
+        assert_eq!(m.r32(f1 + 0x18) & 8, 0);
+        assert_eq!(m.r32(f2 + 0x18) & 8, 0);
+    }
+
+    /// FUN_001aa1d8 (disassembly 0x1aa1d8): body a1 radius 10 < a2 radius 20 -> fp = a2 (outer loop), s5 = a1.
+    /// Plain SOs (no bit 48 / 49, no geom +0x18, +0xa8 == +0xac): FUN_00118a88(fp SO bsp +0x74, 0x7fffffff, &n,
+    /// &end) against s5's sphere (+0x20, +0x30) returns 2 with end = buf + 24 -> sp40 = 2, sp3c = buf, sp24 = end - 12;
+    /// mesh/mesh FUN_001a8b50(w, s0, s1, 2, buf, end - 12, head) (seen as its 0x1a80d8 / 0x1a81f8 calls); then
+    /// FUN_001aa0b0(w, s5, fp, s1, +0x6c, +0x74, +0x74, head).
+    #[test]
+    fn mesh_1aa1d8_plain_pair_routes_mesh_mesh() {
+        fn route(m: &mut FlatMem, addr: u32, a: &[u32], _v: &[V4]) -> Option<(u32, V4)> {
+            if addr == 0x0011_8a88 {
+                let buf = m.r32(a[3]);
+                m.w32(a[3], buf + 24);
+                return Some((2, [0.0; 4]));
+            }
+            None
+        }
+        let mut m = FlatMem { route: Some(route), ..Default::default() };
+        let (b1, b2, s0, s1) = (0x1000, 0x2000, 0x3000, 0x4000);
+        m.wf(b1 + 0x30, 10.0);
+        m.wf(b2 + 0x30, 20.0);
+        m.wv(b1 + 0x20, [1., 2., 3., 1.]);
+        m.w32(b1 + 0x34, s0);
+        m.w32(b2 + 0x34, s1);
+        m.w32(s1 + 0x6c, 4);
+        m.w32(s1 + 0x74, 0x5000);
+        let r = ee_sub_1aa1d8(&mut m, 0x100, b1, b2);
+        assert_eq!(r, 0);
+        let c = |m: &FlatMem, x: u32| m.calls.iter().find(|c| c.0 == x).cloned().unwrap();
+        let q = c(&m, 0x0011_8a88);
+        assert_eq!(&q.1[..2], &[0x5000, 0x7fff_ffff]);
+        assert_eq!(q.2, vec![[1., 2., 3., 1.], [10., 0., 0., 0.]]);
+        let f = c(&m, 0x001a_81f8);
+        let buf = f.1[4];
+        assert_eq!(&f.1[..5], &[0x100, s0, s1, 2, buf]);
+        assert_eq!(&c(&m, 0x001a_80d8).1[..4], &[0x100, s1, s0, buf + 12]);
+        let t = c(&m, 0x001a_a0b0);
+        assert_eq!(&t.1[..7], &[0x100, b1, b2, s1, 4, 0x5000, 0x5000]);
+    }
+
     /// unit cube |x|,|y|,|z| <= 1 as 6 planes (n, d); segment along x from -3 to 3: enter t=1/3, exit t=2/3
     #[test]
     fn clip_1bc688_through_cube() {
@@ -350,8 +516,8 @@ pub fn ee_sub_2206c8<M: QMem + ?Sized>(m: &mut M, p: u32, mode: u32) {
     let o = m.r32(p);
     m.call(0x0013_4320, &[0x003d_d490, o], &[]);
     if mode == u32::MAX {
-        let u = m.call(0x0020_4740, &[o], &[]).0;
-        m.call(0x0020_4660, &[u, o], &[]);
+        let u = m.call(0x0020_4740, &[o], &[]).1[0];
+        m.call(0x0020_4660, &[o], &[super::q5util::f4(u)]);
         m.w32(o + 0x1a4, 0);
     } else if mode == 7 {
         let pos = m.call(0x001a_62e8, &[o], &[]).1;
@@ -443,7 +609,7 @@ pub fn ee_sub_2206c8<M: QMem + ?Sized>(m: &mut M, p: u32, mode: u32) {
         _ => {}
     }
     m.call(0x001f_15b8, &[o + 0x1034], &[]);
-    m.call(0x0013_05b8, &[0, anim, o, kind, o + 0x1030], &[f4(1.0)]);
+    m.call(0x0013_05b8, &[anim, o, kind, o + 0x1030], &[f4(0.0), f4(1.0)]); // PART r16 ABI: $f12 = 0.0, $f13 = 1.0
     vcall(m, o, 0xc, 0x2d4, &[], &[]);
     m.call(0x0013_4320, &[0x003d_d490, o], &[]);
 }
@@ -622,98 +788,117 @@ pub fn ee_sub_1a87f0<M: QMem + ?Sized>(m: &mut M, a0: u32, b: u32, a2: u32, n: u
 /// n1 == 0: FUN_001a7c18(0, a0, A, B, [A]+0x70, DAT_002a2dc0, 0xd, 0, 0, list).
 #[allow(clippy::too_many_arguments)]
 pub fn ee_sub_1a8b50<M: QMem + ?Sized>(m: &mut M, a0: u32, ba: u32, bb: u32, a3: u32, t0: u32, t1: u32, list: u32) {
-    let sp = stack_push(m, 0x6a00);
+    let sp = stack_push(m, 0x6ac0);
     let head0 = m.r32(list);
     let n0 = m.call(0x001a_80d8, &[a0, bb, ba, t1, 0x80, sp + 0x20], &[]).0;
+    m.w32(sp + 0x10, n0);
     let n1 = m.call(0x001a_81f8, &[a0, ba, bb, a3, t0, 0x80, sp + 0x3020], &[]).0;
+    m.w32(sp + 0x14, n1);
     if n0 == 0 && n1 == 0 {
-        stack_pop(m, 0x6a00);
+        stack_pop(m, 0x6ac0);
         return;
     }
-    let ns = [n0, n1];
     for i in 0..2u32 {
-        m.call(0x001a_8410, &[ns[i as usize], sp + 0x20 + 0x3000 * i, sp + 0x6020 + 4 * i, sp + 0x6030 + 0x200 * i, sp + 0x6430 + 0x200 * i, sp + 0x6830 + 4 * i], &[]);
+        let n = m.r32(sp + 0x10 + 4 * i);
+        m.call(0x001a_8410, &[n, sp + 0x20 + 0x3000 * i, sp + 0x6020 + 4 * i, sp + 0x6030 + 0x200 * i, sp + 0x6430 + 0x200 * i, sp + 0x6830 + 4 * i], &[]);
     }
-    let c0 = m.r32(sp + 0x6020);
-    ee_sub_1a87f0(m, a0, ba, bb, c0, sp + 0x6030, sp + 0x6430, list);
-    let c1 = m.r32(sp + 0x6024);
-    ee_sub_1a87f0(m, a0, bb, ba, c1, sp + 0x6230, sp + 0x6630, list);
-    let mut s2 = m.r32(sp + 0x6830);
-    'edge: while s2 != 0 {
-        let (f1, f2) = (m.r32(s2 + 0x4c), m.r32(s2 + 0x50));
-        if f1 == 0 || f2 == 0 {
-            s2 = m.r32(s2 + 0x5c);
+    let (c0, c1) = (m.r32(sp + 0x6020), m.r32(sp + 0x6024));
+    m.call(0x001a_87f0, &[a0, ba, bb, c0, sp + 0x6030, sp + 0x6430, list], &[]);
+    m.call(0x001a_87f0, &[a0, bb, ba, c1, sp + 0x6230, sp + 0x6630, list], &[]);
+    // edges of the A-side chain (sp+0x6830, link +0x5c)
+    let mut e = m.r32(sp + 0x6830);
+    while e != 0 {
+        let fa = m.r32(e + 0x4c);
+        let fb = m.r32(e + 0x50);
+        if fa == 0 || fb == 0 {
+            e = m.r32(e + 0x5c);
             continue;
         }
         let base = m.r32(bb + 0x9c);
-        let e1 = m.r32(sp + 0x6834);
-        let k = m.call(0x001a_86b8, &[base, ((f1.wrapping_sub(base)) as i32 >> 5) as u32, ((f2.wrapping_sub(base)) as i32 >> 5) as u32, e1, sp + 0x6840], &[]).0 as i32;
+        let segs1 = m.r32(sp + 0x6834);
+        let ia = (fa.wrapping_sub(base) as i32 >> 5) as u32;
+        let ib = (fb.wrapping_sub(base) as i32 >> 5) as u32;
+        let k = m.call(0x001a_86b8, &[base, ia, ib, segs1, sp + 0x6840], &[]).0 as i32;
         if k > 0 {
+            // edge / edge: closest points of A seg e and B seg f (FUN_0011ea60), depth -|pa - pb|, kind 3
             for j in 0..k as u32 {
-                let s0 = m.r32(sp + 0x6840 + 4 * j);
-                let (ve, vf) = (m.r32(s2 + 0x54), m.r32(s0 + 0x54));
-                let (pa, pb) = (m.r32(ba + 0x94), m.r32(bb + 0x94));
-                let a_0 = vat(m, pa, ve);
-                let a_1 = vat(m, pa, ve + 2);
-                let b_0 = vat(m, pb, vf);
-                let b_1 = vat(m, pb, vf + 2);
-                m.call(0x0011_ea60, &[sp + 0x68c0, sp + 0x68d0], &[a_0, a_1, b_0, b_1]);
+                let f = m.r32(sp + 0x6840 + 4 * j);
+                let (ee, fe) = (m.r32(e + 0x54), m.r32(f + 0x54));
+                let (pts_a, pts_b) = (m.r32(ba + 0x94), m.r32(bb + 0x94));
+                let e0 = vat(m, pts_a, ee);
+                let e1 = vat(m, pts_a, ee + 2);
+                let f0 = vat(m, pts_b, fe);
+                let f1 = vat(m, pts_b, fe + 2);
+                m.call(0x0011_ea60, &[sp + 0x68c0, sp + 0x68d0], &[e0, e1, f0, f1]);
                 let (s, t) = (m.rf(sp + 0x68c0), m.rf(sp + 0x68c4));
-                let p = lerp(a_0, a_1, s);
-                let q = lerp(b_0, b_1, t);
-                let d = sub(p, q);
-                let len = dot3(d, d).sqrt();
-                let nrm = m.rv(sp + 0x68d0);
-                let (e54, f54) = (m.r32(s2 + 0x54), m.r32(s0 + 0x54));
-                m.call(0x001a_7c18, &[a0, ba, bb, 3, e54, f54, list], &[f4(-len), p, nrm]);
+                let pa = add(scale(e0, 1.0 - s), scale(e1, s));
+                let pb = add(scale(f0, 1.0 - t), scale(f1, t));
+                let dv = sub(pa, pb);
+                let d = crate::engine::math::vu0::vsqrt(dot3(dv, dv));
+                let n = m.rv(sp + 0x68d0);
+                m.call(0x001a_7c18, &[a0, ba, bb, 3, ee, fe, list], &[f4(-d), pa, n]);
             }
-        } else {
-            let t1v = m.r32(s2 + 0x54);
-            let fb = m.r32(ba + 0x9c);
-            let ga = fb + ((m.r16(t1v + 4) as u32) << 5);
-            let gb = fb + ((m.r16(t1v + 6) as u32) << 5);
-            for r in 0..(n1 as i32).max(0) as u32 {
-                let rec = sp + 0x3020 + 0x60 * r;
-                let (x, y) = (m.r32(rec + 0x4c), m.r32(rec + 0x50));
-                if x == ga || x == gb || y == ga || y == gb {
-                    s2 = m.r32(s2 + 0x5c);
-                    continue 'edge;
-                }
+            e = m.r32(e + 0x5c);
+            continue;
+        }
+        // no B path: skip when a recs1 record names either A face of e
+        let n1 = m.r32(sp + 0x14) as i32;
+        let ee = m.r32(e + 0x54);
+        let fbase = m.r32(ba + 0x9c);
+        let ga = fbase.wrapping_add((m.r16(ee + 4) as u32) << 5);
+        let gb = fbase.wrapping_add((m.r16(ee + 6) as u32) << 5);
+        let mut skip = false;
+        for r in 0..n1.max(0) as u32 {
+            let rec = sp + 0x3020 + 0x60 * r;
+            let (x, y) = (m.r32(rec + 0x4c), m.r32(rec + 0x50));
+            if x == ga || x == gb || y == ga || y == gb {
+                skip = true;
+                break;
             }
+        }
+        if !skip {
+            // face with the smaller plane distance to A's centre ([A]+0x70) and its vertex
             let o = m.r32(ba);
+            let p1 = m.rv(e + 0x20);
             let c = m.rv(o + 0x70);
             m.call(0x0025_64b8, &[sp + 0x6910], &[]);
             m.call(0x0025_64b8, &[sp + 0x6920], &[]);
-            let d1 = pdist(m.rv(s2 + 0x20), c);
+            let d1 = pdist(p1, c);
+            let o = m.r32(ba);
+            let c = m.rv(o + 0x70);
+            let p2 = m.rv(e + 0x30);
             m.call(0x0025_64b8, &[sp + 0x6930], &[]);
             m.call(0x0025_64b8, &[sp + 0x6940], &[]);
-            let d2 = pdist(m.rv(s2 + 0x30), c);
-            let k58 = m.r32(s2 + 0x58);
-            let (sel, face) = if d2 < d1 { (1u32.wrapping_sub(k58), f1) } else { (k58, f2) };
-            let e = m.r32(s2 + 0x54).wrapping_add(sel.wrapping_mul(2));
-            let vtx = m.r32(ba + 0x94) + (m.r16(e) as u32) * 16;
-            let mut c = m.r32(list);
-            while c != 0 {
-                if m.r32(c + 0x9c) == 1 && m.r32(c + 0xa0) == vtx && m.r32(c + 0xa4) == face {
-                    s2 = m.r32(s2 + 0x5c);
-                    continue 'edge;
+            let d2 = pdist(p2, c);
+            let (face, sel) = if d2 < d1 { (m.r32(e + 0x4c), 1u32.wrapping_sub(m.r32(e + 0x58))) } else { (m.r32(e + 0x50), m.r32(e + 0x58)) };
+            let ia = m.r32(e + 0x54).wrapping_add(sel.wrapping_mul(2));
+            let vi = m.r16(ia) as u32;
+            let vp = m.r32(ba + 0x94).wrapping_add(vi << 4);
+            let mut n = m.r32(list);
+            while n != 0 {
+                if m.r32(n + 0x9c) == 1 && m.r32(n + 0xa0) == vp && m.r32(n + 0xa4) == face {
+                    break;
                 }
-                c = m.r32(c + 0xac);
+                n = m.r32(n + 0xac);
             }
-            let (p, pl) = (m.rv(vtx), m.rv(face));
-            m.call(0x0025_64b8, &[sp + 0x6950], &[]);
-            m.call(0x0025_64b8, &[sp + 0x6960], &[]);
-            m.call(0x001a_7c18, &[a0, ba, bb, 1, vtx, face, list], &[f4(pdist(pl, p)), p, pl]);
+            if n == 0 {
+                let v = m.rv(vp);
+                let pl = m.rv(face);
+                m.call(0x0025_64b8, &[sp + 0x6950], &[]);
+                m.call(0x0025_64b8, &[sp + 0x6960], &[]);
+                let d = pdist(pl, v);
+                m.call(0x001a_7c18, &[a0, ba, bb, 1, vp, face, list], &[f4(d), v, pl]);
+            }
         }
-        s2 = m.r32(s2 + 0x5c);
+        e = m.r32(e + 0x5c);
     }
-    if m.r32(list) == head0 && (n0 == 0 || n1 == 0) {
+    if m.r32(list) == head0 && (m.r32(sp + 0x10) == 0 || m.r32(sp + 0x14) == 0) {
         let o = m.r32(ba);
         let c = m.rv(o + 0x70);
-        let up = m.rv(UP);
-        m.call(0x001a_7c18, &[a0, ba, bb, 0xd, 0, 0, list], &[f4(0.0), c, up]);
+        let dir = m.rv(0x002a_2dc0);
+        m.call(0x001a_7c18, &[a0, ba, bb, 0xd, 0, 0, list], &[f4(0.0), c, dir]);
     }
-    stack_pop(m, 0x6a00);
+    stack_pop(m, 0x6ac0);
 }
 
 fn vat<M: QMem + ?Sized>(m: &mut M, pts: u32, ia: u32) -> V4 {

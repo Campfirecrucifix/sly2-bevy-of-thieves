@@ -64,27 +64,47 @@ fn f32_at(b: &[u8], k: usize) -> f32 {
 pub fn set_field(p: &mut LightParams, field: i16, b: &[u8]) -> bool {
     match field {
         151 => p.kind = b.get(..4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).unwrap_or(0), // 0x001a35b0
-        152 => p.hsv = [f32_at(b, 0), f32_at(b, 1), f32_at(b, 2)],                                      // 0x001a35f0
-        153 => p.g150 = f32_at(b, 0),                                                                    // 0x001a3610
-        154 => p.angle = f32_at(b, 0),                                                                   // 0x001a3630
-        155 => p.falloff = [f32_at(b, 0), f32_at(b, 1)],                                                 // 0x001a3650
-        156 => p.b158 = b.first().copied().unwrap_or(0),                                                 // direct u8 +0x158
-        // 0x001a3680 / 0x001a36d8: setting one clears the other
-        157 => {
-            p.excluded = b.first().copied().unwrap_or(0) != 0;
-            if p.excluded {
-                p.dynamic = false;
-            }
-        }
-        158 => {
-            p.dynamic = b.first().copied().unwrap_or(0) != 0;
-            if p.dynamic {
-                p.excluded = false;
-            }
-        }
+        152 => ee_sub_1a35f0(p, b),
+        153 => ee_sub_1a3610(p, b),
+        154 => ee_sub_1a3630(p, b),
+        155 => ee_sub_1a3650(p, b),
+        156 => p.b158 = b.first().copied().unwrap_or(0), // direct u8 +0x158
+        157 => ee_sub_1a3680(p, b.first().copied().unwrap_or(0) != 0),
+        158 => ee_sub_1a36d8(p, b.first().copied().unwrap_or(0) != 0),
         _ => return false,
     }
     true
+}
+
+/// FUN_001a35f0 SetLightColor (HSV, field 152).
+pub fn ee_sub_1a35f0(p: &mut LightParams, b: &[u8]) {
+    p.hsv = [f32_at(b, 0), f32_at(b, 1), f32_at(b, 2)];
+}
+/// FUN_001a3610 (field 153, +0x150).
+pub fn ee_sub_1a3610(p: &mut LightParams, b: &[u8]) {
+    p.g150 = f32_at(b, 0);
+}
+/// FUN_001a3630 (field 154, angle +0x154).
+pub fn ee_sub_1a3630(p: &mut LightParams, b: &[u8]) {
+    p.angle = f32_at(b, 0);
+}
+/// FUN_001a3650 SetLightFallOff (field 155).
+pub fn ee_sub_1a3650(p: &mut LightParams, b: &[u8]) {
+    p.falloff = [f32_at(b, 0), f32_at(b, 1)];
+}
+/// FUN_001a3680 (field 157, +0x15c excluded): setting it clears dynamic.
+pub fn ee_sub_1a3680(p: &mut LightParams, v: bool) {
+    p.excluded = v;
+    if v {
+        p.dynamic = false;
+    }
+}
+/// FUN_001a36d8 SetLightDynamic (field 158, +0x160): setting it clears excluded.
+pub fn ee_sub_1a36d8(p: &mut LightParams, v: bool) {
+    p.dynamic = v;
+    if v {
+        p.excluded = false;
+    }
 }
 
 /// Apply the light property setters in stream order (fields 151..158; others are generic LO fields).
@@ -206,10 +226,23 @@ pub fn level_lights(w: &World, bones: &mut BoneWorlds) -> Vec<LevelLight> {
         if o.class != CID_LIGHT {
             continue;
         }
-        let Payload::Loaded(LoadData::L231170 { props, .. }) = &o.payload else { continue };
+        // LOOK R8: FUN_001ca370 template copies of a LIGHT (`Payload::Clone`) are full lights in the
+        // original (world list 0x3dd490 + 0x4154: oid 5613 template + 11 copies in the cellar, each at
+        // its own place). Props = the template's then the copy's override rows; world = template world
+        // * the +0x12c placement (as gfx::scene::template_copies).
+        let src = o.clone_of.unwrap_or(i);
+        let Some(Payload::Loaded(LoadData::L231170 { props, .. })) = w.objects.get(src).map(|s| &s.payload) else { continue };
         let mut p = ee_sub_1a3360();
         apply_props(&mut p, props);
-        let world = bones.xfm_world(w, i).unwrap_or(super::scene::IDENTITY);
+        if let Some(ov) = w.override_props.get(&i) {
+            apply_props(&mut p, ov);
+        }
+        let mut world = bones.xfm_world(w, src).unwrap_or(super::scene::IDENTITY);
+        if let Some(m) = w.life.placed.get(&i) {
+            world = super::scene::mul(&world, &super::attach::affine_from_bytes(m));
+        } else if src != i {
+            continue;
+        }
         out.push(LevelLight { object: i, oid: o.oid, params: p, world, derived: ee_sub_1a3968(&p, &world, false) });
     }
     out
@@ -244,9 +277,32 @@ pub const VU1_LIGHT_SCALE: f32 = 2.0;
 /// `texel * x`. Without it a dark term (L = 0.37) showed as 0.64 -> flat, low contrast frames.
 pub const PS2_GAMMA: f32 = 2.2;
 
-/// display-space factor -> linear factor (`PS2_GAMMA`), per channel, negatives clamped.
+/// display-space factor -> the factor Bevy multiplies with, per channel, negatives clamped.
+/// LOOK: with `display_space` (default) Bevy works in PS2 display numbers (gfx::display), so the
+/// factor is unchanged; `SLY2_LOOK_LINEAR=1` = the old linear path (x^`PS2_GAMMA`).
 pub fn ps2_linear(x: f32) -> f32 {
-    x.max(0.0).powf(PS2_GAMMA)
+    if display_space() { x.max(0.0) } else { x.max(0.0).powf(PS2_GAMMA) }
+}
+
+/// LOOK: 3D colours are PS2 display values (raw texel bytes, vertex colours, light factors, fog
+/// colour), blended like the GS, decoded to linear once per frame (gfx::display). Off with
+/// `SLY2_LOOK_LINEAR=1`.
+pub fn display_space() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SLY2_LOOK_LINEAR").map_or(true, |v| v != "1"))
+}
+
+/// LOOK: texture format of PS2 texel bytes (`display_space`: raw, else sRGB-decoded).
+#[cfg(feature = "game")]
+pub fn ps2_texture_format() -> bevy::render::render_resource::TextureFormat {
+    use bevy::render::render_resource::TextureFormat as F;
+    if display_space() { F::Rgba8Unorm } else { F::Rgba8UnormSrgb }
+}
+
+/// LOOK: a PS2 display-space colour as a Bevy colour (`display_space`: raw numbers, else sRGB).
+#[cfg(feature = "game")]
+pub fn ps2_color(r: f32, g: f32, b: f32, a: f32) -> bevy::color::Color {
+    if display_space() { bevy::color::Color::linear_rgba(r, g, b, a) } else { bevy::color::Color::srgba(r, g, b, a) }
 }
 
 /// WP-C9: per-light terms as the VU1 applies them (PS2 display units, `VU1_LIGHT_SCALE`
@@ -285,4 +341,199 @@ pub fn level_ambient<'a>(lights: impl IntoIterator<Item = &'a (LightParams, Affi
         }
     }
     a.map(ps2_linear)
+}
+
+/// WIRE-C3: colour-pass factor k of the kinds-1/7 VU1 program (`material::two_layer_vu`) for the
+/// level's global (directional) lights at full facing: L = sum of the facing terms
+/// (`vu1_light_terms`), Lw = sum of the light w terms (q1.w = k13c = +0x150 / g, times the angular
+/// end point g/255 and the x2 VU scale = 2 * +0x150 / 255). Local point lights are not folded in
+/// (they only raise L/Lw near them). No directional light -> 1.0 (unlit colour shown as is).
+pub fn two_layer_k(w: &World) -> f32 {
+    let (mut l, mut lw, mut any) = ([0.0f32; 3], 0.0f32, false);
+    for lt in level_lights(w, &mut BoneWorlds::default()) {
+        if lt.params.excluded || lt.params.kind != 0 || lt.derived.g <= 0.0 {
+            continue;
+        }
+        let (_, face) = vu1_light_terms(&lt.derived);
+        (0..3).for_each(|k| l[k] += face[k]);
+        lw += VU1_LIGHT_SCALE * lt.derived.k13c * lt.derived.g / 255.0;
+        any = true;
+    }
+    if !any {
+        return 1.0;
+    }
+    super::material::two_layer_vu(l, lw).1
+}
+
+/// LOOK: one light as the VU1 lighting block sees it (FUN_001a4478 upload of +0x110..+0x14f).
+#[derive(Clone, Copy, Debug)]
+pub struct Vu1Light {
+    pub kind: u32,
+    pub d: LightDerived,
+}
+
+/// LOOK: the level's lights that reach the VU1 (kinds 0/1, not excluded, g > 0).
+pub fn vu1_light_set(w: &World) -> Vec<Vu1Light> {
+    level_lights(w, &mut BoneWorlds::default())
+        .into_iter()
+        .filter(|l| !l.params.excluded && l.params.kind <= 1 && l.derived.g > 0.0 && in_world_light_list(w, l))
+        .map(|l| Vu1Light { kind: l.params.kind, d: l.derived })
+        .collect()
+}
+
+/// LOOK: `vu1_light_set` with each light's +0x158 (field 156, `b158`): FUN_001a4478 weights only the
+/// picked lights with +0x158 != 0 into the shadow-casting light position.
+pub fn cast_light_set(w: &World) -> Vec<(Vu1Light, bool)> {
+    level_lights(w, &mut BoneWorlds::default())
+        .into_iter()
+        .filter(|l| !l.params.excluded && l.params.kind <= 1 && l.derived.g > 0.0 && in_world_light_list(w, l))
+        .map(|l| (Vu1Light { kind: l.params.kind, d: l.derived }, l.params.b158 != 0))
+        .collect()
+}
+
+/// LOOK: membership of the world light list (world 0x3dd490 + 0x4154, filled by FUN_001a3d00 via the
+/// LIGHT add FUN_001a3518 = vt+0xbc). FUN_001a5478 only calls it when FUN_001a61a0 holds, which an
+/// owned LIGHT (LO +0x10 != 0, e.g. the black rim directionals oid 7430 / 3797 / 7031 under Bentley /
+/// Sly / Murray, and the oid 5613 lights under C2ce4d0 actors) never satisfies: in the cellar savestate
+/// (emu_rec5/000_082432) all 103 list lights have +0x10 = 0 and every owned light has +0x118 = -1.
+/// Those lights belong to their actor's own light set (+0x134, FUN_001f3c10), not to level geometry.
+pub fn in_world_light_list(w: &World, l: &LevelLight) -> bool {
+    w.objects.get(l.object).is_some_and(|o| o.owner.is_none())
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// FUN_001a3f78 (0x001a3f78): the (at most `n`, FUN_001a4478 uploads 4) strongest lights at `pos`
+/// by `strength = +0x110 + +0x114 * |pos - +0x100|` (directional: +0x110 = g, +0x114 = 0), sorted
+/// descending; lights with strength <= 0 are not picked (the list is zero-filled).
+pub fn ee_sub_1a3f78(lights: &[Vu1Light], pos: [f32; 3], n: usize) -> Vec<Vu1Light> {
+    let mut v: Vec<(f32, Vu1Light)> = lights
+        .iter()
+        .map(|l| (if l.kind == 0 { l.d.du_fall } else { l.d.du_fall + l.d.ru_fall * dist(l.d.vec, pos) }, *l))
+        .filter(|(s, _)| *s > 0.0)
+        .collect();
+    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+    v.into_iter().take(n).map(|(_, l)| l).collect()
+}
+
+/// FUN_001a4478 (0x001a4478) pick position: the light set's position `p` (+4 = root +0x60 + 0x70, the
+/// root's local translation) as is when param_2 is NULL (FUN_001f3c10, ra 0x001f3c4c), else transformed
+/// by the param_2 matrix (FUN_001f3cc8 passes the draw's parent world matrix, ra 0x001f3d7c):
+/// `M.row0 * p.x + M.row1 * p.y + M.row2 * p.z + M.row3`. USER CAPTURE L4 (cellar): p = (0, 0, 13.2717),
+/// M row3 = (12710.8, -6310.4, 259.1) -> (12712.2, -6309.1, 265.4).
+pub fn ee_sub_1a4478_pos(p: [f32; 3], m: Option<&Affine>) -> [f32; 3] {
+    match m {
+        None => p,
+        Some(m) => [0, 1, 2].map(|j| m[0][j] * p[0] + m[1][j] * p[1] + m[2][j] * p[2] + m[3][j]),
+    }
+}
+
+/// FUN_001a4478 (0x001a4478) light upload: the (at most 4) strongest lights at the pick position
+/// (`ee_sub_1a4478_pos`, FUN_001a3f78), uploaded in strength order to VU rows 0x15 + 3i (+0x120..+0x14f);
+/// the list stops at the first empty pick and the remaining slots get the zero light DAT_002bfc60
+/// (q0 = (0, 0, 0.5, 0), colour 0: contributes nothing, so it is not returned). Nothing is uploaded
+/// when the light set's +0x10 is 0.
+pub fn ee_sub_1a4478(lights: &[Vu1Light], p: [f32; 3], m: Option<&Affine>) -> Vec<Vu1Light> {
+    ee_sub_1a3f78(lights, ee_sub_1a4478_pos(p, m), 4)
+}
+
+/// LOOK: VU1 light prep (overlay 376110651, 0x2a0..0x3c8), once per draw before the vertex loop:
+/// vf5 = row 3 of the draw matrix; each light with q0.x != 0 (point): q2 = vf5 - q2 (light -> origin),
+/// att = clamp(q0.w + q2.w * |q2|, 0, 1) (= (+0x110 + +0x114 * d) / g), q0.yz (du, ru) *= att; then q2
+/// is rotated to local space and normalised. A point light is a directional light per draw (no
+/// per-vertex fall-off on the VU).
+pub fn vu1_prep_lights(lights: &[Vu1Light], at: [f32; 3]) -> Vec<Vu1Light> {
+    lights
+        .iter()
+        .map(|l| {
+            if l.kind == 0 {
+                return *l;
+            }
+            let mut o = *l;
+            let att = ((l.d.du_fall + l.d.ru_fall * dist(l.d.vec, at)) / l.d.g).clamp(0.0, 1.0);
+            o.kind = 0;
+            o.d.vec = [at[0] - l.d.vec[0], at[1] - l.d.vec[1], at[2] - l.d.vec[2]];
+            o.d.du *= att;
+            o.d.ru *= att;
+            o
+        })
+        .collect()
+}
+
+/// LOOK: per-vertex VU1 light terms (L rgb, Lw) of the kinds-1/7 program for a world position and
+/// unit world normal: per light `colour * (du + ru * (c + c^3))` with c = cos of half the
+/// normal / to-light angle (FUN_001a38a8 fit, clamped at 0), point lights times the linear distance
+/// falloff (+0x110 + +0x114 * d) / g clamped to 0..1, all x2 (`VU1_LIGHT_SCALE`). Lw sums the same
+/// terms with the w channel (+0x13c). Feeds `material::two_layer_vu` per vertex (replaces the one
+/// level-wide `two_layer_k`, which left the additive colour layer unshaded).
+pub fn vu1_vertex_terms(lights: &[Vu1Light], pos: [f32; 3], n: [f32; 3]) -> ([f32; 3], f32) {
+    let (mut l, mut lw) = ([0.0f32; 3], 0.0f32);
+    for lt in lights {
+        let d = &lt.d;
+        let (to, att) = if lt.kind == 0 {
+            ([-d.vec[0], -d.vec[1], -d.vec[2]], 1.0)
+        } else {
+            let r = dist(d.vec, pos);
+            ([d.vec[0] - pos[0], d.vec[1] - pos[1], d.vec[2] - pos[2]], ((d.du_fall + d.ru_fall * r) / d.g).clamp(0.0, 1.0))
+        };
+        let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+        if len <= 1e-12 || att <= 0.0 {
+            continue;
+        }
+        let cosf = ((n[0] * to[0] + n[1] * to[1] + n[2] * to[2]) / len).clamp(-1.0, 1.0);
+        // VU1 setup 0x3e0..0x5e0: light matrix rows 21..24 = q2 (+0x140) * 1/127 transposed, the normal
+        // is V4-8 (n * 127) -> c = n . dir (cos of the full angle; FUN_001a38a8's cos(deg/2) fit means the
+        // light's angle field is a full cone angle)
+        let c = cosf;
+        let term = (d.du - d.ru * (c + c * c * c)).max(0.0) * att;
+        for k in 0..3 {
+            l[k] += VU1_LIGHT_SCALE * d.color[k] * term;
+        }
+        lw += VU1_LIGHT_SCALE * d.k13c * term;
+    }
+    (l, lw)
+}
+
+/// LOOK: vf11.w of the level's VU1 row 10 = world +0x3e34 = +0x3e24 / 255 (FUN_0020f1c8; field 915,
+/// setter FUN_0020f2d8, default 0). The kinds-1/7 program adds it to Lw (`ADD.w vf10, vf10, vf11` at
+/// 0x10e0). Not ported: the +0x3e38 variant (world +0x3bf4 & 0x20, FUN_0011d948(w + 0.3, 0x2bbb60)).
+pub fn level_shadow_fill_w(w: &World) -> f32 {
+    use crate::engine::world::props::PropValue;
+    let mut v = 0.0f32;
+    for p in &w.props_3dd490 {
+        if let (915, PropValue::Scalar(b)) = (p.field, &p.value) {
+            if let Some(x) = b.get(0..4) {
+                v = f32::from_le_bytes(x.try_into().unwrap());
+            }
+        }
+    }
+    v * 0.003921569
+}
+
+/// LOOK: the level's VU1 shadow fill (vf11 = row 10, `material::two_layer_vu_fill`): FUN_0020f1c8
+/// (0x0020f1c8) sets world +0x3e28..+0x3e30 = hsv(+0x3e10, +0x3e14/255, +0x3e18/255) * +0x3e20/255
+/// (FUN_0011dd90), uploaded to VU row 10 by FUN_00157cf0. World field-table setters: 914 = hsv vector
+/// (FUN_0020f2b8, +0x3e10), 916 = intensity (FUN_0020f2f8, +0x3e20); defaults from the world init (game::q_wires1i2)
+/// (hsv 180/255/255, intensity 90). Cellar (260, 180, 180) * 110 -> (0.161, 0.090, 0.304) = the
+/// vu1Memory row 10 of the PCSX2 savestate.
+pub fn level_shadow_fill(w: &World) -> [f32; 3] {
+    use crate::engine::world::props::PropValue;
+    let (mut hsv, mut k) = ([180.0f32, 255.0, 255.0], 90.0f32);
+    for p in &w.props_3dd490 {
+        let PropValue::Scalar(b) = &p.value else { continue };
+        let f = |i: usize| b.get(4 * i..4 * i + 4).map(|x| f32::from_le_bytes(x.try_into().unwrap()));
+        match p.field {
+            914 => {
+                if let (Some(h), Some(s), Some(v)) = (f(0), f(1), f(2)) {
+                    hsv = [h, s, v];
+                }
+            }
+            916 => k = f(0).unwrap_or(k),
+            _ => {}
+        }
+    }
+    let c = super::fog::ee_sub_11dd90([hsv[0], hsv[1] * 0.003921569, hsv[2] * 0.003921569]);
+    c.map(|x| x * k * 0.003921569)
 }

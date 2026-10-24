@@ -67,13 +67,14 @@ pub fn ee_sub_12ddb0<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32, c: u32, d: u32
     m.call(0x0023_0018, &[a, b, r], &[]);
     r
 }
-/// FUN_0012de58(x, a, b, c, q5, q6): kind 8, last arg 0x11; +0x1c = x; +0x20 = q5, +0x30 = q6
-pub fn ee_sub_12de58<M: QMem + ?Sized>(m: &mut M, x: u32, a: u32, b: u32, c: u32, q5: V4, q6: V4) -> u32 {
+/// FUN_0012de58(owner, xf, prio, $f12 = x, q3 (a3), q4 (t0)): FUN_0012db50(8, owner, xf, prio, 0x11);
+/// +0x1c = x; +0x20 = q3, +0x30 = q4; FUN_00230018(owner, xf, r). PART r17: 1:1 vs asm (was Ghidra order)
+pub fn ee_sub_12de58<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32, c: u32, x: f32, q5: V4, q6: V4) -> u32 {
     let r = m.call(0x0012_db50, &[8, a, b, c, 0x11], &[]).0;
-    m.w32(r + 0x1c, x);
+    m.wf(r + 0x1c, x);
     m.wv(r + 0x20, q5);
     m.wv(r + 0x30, q6);
-    m.call(0x0023_0018, &[a, b], &[]);
+    m.call(0x0023_0018, &[a, b, r], &[]);
     r
 }
 /// FUN_0012e0f0(this, q2, q3): +0x20 = q2, +0x30 = q3; when this is owner(+8)->+0x90: owner +0xc0 = q2, +0xd0 = q3
@@ -129,7 +130,7 @@ pub fn ee_sub_12ee78<M: QMem + ?Sized>(m: &mut M, o: u32) -> u32 {
     if r == 0 {
         let v = m.r32(o + 0xe8).wrapping_add(m.r32(o + 0xe4).wrapping_mul(0x14));
         m.w32(o + 0xe0, v);
-        m.call(0x0012_eee0, &[0x3f80_0000, 0, o, NEG1, 300, 3000], &[]);
+        m.call(0x0012_eee0, &[o, NEG1, 300, 3000], &[f(1.0), f(0.0)]); // PART r16 ABI: $f12 = 1.0, $f13 = 0.0
         r = m.r32(o + 0xe0);
     }
     r
@@ -208,8 +209,8 @@ pub fn ee_sub_140750<M: QMem + ?Sized>(m: &mut M, o: u32) {
     if m.r32(o + 0x10c4) == 0 {
         return;
     }
-    let dt = rof(0x002d_ded4);
-    match ee_sub_1409e8(m, o) as i64 {
+    let dt = m.rf(0x002d_ded4);
+    match m.call(0x0014_09e8, &[o], &[]).0 as i32 as i64 {
         1 => {
             let x = m.rf(o + 0x10cc) + rof(0x002b_cc6c) * dt;
             let r = if x < 1.0 {

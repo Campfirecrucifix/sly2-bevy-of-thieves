@@ -82,6 +82,10 @@ pub struct MaterialDesc {
     pub textured: bool,
     /// ZTE/ZTST from TEST_1: false = depth test ALWAYS (no depth ordering)
     pub depth_test: bool,
+    /// FEEL R21: TEST_1 ATE + ATST GEQUAL/GREATER + AFAIL FB_ONLY/RGB_ONLY (kinds 0/1/4-6 base pass,
+    /// e.g. 0x717eb / 0x117eb): texels with As >= AREF pass and write Z, the failing ones are still
+    /// blended but without Z. `Some(AREF)` (0..1) = that split (the Z-writing part of a Blend prim).
+    pub z_aref: Option<f32>,
 }
 
 /// WP-C9: the GS modulates the source alpha by the vertex alpha (TFX MODULATE, TCC RGBA:
@@ -89,8 +93,32 @@ pub struct MaterialDesc {
 /// blending ALPHA_1 even when its texture is opaque. Paris (table 2) moonlight shafts: object 4570
 /// records 81/87, shader 14 (kind 1, flags 2, ALPHA 0x44), opaque white texture, vertex alpha
 /// 0..0xff -> were drawn as solid white boxes. `colors` in `mesh::ps2_color` scale.
-pub fn vertex_alpha(colors: &[[f32; 4]]) -> bool {
-    colors.iter().any(|c| c[3] < 127.5 / 128.0)
+/// FEEL R22: `sa` = the shader colour alpha (record +8 byte 3, `Shader::colors[0][3]`); the GS Av is
+/// `gs_alpha` of it (shafts: shader alpha 38..51 -> Av <= 0x1a, not the raw 0xff).
+pub fn vertex_alpha(colors: &[[f32; 4]], sa: Option<u8>) -> bool {
+    colors.iter().any(|c| gs_alpha(c[3], sa) < 127.5 / 128.0)
+}
+
+/// FEEL R22: FUN_0016a000 (text_00160000.c:8336-8338) GS vertex alpha = (va * sa + 0xff) / 0x1fe
+/// with va the vertex alpha byte and sa the shader colour alpha (0xff x 0xff -> 0x80 = 1.0). The port
+/// kept the raw va / 0x80 (up to 2.0): moonlight shafts (sa 0x26..0x33) drew ~10x too opaque, the
+/// pale "ghost" over Sly. `va` in `mesh::ps2_color` scale; `None` (no shader): unchanged.
+/// `gs_alpha_sa`: the shader alpha byte when the base ALPHA_1 C selector is As (0x44 / 0x48); the
+/// kinds 2/3 ALPHA 0x62 / 0x6a blend with FIX (As unused), there the raw va is kept (t5 floor
+/// vanished when converted).
+pub fn gs_alpha_sa(sh: &Shader) -> Option<u8> {
+    if std::env::var_os("SLY2_FEEL_NOGSA").is_some() {
+        return None;
+    }
+    let st = ee_sub_1eb960_base(sh.kind, sh.flags)?;
+    ((st.alpha >> 4) & 3 == 0).then_some(sh.colors[0][3])
+}
+
+/// see `gs_alpha_sa`
+pub fn gs_alpha(va: f32, sa: Option<u8>) -> f32 {
+    let Some(s) = sa else { return va };
+    let b = (va * 128.0).round().clamp(0.0, 255.0) as u32;
+    ((b * s as u32 + 0xff) / 0x1fe) as f32 / 128.0
 }
 
 /// Decode GS state into a material. ALPHA_1 = (A,B,C,D) 2-bit selectors at bits 0,2,4,6:
@@ -119,6 +147,7 @@ pub fn material_from(sh: &Shader, texture_has_alpha: bool) -> MaterialDesc {
         clamp_v: frame.is_some_and(|f| f.flags & 2 != 0),
         textured: st.textured,
         depth_test: (st.test >> 17) & 3 != 1,
+        z_aref: (ate && (atst == 5 || atst == 6) && afail & 1 == 1 && (st.test >> 16) & 1 == 1).then_some(aref.min(1.0)),
     }
 }
 
@@ -316,11 +345,39 @@ pub const VF11_ROW10_FILL: [f32; 3] = [0.0; 3];
 /// which is what the Bevy lights (raster) and Solari (RT) do with one lit albedo; above 1 the PS2
 /// grey saturates at 2 while the colour fades with h = 2 - max(L) (overbright, not reproduced).
 pub fn two_layer_vu(l: [f32; 3], lw: f32) -> ([f32; 3], f32) {
+    two_layer_vu_fill(l, lw, VF11_ROW10_FILL)
+}
+
+/// LOOK: `two_layer_vu` with the real vf11: VU row 10 is NOT only the batch header. FUN_00157cf0
+/// (0x00157f40) uploads one qword from 0x3e12b8 (world +0x3e28, the level's shadow colour
+/// `light::level_shadow_fill`) to row 10 per frame, so unlit areas get `fill * r` (cellar
+/// (0.161, 0.090, 0.304): the dark-blue PCSX2 cellar; read from vu1Memory row 10 of the emu_rec5
+/// savestates).
+pub fn two_layer_vu_fill(l: [f32; 3], lw: f32, fill: [f32; 3]) -> ([f32; 3], f32) {
     let m = l[0].max(l[1]).max(l[2]);
     let h = (2.0 - m).max(0.0);
     let k = lw.min(h);
     let r = h - k;
-    ([0, 1, 2].map(|c| l[c].min(2.0) + VF11_ROW10_FILL[c] * r), k)
+    ([0, 1, 2].map(|c| l[c].min(2.0) + fill[c] * r), k)
+}
+
+/// LOOK: weight of the additive colour pass of the kinds-1/7 VU1 program: r = h - min(Lw, h) with
+/// h = max(0, 2 - max(L)) (`two_layer_vu`). The colour layer is the fill for what the lights do not
+/// cover: fully lit (Lw >= h) it vanishes, unlit areas show it up to 2x. Using k = min(Lw, h) instead
+/// (WIRE-C3) added the colour layer at ~2x under every light: the flat, washed-out "coloring book"
+/// frames of playtest 1 (R1); with r the cellar / museum match the PCSX2 references
+/// (logs/caps/ref_pcsx2: dark blue cellar, dusk museum). `two_layer_vu` is kept for the grey pass.
+/// LOOK R24: colour-pass GS vertex alpha Av = (128 - 63.5 r) / 128 (r = `two_layer_colour_weight`,
+/// VU1 0x1230). It cancels in the colour (Cv carries 1 / Av) but is the frame alpha As = Ta * Av >> 7
+/// the pass leaves (ALPHA 0x48, no FBA), which the shadow-volume resolve indexes its CLUT with
+/// (`shadowvol::clut_index`; L3 cellar dump: Av 87..95 on the floor).
+pub fn two_layer_colour_av(l: [f32; 3], lw: f32) -> f32 {
+    (128.0 - 63.5 * two_layer_colour_weight(l, lw)).max(0.0).floor() / 128.0
+}
+
+pub fn two_layer_colour_weight(l: [f32; 3], lw: f32) -> f32 {
+    let h = (2.0 - l[0].max(l[1]).max(l[2])).max(0.0);
+    h - lw.min(h)
 }
 
 /// WP-A10: grey-pass vertex weight n.w. FUN_0016a000 packs the vertex normal as V4-8
@@ -371,4 +428,18 @@ pub fn two_layer_vertex_color(vcol: [f32; 4], m: &TwoLayerMeans) -> [f32; 4] {
         o[k] = if d > 0.0 { (m.grey[k] * gw + m.colour[k] * vcol[k]) / d } else { vcol[k] };
     }
     o
+}
+
+/// WIRE-C3: per-vertex COLOR of the two separate passes of a kinds-1/7 prim (`mesh::ps2_color`
+/// scale). `None` = lit grey pass: rgb = n.w (`two_layer_grey_weight`, brightness only), alpha kept;
+/// `Some(k)` = unlit additive colour pass: rgb = vcol * k, alpha = min(va, 1) (0x80 = opaque).
+pub fn two_layer_pass_color(vcol: [f32; 4], k: Option<f32>) -> [f32; 4] {
+    match k {
+        None => {
+            let w = two_layer_grey_weight(vcol);
+            [w, w, w, vcol[3]]
+        }
+        // Av: the vertex alpha keys translucent prims (moonlight shafts, `vertex_alpha`), capped at 0x80
+        Some(k) => [vcol[0] * k, vcol[1] * k, vcol[2] * k, vcol[3].min(1.0)],
+    }
 }

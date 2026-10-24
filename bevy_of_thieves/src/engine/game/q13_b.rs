@@ -256,7 +256,7 @@ pub fn ee_sub_1b3510<M: QMem + ?Sized>(m: &mut M, o: u32) {
     m.call(0x0015_7330, &[sp, 0x22d6, off.wrapping_add(0x3f_8e80)], &[]);
     m.call(0x0015_74b8, &[sp], &[]);
     m.call(0x0016_6bd8, &[sp, 0, 1, 0xe], &[]);
-    let two = |m: &mut M, r: u32, v: u64| m.call(0x0016_6e90, &[sp, r, v as u32, (v >> 32) as u32], &[]);
+    let two = |m: &mut M, r: u32, v: u64| crate::engine::game::q_00166008::ee_sub_166e90(m, sp, r as u64, v) /* VER3: full 64-bit data */;
     two(m, 0x50, 0xc_1800_0000_0000);
     two(m, 0x52, 0x10_0000_0010);
     let mut by = 0i64;

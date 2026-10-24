@@ -79,6 +79,9 @@ pub struct MeshPrim {
     /// types 1/2: edge quads (a, b, c, d) indexing `positions` (V4-8 array, its own u8 count;
     /// type 2 slot numbers already halved)
     pub edges: Vec<[u32; 4]>,
+    /// LOOK: unlit (Mesh0 flags bit0 clear) Material0 flags & 0x20 prims: the FUN_0016c8e0 prelit pair
+    /// per vertex (`mesh0_prelit`); empty = none (lit by the VU1 lights)
+    pub prelit: Vec<[[f32; 4]; 2]>,
 }
 
 fn bit(bits: &[u32], k: usize) -> bool {
@@ -205,10 +208,28 @@ fn split_weights(w: &[u8], k: usize, nv: usize) -> Vec<Vec<u8>> {
 
 /// FUN_0016a000 data: one primitive per (sub-mesh, material run).
 pub fn convert_mesh0(m: &Mesh0) -> Vec<MeshPrim> {
+    convert_mesh0_rec(m, m.r16c8e0.as_ref())
+}
+
+/// LOOK: FUN_0016a000 GS colours of an unlit prelit vertex (Material0 flags & 0x20): the vertex's
+/// FUN_0016c8e0 entry (c0, c1, b) = groups[list[sub]][vertex] goes to the V4-5 streams +0x12 / +0x14
+/// (qw+1 / qw+2 of the VU vertex, `w` <- S-8 +0x16 / +0x18 under mask 0x3f3f3f3f). With Mesh0 flags
+/// bit0 clear the VU1 program (overlay 376110651 0x32b0 -> 0x6d0) only transforms, so qw+1 is the
+/// first pass (two-layer grey pass / single-layer) colour and qw+2 the colour pass (alpha = b).
+/// Returns [c0 rgb, 1], [c1 rgb, b] at the GS 0x80 = 1.0 scale (V4-5 unpacks c5 << 3).
+pub fn mesh0_prelit(e: (u16, u16, u8)) -> [[f32; 4]; 2] {
+    let c = |v: u16| [0, 5, 10].map(|s| (((v >> s) & 31) << 3) as f32 / 128.0);
+    let (a, b) = (c(e.0), c(e.1));
+    [[a[0], a[1], a[2], 1.0], [b[0], b[1], b[2], e.2 as f32 / 128.0]]
+}
+
+/// `convert_mesh0` with the prelit record of the draw (the mesh's or an instance's FUN_0016c8e0 record).
+pub fn convert_mesh0_rec(m: &Mesh0, rec: Option<&crate::engine::world::alo::Rec16c8e0>) -> Vec<MeshPrim> {
     let k = (m.nweights.max(0) as usize).min(4);
     let mut out = Vec::new();
-    for s in &m.subs {
+    for (si, s) in m.subs.iter().enumerate() {
         let mut start = 0usize;
+        let group = rec.filter(|_| m.flags & 1 == 0).and_then(|r| r.list.get(si).and_then(|&l| r.groups.get(l as usize)));
         for mat in &s.materials {
             let mut tris = Vec::new();
             strip_triangles(&s.indices, &s.index_bits, start, mat.count as usize, &mut tris);
@@ -228,6 +249,10 @@ pub fn convert_mesh0(m: &Mesh0) -> Vec<MeshPrim> {
                 weights: split_weights(&s.weights, k, nv),
                 cull_back: super::material::vu1_cull_back(m.flags),
                 cull: if super::material::vu1_cull_back(m.flags) { Vu1Cull::Back } else { Vu1Cull::None },
+                prelit: match group {
+                    Some(g) if mat.flags & 0x20 != 0 && g.len() >= nv => g[..nv].iter().map(|&e| mesh0_prelit(e)).collect(),
+                    _ => Vec::new(),
+                },
                 ..Default::default()
             };
             out.extend(finish(p, tris));

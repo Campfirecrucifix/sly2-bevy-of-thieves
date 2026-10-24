@@ -196,7 +196,7 @@ pub fn ee_sub_17fd08<M: QMem + ?Sized>(m: &mut M, o: u32, new: i32) {
                 m.call(0x0021_3b00, &[h2, 0x34f], &[]);
                 ee_sub_180100(m, o);
                 if m.r32(o + 0x2a8) as i32 != -1 {
-                    let u = m.call(0x001f_bb90, &[], &[]).0;
+                    let u = { let k = m.r32(o + 0x2a8); m.call(0x001f_bb90, &[k], &[]).0 };
                     m.call(0x001f_b2f8, &[u, 0], &[]);
                     m.call(0x0025_8040, &[o + 0x2a4, u], &[]);
                     let e = m.r32(o + 0x2a4);
@@ -245,7 +245,8 @@ pub fn ee_sub_17fd08<M: QMem + ?Sized>(m: &mut M, o: u32, new: i32) {
         vcall(m, o, 0xc, 0x11c, &[], &[q]);
         vcall(m, o, 0xc, 0x124, &[], &[q]);
         let a = m.r32(o + 0x58);
-        let r = m.call(0x0012_dc18, &[o, a, 1, 7, 2], &[]).0;
+        let t1 = m.rv(e0 + 0x30); // lq t1, 48(sp): matrix row 3 (asm 0x17ffd4)
+        let r = m.call(0x0012_dc18, &[o, a, 1, 7, 2], &[t1]).0;
         m.w32(o + 0x298, r);
         let v = m.call(0x0011_bff0, &[e0], &[]).1;
         let a = m.r32(o + 0x5c);
@@ -262,7 +263,7 @@ pub fn ee_sub_17fd08<M: QMem + ?Sized>(m: &mut M, o: u32, new: i32) {
                 vcall(m, h, 0xc, 0x194, &[], &[]);
             }
             if m.r32(o + 0x2a4) != 0 {
-                m.call(0x001f_b098, &[0], &[]);
+                { let a = m.r32(o + 0x2a4); m.call(0x001f_b098, &[a], &[super::q5util::f4(0.0)]); }
                 m.call(0x0025_8040, &[o + 0x2a4, 0], &[]);
             }
         }
@@ -282,19 +283,20 @@ pub fn ee_sub_18b348<M: QMem + ?Sized>(m: &mut M, o: u32) {
     }
     let sp = stack_push(m, 0x100);
     let (b1, b2, b3, inv) = (sp, sp + 0x40, sp + 0x80, sp + 0xc0);
-    let u = m.call(0x0012_f990, &[t, 0x167], &[]).0;
-    m.w32(o + 0x1bd8, u);
+    let u = m.call(0x0012_f990, &[t, 0x167], &[]).1[0];
+    m.wf(o + 0x1bd8, u);
+    let u = u.to_bits();
     let k = rr(m, o + 0x19a4, 0x60);
     let n = m.r32(o + 0x60);
-    m.call(0x0013_00b8, &[u, 0, t, o, k, n, b1, 0], &[]);
+    m.call(0x0013_00b8, &[t, o, k, n, b1, 0], &[super::q5util::f4(f32::from_bits(u)), super::q5util::f4(0.0)]);
     let v = m.rv(b1 + 0x30);
     m.wv(o + 0x1be0, v);
     let (u, k, n) = (m.r32(o + 0x1bd8), m.r32(o + 0x19cc), m.r32(o + 0x60));
-    m.call(0x0013_00b8, &[u, 0, t, o, k, n, b2, 0], &[]);
+    m.call(0x0013_00b8, &[t, o, k, n, b2, 0], &[super::q5util::f4(f32::from_bits(u)), super::q5util::f4(0.0)]);
     let v = m.rv(b2 + 0x30);
     m.wv(o + 0x1bf0, v);
     let (u, k, n) = (m.r32(o + 0x1bd8), m.r32(o + 0x19c0), m.r32(o + 0x60));
-    m.call(0x0013_00b8, &[u, 0, t, o, k, n, b3, 0], &[]);
+    m.call(0x0013_00b8, &[t, o, k, n, b3, 0], &[super::q5util::f4(f32::from_bits(u)), super::q5util::f4(0.0)]);
     let v = m.rv(b3 + 0x30);
     m.wv(o + 0x1c00, v);
     let l = m.call(0x0011_bff0, &[b3], &[]).1;

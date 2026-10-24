@@ -581,12 +581,12 @@ impl ClassSet {
             if o.class != 73 {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             let mut c = C2d1080::default();
             c.ee_sub_180500(i, h);
             if let Some(p) = props {
-                c.feed(p);
+                c.feed(&super::props_ov(w, i, p));
             }
             // object references (resolved like the K14 rows): +0x190 hit fx, +0x1d4 target
             if c.b.f_190 != 0 {
@@ -640,6 +640,10 @@ impl ClassSet {
             .filter_map(|(i, x)| if let Inst::K15(c) = x { Some((handle(*i), c.f_ec, c.phys.pos)) } else { None })
             .collect();
         for (i, x) in &mut self.k15 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K15(c) = x {
                 let mut cx = Cx { t, dt, h: &mut *h };
                 c.ee_sub_180668(*i, &others, &mut cx);

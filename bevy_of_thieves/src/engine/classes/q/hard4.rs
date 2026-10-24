@@ -365,19 +365,21 @@ pub fn ee_sub_221ce8<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32) {
         let k = m.rf(t + 0x160);
         m.wf(t + 0x140, h * k);
     } else {
-        let p1 = m.r32(t + 0x140);
-        ee_sub_1e7380(m, p1, mode, a30, 0, 0, 0, 0);
+        // asm 0x221d28..48: a0 = mode (+0x10c), a1 = tgt quad, a2..t1 = 0, t2 = track + 0x140, $f12 = *(track + 0x140)
+        let f = m.rf(t + 0x140);
+        ee_sub_1e7380(m, mode, a30, 0, 0, 0, 0, t + 0x140, f);
     }
     stack_pop(m, 0x10);
 }
 
-/// FUN_001e7380 (track spline helper): obj = FUN_001e64c8(); FUN_001e6ed8(obj, p1, a1, p2, p3, p4, p5, p6).
-/// The decompile shows a stray 128-bit a1 move (`por`); the caller (0x221ce8) passes `a1` as the track
-/// mode integer, so it is forwarded as an integer. FUN_001e6ed8 (the spline evaluator) is unported.
+/// FUN_001e7380 (track spline helper): FUN_001e64c8() (result unused), then FUN_001e6ed8 with the same
+/// seven register args a0..t2 (s1..s6 saved copies; a1 moved with `por`, forwarded as is).
+/// PART-R5: was passing the 1e64c8 result as an extra first arg (emu unit-mode mismatch).
 #[allow(clippy::too_many_arguments)]
-pub fn ee_sub_1e7380<M: QMem + ?Sized>(m: &mut M, p1: u32, a1: u32, p2: u32, p3: u32, p4: u32, p5: u32, p6: u32) {
-    let obj = m.call(0x001e_64c8, &[], &[]).0;
-    m.call(0x001e_6ed8, &[obj, p1, a1, p2, p3, p4, p5, p6], &[]);
+/// PART-R16 (ABI): FUN_001e64c8 receives (a0, $f12) untouched; its $f0 result is moved into $f12 for 1e6ed8.
+pub fn ee_sub_1e7380<M: QMem + ?Sized>(m: &mut M, p1: u32, a1: u32, p2: u32, p3: u32, p4: u32, p5: u32, p6: u32, f: f32) {
+    let r = m.call(0x001e_64c8, &[p1], &[s(f)]).1;
+    m.call(0x001e_6ed8, &[p1, a1, p2, p3, p4, p5, p6], &[s(r[0])]);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -476,7 +478,7 @@ pub fn ee_sub_190c58<M: QMem + ?Sized>(m: &mut M, o: u32) -> V4 {
 /// FUN_001d7268 (P22 set-active-character caller): FUN_001f36a8(); then virtual slot 78 (vtable +0x27c /
 /// this-adjust +0x278) with arg 0.
 pub fn ee_sub_1d7268<M: QMem + ?Sized>(m: &mut M, o: u32) {
-    m.call(0x001f_36a8, &[], &[]);
+    m.call(0x001f_36a8, &[o], &[]); // VER5: a0 = o (move s0, a0 in the jal delay slot)
     vslot(m, o, 78, &[0], &[]);
 }
 

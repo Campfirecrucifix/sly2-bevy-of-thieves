@@ -77,9 +77,15 @@ pub fn snapshot_queue<M: QMem + ?Sized>(m: &mut M, obj_addr: &[u32], w: &World, 
                 continue;
             }
             let mut buf = [0u8; 8];
-            let w = r.width.min(8) as usize;
-            for k in 0..w {
-                buf[k] = m.r8(a + r.offset + k as u32);
+            // CRAWL R36: word reads (same bytes, LE) instead of 8 r8 calls per row
+            match r.width {
+                8 => buf = m.r64(a + r.offset).to_le_bytes(),
+                4 => buf[..4].copy_from_slice(&m.r32(a + r.offset).to_le_bytes()),
+                _ => {
+                    for k in 0..r.width.min(8) as usize {
+                        buf[k] = m.r8(a + r.offset + k as u32);
+                    }
+                }
             }
             out.insert(FieldKey { obj: a, offset: r.offset, width: r.width }, buf);
         }

@@ -94,7 +94,11 @@ pub fn c2caf08_v3<M: QMem + ?Sized>(m: &mut M, o: u32) {
         let p24 = m.r32(o + 0x24);
         m.w32(p8 + 0x88, p24.wrapping_add(0x1c));
         m.w32(p8 + 0x8c, p24.wrapping_add(0x40));
-        vslot(m, c, 1, &[p8], &[]);
+        // ANIM-ALL: the evaluator's vtable is at c+0 (FUN_00131cd8: **(c) +0x14, adj +0x10), not vslot's c+0xc
+        let vt = m.r32(c);
+        let adj = m.r16(vt.wrapping_add(0x10)) as i16 as u32;
+        let f = m.r32(vt.wrapping_add(0x14));
+        m.call(f, &[c.wrapping_add(adj), p8], &[]);
     }
 }
 /// FUN_00131d68 (v4): dt in $f12; (a1, a2) forwarded
@@ -111,7 +115,11 @@ pub fn c2caf08_v4<M: QMem + ?Sized>(m: &mut M, o: u32, dt: f32, a1: u32, a2: u32
         m.wf(sp + 4, y);
         m.call(0x0013_17d8, &[t, sp, sp | 4], &[]);
         let (x2, y2) = (m.rf(sp), m.rf(sp + 4));
-        vslot(m, c, 2, &[a1, a2], &[f(x2), f(y2)]);
+        // ANIM-ALL: vtable at c+0 (FUN_00131d68: **(c) +0x1c, adj +0x18)
+        let vt = m.r32(c);
+        let adj = m.r16(vt.wrapping_add(0x18)) as i16 as u32;
+        let fp = m.r32(vt.wrapping_add(0x1c));
+        m.call(fp, &[c.wrapping_add(adj), a1, a2], &[f(x2), f(y2)]);
         stack_pop(m, 8);
     }
 }

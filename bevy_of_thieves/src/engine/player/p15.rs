@@ -24,7 +24,7 @@ pub struct CamCollide {
 pub struct CwQuery(pub Arc<CollisionWorld>);
 impl CmSegmentQuery for CwQuery {
     fn solid_intervals(&mut self, start: [f32; 3], end: [f32; 3]) -> Vec<(f32, f32)> {
-        self.0.clip_segment(start, end).iter().map(|l| (l.t[0], l.t[1])).collect()
+        self.0.clip_segment_cam(start, end).iter().map(|l| (l.t[0], l.t[1])).collect()
     }
 }
 

@@ -315,7 +315,7 @@ impl super::ClassSet {
             let mut c = Box::<C2dbd80>::default();
             c.ee_sub_2259d8(i, h);
             if let Some(p) = w.objects.get(o.clone_of.unwrap_or(i)).and_then(crate::engine::game::fields::object_props) {
-                c.feed(p, i, h);
+                c.feed(&super::props_ov(w, i, p), i, h);
             }
             self.k22c.push((i, super::Inst::K22C69(c)));
         }
@@ -331,7 +331,10 @@ impl super::ClassSet {
         let dt = self.g.dt;
         for (i, x) in &mut self.k22c {
             if let super::Inst::K22C69(c) = x {
-                c.ee_sub_225b60(*i, dt, h);
+                // FEEL R33: slot 15 from the world update list only (LO +0x28 bit 60)
+                if !h.lo_removed(*i) {
+                    c.ee_sub_225b60(*i, dt, h);
+                }
                 c.k30_publish(*i, h);
             }
         }

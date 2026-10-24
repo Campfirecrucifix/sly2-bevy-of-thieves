@@ -4,9 +4,19 @@
 //! denormals flush to 0), SQRT / RSQRT use |x|, DIV by 0 gives +-FLT_MAX (sign = xor of the operand signs).
 pub type V4 = [f32; 4];
 pub type Q = [u32; 4];
+use super::ps2f::{ps2_round as r_, ps2_val as vv};
+#[inline]
+fn v(x: f32) -> f64 {
+    vv(x)
+}
+#[inline]
+fn r(x: f64) -> f32 {
+    r_(x)
+}
 
 /// VU result normalisation: inf / NaN -> +-FLT_MAX, denormal -> +-0
 pub fn fix(x: f32) -> f32 {
+    // (inputs here are IEEE results; exp-255 operands are decoded by `v` below, so NaN can't arise from them)
     if x.is_nan() || x.is_infinite() {
         f32::MAX.copysign(x)
     } else if x != 0.0 && x.abs() < f32::MIN_POSITIVE {
@@ -17,7 +27,7 @@ pub fn fix(x: f32) -> f32 {
 }
 /// `VSQRT Q, ft` (sqrt of |ft|)
 pub fn vsqrt(x: f32) -> f32 {
-    fix(x.abs().sqrt())
+    r(v(x).abs().sqrt())
 }
 /// `VDIV Q, fs, ft` (fs / ft; ft == 0 -> +-FLT_MAX with the xor sign)
 pub fn vdiv(n: f32, d: f32) -> f32 {
@@ -25,7 +35,7 @@ pub fn vdiv(n: f32, d: f32) -> f32 {
         let neg = n.is_sign_negative() ^ d.is_sign_negative();
         if neg { -f32::MAX } else { f32::MAX }
     } else {
-        fix(n / d)
+        r(v(n) / v(d))
     }
 }
 /// `VRSQRT Q, fs, ft` (fs / sqrt(|ft|))
@@ -33,17 +43,17 @@ pub fn vrsqrt(n: f32, d: f32) -> f32 {
     vdiv(n, d.abs().sqrt())
 }
 pub fn add(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|i| fix(a[i] + b[i]))
+    std::array::from_fn(|i| r(v(a[i]) + v(b[i])))
 }
 pub fn sub(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|i| fix(a[i] - b[i]))
+    std::array::from_fn(|i| r(v(a[i]) - v(b[i])))
 }
 pub fn mul(a: V4, b: V4) -> V4 {
-    std::array::from_fn(|i| fix(a[i] * b[i]))
+    std::array::from_fn(|i| r(v(a[i]) * v(b[i])))
 }
 /// `VMULx/VMULq` (broadcast)
 pub fn scale(a: V4, s: f32) -> V4 {
-    std::array::from_fn(|i| fix(a[i] * s))
+    std::array::from_fn(|i| r(v(a[i]) * v(s)))
 }
 /// write only the lanes of `mask` (bit 0 = x .. bit 3 = w) of `v` into `d`
 pub fn masked(d: V4, v: V4, mask: u8) -> V4 {
@@ -51,19 +61,22 @@ pub fn masked(d: V4, v: V4, mask: u8) -> V4 {
 }
 /// `VMUL.xyz t,a,b ; VADDAy ; VMADDz` = x*x' + y*y' + z*z' (x lane)
 pub fn dot3(a: V4, b: V4) -> f32 {
-    fix(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+    r(v(a[0]) * v(b[0]) + v(a[1]) * v(b[1]) + v(a[2]) * v(b[2]))
 }
 /// `VOPMULA ACC, a, b ; VOPMSUB d, b, a` = a x b (xyz; w of the destination untouched -> 0 here)
 pub fn cross(a: V4, b: V4) -> V4 {
-    [fix(a[1] * b[2] - a[2] * b[1]), fix(a[2] * b[0] - a[0] * b[2]), fix(a[0] * b[1] - a[1] * b[0]), 0.0]
+    let c = |p: usize, q: usize| r(v(a[p]) * v(b[q]) - v(a[q]) * v(b[p]));
+    [c(1, 2), c(2, 0), c(0, 1), 0.0]
 }
 /// `VMULAx ACC, r0, v ; VMADDAy ACC, r1, v ; VMADDz d, r2, v` (all four lanes): r0*v.x + r1*v.y + r2*v.z
 pub fn mul3(r: &[V4; 3], v: V4) -> V4 {
-    std::array::from_fn(|i| fix(r[0][i] * v[0] + r[1][i] * v[1] + r[2][i] * v[2]))
+    let w = v;
+    std::array::from_fn(|i| r_(vv(r[0][i]) * vv(w[0]) + vv(r[1][i]) * vv(w[1]) + vv(r[2][i]) * vv(w[2])))
 }
 /// `... ; VMADDw d, r3, v` (VU0 4x4 matrix * vector, rows = columns of the math)
 pub fn mul4(r: &[V4; 4], v: V4) -> V4 {
-    std::array::from_fn(|i| fix(r[0][i] * v[0] + r[1][i] * v[1] + r[2][i] * v[2] + r[3][i] * v[3]))
+    let w = v;
+    std::array::from_fn(|i| r_(vv(r[0][i]) * vv(w[0]) + vv(r[1][i]) * vv(w[1]) + vv(r[2][i]) * vv(w[2]) + vv(r[3][i]) * vv(w[3])))
 }
 pub fn qbits(v: V4) -> Q {
     v.map(f32::to_bits)

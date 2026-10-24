@@ -45,6 +45,9 @@ pub const BTN_CANE: u32 = 0x80;
 pub const BTN_CANE2: u32 = 0x10;
 /// jt+0x1a88: Sly's cane hit geom id
 pub const GEOM_CANE: u32 = 0x14c;
+/// POOL1 R65: the air attack hit part (ALO part id 0x14d), turned on / off by the jts 0xd ASEG jt+0x1a80
+/// events 0xf / 0x10 (id 333)
+pub const GEOM_AIR: u32 = 0x14d;
 /// FUN_00188f20 msg 9 event ids
 pub const EV_COMBO: i32 = 0x164;
 pub const EV_HOLD: i32 = 0x165;
@@ -104,6 +107,8 @@ pub struct CaneGeom {
 pub struct CaneData {
     pub asegs: HashMap<u32, CaneAseg>,
     pub geom: Option<CaneGeom>,
+    /// POOL1 R65: part 0x14d (air attack)
+    pub geom_air: Option<CaneGeom>,
 }
 
 impl CaneData {
@@ -118,14 +123,19 @@ impl CaneData {
             .chain([0x2000, 0x2004]) // WP-P25: jts 6 side ASEGs (oids 0x119 / 0x11a)
             .filter_map(|f| Some((f, CaneAseg::from_aseg(aseg_of(w, *members.get(&f)?)?))))
             .collect();
-        Self { asegs, geom: cane_geom(w, jt) }
+        Self { asegs, geom: cane_geom(w, jt), geom_air: cane_geom_id(w, jt, GEOM_AIR) }
     }
 }
 
 /// The ALO part 0x14c of the JT: bone origin (rest pose, JT frame) + bounding radius.
 pub fn cane_geom(w: &World, jt: usize) -> Option<CaneGeom> {
+    cane_geom_id(w, jt, GEOM_CANE)
+}
+
+/// ALO part `id` of the JT as a hit geom (see `cane_geom`).
+pub fn cane_geom_id(w: &World, jt: usize, id: u32) -> Option<CaneGeom> {
     use crate::engine::gfx::attach::{alo_of, BoneWorlds};
-    let p = alo_of(w, jt)?.parts.iter().find(|p| p.w0 == GEOM_CANE as i32)?;
+    let p = alo_of(w, jt)?.parts.iter().find(|p| p.w0 == id as i32)?;
     let m = BoneWorlds::default().get(w, jt, p.r#ref as usize);
     let root = BoneWorlds::default().get(w, jt, 0);
     let c = [0, 1, 2].map(|j| m[3][j] - root[3][j]);
@@ -149,11 +159,18 @@ pub struct Cane {
     pub t_aseg: f32,
     /// jt+0x1a88 geom enabled (bit 50 clear)
     pub geom_on: bool,
+    /// POOL1 R65: part 0x14d enabled
+    pub geom_air_on: bool,
     /// 0x3e15c0 entries of this JT's cane: targets already hit while the geom is on
     pub hit_done: Vec<u32>,
     /// REPLACED FUN_0018ed98 (cane model on the other side after an even swing)
     pub side: bool,
     pub data: CaneData,
+    /// CRAWL R26: jt+0x1bd4 pickpocket hand in reach (FUN_0018b460, jts 0xb; unported -> set by callers),
+    /// jt+0x1bcc caught item; `pick_167` = FUN_001f1e20(jt+0x10dc) calls of event 0x167 for the class set
+    pub f_1bd4: bool,
+    pub f_1bcc: u32,
+    pub pick_167: Vec<u32>,
 }
 
 impl Default for Cane {
@@ -168,6 +185,10 @@ impl Default for Cane {
             field: None,
             t_aseg: 0.0,
             geom_on: false,
+            geom_air_on: false,
+            f_1bd4: false,
+            f_1bcc: 0,
+            pick_167: Vec::new(),
             hit_done: vec![],
             side: false,
             data: CaneData::default(),
@@ -180,6 +201,21 @@ impl Cane {
     pub fn geom_off(&mut self) {
         self.geom_on = false;
         self.hit_done.clear();
+    }
+
+    /// POOL1 R65: FUN_001f6ac8 / FUN_001f6b48 on SO geom `id` (0x14c cane, 0x14d air attack); disabling one
+    /// drops the 0x3e15c0 entries
+    pub fn geom_set(&mut self, id: u32, on: bool) {
+        match (id, on) {
+            (GEOM_CANE, true) => self.geom_on = true,
+            (GEOM_CANE, false) => self.geom_off(),
+            (GEOM_AIR, true) => self.geom_air_on = true,
+            (GEOM_AIR, false) => {
+                self.geom_air_on = false;
+                self.hit_done.clear();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -381,8 +417,28 @@ impl Jt {
                 self.FUN_00188f20_ev165(_anim);
             }
             EV_18E8 => self.cane.f_18e8 = true,
+            // CRAWL R26: 0x167 (pickpocket anim): focus guard jt+0x10dc and +0x1bd4 -> FUN_001f1e20(guard),
+            // run by the class set (player::plugin::loot_link); the result's 0x282 / FUN_001424e0 catch in
+            // `FUN_00188f20_ev167_done`
+            0x167 => {
+                if self.p13.f_10dc != 0 && self.cane.f_1bd4 {
+                    self.cane.pick_167.push(self.p13.f_10dc);
+                }
+            }
             _ => self.calls.push((0x00188f20, id)),
         }
+    }
+
+    /// FUN_00188f20 event 0x167 tail: FUN_001f1e20's item `obj` (class `cls`); coins (is-a 0x5b / 0x5d)
+    /// return, else jt+0x1bcc = obj and FUN_001424e0(jt, FUN_0015e938(1, 0x282, jt), obj, -1) (catch attach,
+    /// recorded: the attach kind-0xc body is unported)
+    pub fn FUN_00188f20_ev167_done(&mut self, obj: u32, cls: i32) {
+        use super::p4::FUN_00132b10;
+        if obj == 0 || FUN_00132b10(cls, 0x5b) || FUN_00132b10(cls, 0x5d) {
+            return;
+        }
+        self.cane.f_1bcc = obj;
+        self.calls.push((0x001424e0, obj as i32));
     }
 
     /// FUN_00188f20 msg 0xb (hit feedback, p[1] == jt): kind 2 recoil by side, kind 4 recoil 8.
@@ -419,7 +475,18 @@ impl Jt {
 
     /// REPLACED JT slot 73 FUN_001f7410 for the cane geom (module doc): hits on `guards` (handle, position).
     pub fn FUN_001f7410_cane(&mut self, guards: &[(u32, V3)]) -> Vec<GuardHit> {
-        let Some(g) = self.cane.data.geom.clone().filter(|g| self.cane.geom_on && g.kind != 0) else { return vec![] };
+        let geoms: Vec<CaneGeom> = [(self.cane.data.geom.clone(), self.cane.geom_on), (self.cane.data.geom_air.clone(), self.cane.geom_air_on)]
+            .into_iter()
+            .filter_map(|(g, on)| g.filter(|g| on && g.kind != 0))
+            .collect();
+        let mut out = vec![];
+        for g in geoms {
+            out.extend(self.FUN_001f7410_geom(&g, guards));
+        }
+        out
+    }
+
+    fn FUN_001f7410_geom(&mut self, g: &CaneGeom, guards: &[(u32, V3)]) -> Vec<GuardHit> {
         let (s, c) = self.yaw.sin_cos();
         let feet = [self.phys.pos[0], self.phys.pos[1], self.phys.pos[2] - super::JT_RADIUS];
         let cw = [feet[0] + c * g.center[0] - s * g.center[1], feet[1] + s * g.center[0] + c * g.center[1], feet[2] + g.center[2]];
@@ -459,11 +526,25 @@ pub fn cane_hits_to_guards(
     anim: &mut dyn JtAnim,
 ) -> Vec<GuardHit> {
     use crate::engine::classes::Inst;
-    if !jt.cane.geom_on {
+    if !jt.cane.geom_on && !jt.cane.geom_air_on {
         return vec![];
     }
     let guards: Vec<(u32, V3)> =
         set.k6.iter().filter_map(|(i, x)| if let Inst::Guard(g) = x { Some((*i as u32 + 1, g.body.pos)) } else { None }).collect();
+    // WIRE-EP8: class-98 staged switches take the cane hit too (slot 74 FUN_001badf0; cellar exit 382).
+    // REPLACED: FUN_001f7410's geometry query -> sphere vs the object origin, as for the guards.
+    let mut guards = guards;
+    for (i, x) in &set.k5 {
+        if matches!(x, Inst::C2d4b78(_)) {
+            guards.push((*i as u32 + 1, h.ee_sub_1a62e8(*i as u32 + 1)));
+        }
+    }
+    // WIRE-EP8: class-83 switches in hit mode (+0x2a8 1 / 2) take it too (slot 74 FUN_00148f20; hub 142627)
+    for (i, x) in &set.k15 {
+        if matches!(x, Inst::K15d(c) if c.f_2a8 == 1 || c.f_2a8 == 2) {
+            guards.push((*i as u32 + 1, h.ee_sub_1a62e8(*i as u32 + 1)));
+        }
+    }
     let hits = jt.FUN_001f7410_cane(&guards);
     for x in &hits {
         if set.ee_sub_1f7598(x, h) && x.f_44 & 0xf8 != 0 {

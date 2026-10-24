@@ -124,10 +124,11 @@ pub fn ee_sub_118500<M: QMem + ?Sized>(m: &mut M, p: u32, a: u32, b: u32, c: u32
 
 // ---- run_001279c0: splice list nodes
 /// FUN_00127b40: append slot (count at +8, items at +0xc), FUN_00256ee0(&item) default-constructs it
-pub fn ee_sub_127b40<M: QMem + ?Sized>(m: &mut M, l: u32) {
+/// VER5: a1 (`v`) passes through untouched to FUN_00256ee0 (asm: only a0 is rewritten)
+pub fn ee_sub_127b40<M: QMem + ?Sized>(m: &mut M, l: u32, v: u32) {
     let n = m.r32(l + 8);
     m.w32(l + 8, n.wrapping_add(1));
-    m.call(0x0025_6ee0, &[n.wrapping_mul(4).wrapping_add(l).wrapping_add(0xc)], &[]);
+    m.call(0x0025_6ee0, &[n.wrapping_mul(4).wrapping_add(l).wrapping_add(0xc), v], &[]);
 }
 /// FUN_00127b70: remove the first item equal to `v`, shifting the tail down
 pub fn ee_sub_127b70<M: QMem + ?Sized>(m: &mut M, l: u32, v: u32) {

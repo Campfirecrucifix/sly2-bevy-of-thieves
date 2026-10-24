@@ -171,7 +171,7 @@ fn d9360_reset<M: QMem + ?Sized>(m: &mut M, o: u32) {
     let (a, b) = (m.rf(o + 0x50), m.rf(o + 0x54));
     let d = m.call(0x0011_d448, &[], &[f(a), f(b)]).1[0];
     let n = (m.r32(o + 0x1c) as i32).wrapping_shl(1);
-    m.wf(o + 0x60, n as f32 / d);
+    m.wf(o + 0x60, crate::engine::math::ps2f::ps2_div(n as f32, d)); // PS2 div.s: x/0 = +-FLT_MAX
     let (a, b) = (m.rf(o + 0x58), m.rf(o + 0x5c));
     let u = m.call(0x0011_d448, &[], &[f(a), f(b)]).1[0];
     m.wf(o + 0x6c, u);

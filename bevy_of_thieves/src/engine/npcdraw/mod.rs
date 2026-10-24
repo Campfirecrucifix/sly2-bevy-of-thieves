@@ -97,6 +97,21 @@ pub fn guard_anim(w: &World, gi: usize, g: &Guard, now: f32, t_walk: f32) -> Npc
             return NpcAnim::Once { id: h.bit, t: now - h.t0 };
         }
     }
+    // ANIM R25: a script kind-0xe anim command (0xa9 -> 0x9d anim task): its ASEG from the command start, wrapped
+    // with the loop flag (FUN_001317d8, SEGA_LOOP 8), else held at the end
+    let script = match &g.brain.child {
+        Child::Script(s) => Some(&**s),
+        Child::Routine(r) => r.script.as_ref(),
+        _ => None,
+    };
+    if let Some((oid, fl, t0)) = script.and_then(|s| s.anim) {
+        if let Some(obj) = script_aseg(w, gi, oid) {
+            let a = aseg_of(w, obj).expect("script_aseg");
+            let t = (now - t0) * a.f78();
+            let t = if fl & crate::engine::anim::play::SEGA_LOOP != 0 && a.length > 0.0 { t % a.length } else { t };
+            return NpcAnim::Aseg { obj, t };
+        }
+    }
     let v = g.body.f_190;
     let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
     if speed > 1.0e-3 {
@@ -108,7 +123,7 @@ pub fn guard_anim(w: &World, gi: usize, g: &Guard, now: f32, t_walk: f32) -> Npc
     if let Child::React(t0, _) = g.brain.child {
         return NpcAnim::Once { id: GUARD_ANIM_REACT, t: now - t0 };
     }
-    if let Child::Chase = g.brain.child {
+    if let Child::Chase(..) = g.brain.child {
         if anim_object(w, gi, GUARD_ANIM_CHASE).is_some_and(|k| aseg_of(w, k).is_some()) {
             return NpcAnim::Loop { id: GUARD_ANIM_CHASE, rate: 1.0 };
         }
@@ -120,6 +135,12 @@ pub fn guard_anim(w: &World, gi: usize, g: &Guard, now: f32, t_walk: f32) -> Npc
     }
 }
 
+/// ANIM R25: FUN_00209130's FUN_0015e938(0x3dd490, 4, oid, guard) for a script anim record: the ASEG `oid` under the
+/// guard's template, else the first with the oid
+pub fn script_aseg(w: &World, gi: usize, oid: i32) -> Option<usize> {
+    ee_sub_15e938_below(w, template_of(w, gi), oid).or_else(|| w.find_oid(oid).first().copied()).filter(|&k| aseg_of(w, k).is_some())
+}
+
 /// Template (mesh / skeleton owner) of an object: the clone source.
 pub fn template_of(w: &World, o: usize) -> usize {
     w.objects[o].clone_of.unwrap_or(o)
@@ -128,7 +149,12 @@ pub fn template_of(w: &World, o: usize) -> usize {
 /// Object of anim `id` of a guard: the table oid (los::anim_oid) looked up below the guard's template
 /// (FUN_0015e938), else anywhere.
 pub fn anim_object(w: &World, gi: usize, id: i32) -> Option<usize> {
-    let oid = los::anim_oid(w, gi, id)?;
+    anim_object_ovr(w, gi, id, None)
+}
+
+/// CRAWL R84: `anim_object` with the copy's FUN_001caec8 spawner override of the table entry (`ovr` = its oid)
+pub fn anim_object_ovr(w: &World, gi: usize, id: i32, ovr: Option<i32>) -> Option<usize> {
+    let oid = match ovr { Some(o) => o, None => los::anim_oid(w, gi, id)? };
     let ok = |k: usize| aseg_of(w, k).is_some() || w.objects[k].class == CLASS_SM;
     ee_sub_15e938_below(w, template_of(w, gi), oid).filter(|&k| ok(k)).or_else(|| w.find_oid(oid).iter().copied().find(|&k| ok(k)))
 }
@@ -161,7 +187,13 @@ pub fn pickup_sm(w: &World, pi: usize) -> Option<usize> {
 /// FUN_001efac0 tables of an SM object.
 pub fn sm_tables(w: &World, sm: usize) -> Option<Sm> {
     use crate::engine::world::loads_b4::B4Load;
-    let Payload::Loaded(LoadData::B4(b)) = &w.objects[sm].payload else { return None };
+    // POOL1 r39: a FUN_001f66f0 clone child SM (Payload::Clone) shares its source's tables
+    let mut src = match w.objects[sm].payload { Payload::Clone => w.objects[sm].clone_of?, _ => sm };
+    // ANIM-ALL R58: a copy of a copy shares the root's tables (FUN_0013e510 copies the SM fields)
+    while std::env::var_os("SLY2_R58OFF").is_none() && matches!(w.objects[src].payload, Payload::Clone) {
+        match w.objects[src].clone_of.filter(|&c| c != src) { Some(c) => src = c, None => break }
+    }
+    let Payload::Loaded(LoadData::B4(b)) = &w.objects[src].payload else { return None };
     let B4Load::L1efac0 { nested, pairs, links, link_f, .. } = &**b else { return None };
     let nested: Vec<(usize, i32)> = nested.iter().map(|&o| (o, w.objects[o].oid)).collect();
     Some(Sm::ee_sub_1efac0(pairs, links, link_f, &nested))
@@ -184,13 +216,14 @@ pub struct NpcAnimator {
     /// rest locals and the rig bones a root-motion channel drives
     rest: Vec<Mat4>,
     root_bones: HashMap<usize, Vec<usize>>,
+    owner: usize,
 }
 
 impl NpcAnimator {
     pub fn new(w: &World, obj: usize) -> NpcAnimator {
         let rig = JtRig::build(w, template_of(w, obj));
         let rest: Vec<Mat4> = rig.pose.bones.iter().map(|b| b.local).collect();
-        NpcAnimator { rig, cur: None, anim: NpcAnim::None, sm: None, sms: HashMap::new(), rng: GameRng::default(), from: rest.clone(), fade: 0.0, rest, root_bones: HashMap::new() }
+        NpcAnimator { rig, cur: None, anim: NpcAnim::None, sm: None, sms: HashMap::new(), rng: GameRng::default(), from: rest.clone(), fade: 0.0, rest, root_bones: HashMap::new(), owner: obj }
     }
 
     fn bind(&mut self, w: &World, a: usize) -> Option<Arc<Aseg>> {
@@ -206,6 +239,12 @@ impl NpcAnimator {
 
     fn start(&mut self, w: &World, a: usize, t: f32, svt: f32, flags: u32) {
         let Some(aseg) = self.bind(w, a) else { return };
+        // ANIM-ALL: this is the guard's FUN_0012f9b8(t, svt, aseg, owner, flags); replay it into the guest
+        if let Ok(mut q) = crate::engine::classes::k25::NPC_GUEST_REQS.lock() {
+            if q.len() < 4096 {
+                q.push((crate::engine::game::anim_play::world_key(w), (t, svt, a as u32 + 1, self.owner as u32 + 1, flags)));
+            }
+        }
         let mut p = AsegaPlayer::new(aseg, flags, svt);
         p.state.t = t;
         self.from = self.rig.pose.bones.iter().map(|b| b.local).collect();
@@ -233,6 +272,7 @@ impl NpcAnimator {
     pub fn step(&mut self, w: &World, owner: usize, anim: NpcAnim, dt: f32, recv: Option<&mut dyn SmaReceiver>) -> Vec<SmaMsg> {
         let len = |o: usize| aseg_of(w, o).map_or(0.0, |a| a.length);
         let mut due = false;
+        self.owner = owner;
         match anim {
             NpcAnim::Sm { sm, label } => {
                 let cur_sm = self.sm.as_ref().map(|s| s.0);

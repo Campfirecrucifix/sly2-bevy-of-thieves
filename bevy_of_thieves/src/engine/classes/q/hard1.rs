@@ -271,11 +271,36 @@ pub fn ee_sub_11b480<M: QMem + ?Sized>(m: &mut M, out: u32, sn: V4, cs: V4, axis
     out
 }
 
+/// FEEL R86: FUN_00141968 calls made by the live image (jt, target, f12, f13) for the native player JT.
+/// FEEL R89: + the issuing App's LiveQ id (live::CUR_QID; 0 = untagged, taken by any player).
+pub static LAUNCHES_141968: std::sync::Mutex<Vec<(u64, u32, [f32; 3], f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// FEEL R86: take the pending live-image FUN_00141968 launches. FEEL R89: only those of LiveQ `qid` (and
+/// untagged ones); other Apps' launches stay queued for their own player (parallel tests share the queue).
+/// SLY2_FEEL_R89QID=0 = R86 (take all).
+pub fn take_launches_141968(qid: u64) -> Vec<(u32, [f32; 3], f32, f32)> {
+    let all = std::env::var("SLY2_FEEL_R89QID").is_ok_and(|v| v == "0");
+    let Ok(mut l) = LAUNCHES_141968.lock() else { return Vec::new() };
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *l).into_iter().partition(|e| all || e.0 == 0 || e.0 == qid);
+    *l = rest;
+    mine.into_iter().map(|e| (e.1, e.2, e.3, e.4)).collect()
+}
+
 /// FUN_00141968(jt (a0), tgt (128-bit a1), f12, f13): p = pos(jt) (FUN_001a62e8) with z += jt[+0x248];
 /// r = FUN_001d6848(p, tgt, *(jt[+0xe8] + 0x80), f12); jt vslot +0x11c(r (128-bit)); when jt[+0xdf4] == -1:
 /// FUN_00195a00(jt + 0x2c0, 8, 0, 0), +0x300 = 3, +0x360 = r with +0x368 = 0, +0x2f4 = f13, and f13 == 0.0 clears
 /// +0x2e8 / +0x2ec. obs: Ghidra's param order (param_3 = jt, param_a1) is wrong; disasm 0x141970 `move s1, a0`.
 pub fn ee_sub_141968<M: QMem + ?Sized>(m: &mut M, jt: u32, tgt: V4, f12: f32, f13: f32) {
+    // FEEL R86: hand the launch to the native player JT too (player::plugin::tick_player drains it)
+    if std::env::var("SLY2_FEEL_R86PAD").map_or(true, |v| v != "0") {
+        if let Ok(mut l) = LAUNCHES_141968.lock() {
+            // FEEL R89: bounded: an App that stopped ticking leaves its launches behind -> drop the oldest
+            if l.len() >= 64 {
+                l.remove(0);
+            }
+            l.push((crate::engine::classes::q::live::CUR_QID.with(|c| c.get()), jt, [tgt[0], tgt[1], tgt[2]], f12, f13));
+        }
+    }
     let mut p = m.call(0x001a_62e8, &[jt], &[]).1;
     p[2] += m.rf(jt + 0x248);
     let e8 = m.r32(jt + 0xe8);

@@ -83,7 +83,7 @@ impl Alo {
             h.ee_sub_1f37c8(obj);
         }
         if self.f_130 != 0.0 {
-            let a = self.so.f_12c + dt * self.f_130;
+            let a = crate::engine::math::ps2f::ps2_add(self.so.f_12c, crate::engine::math::ps2f::ps2_mul(dt, self.f_130));
             self.so.f_12c = a;
             if a <= 0.0 {
                 self.f_130 = 0.0;

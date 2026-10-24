@@ -88,7 +88,7 @@ pub fn c2d93c0_v6<M: QMem + ?Sized>(m: &mut M, o: u32, p2: u32) {
     let (a, b) = (m.rf(o + 0x50), m.rf(o + 0x54));
     let f2 = fr(m.call(0x0011_d448, &[], &[f(a), f(b)]));
     let n = m.r32(o + 0x1c) as i32 as f32;
-    m.wf(o + 0x60, n / f2);
+    m.wf(o + 0x60, crate::engine::math::ps2f::ps2_div(n, f2)); // PS2 div.s: x/0 = +-FLT_MAX
     let (a, b) = (m.rf(o + 0x58), m.rf(o + 0x5c));
     let u = fr(m.call(0x0011_d448, &[], &[f(a), f(b)]));
     m.wf(o + 0x6c, u);

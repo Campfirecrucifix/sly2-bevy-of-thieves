@@ -82,7 +82,7 @@ pub struct C2c9810 {
     pub f_16c: u32,
     pub f_170: f32,
     /// +0x174 explosion radius (row 1107), +0x178 damage (row 1108)
-    pub f_174: f32,
+    pub f_174: u32,
     pub f_178: i32,
     /// +0x17c / +0x180 angular / linear constraints (FUN_0012dc18 handles)
     pub f_17c: u32,
@@ -182,6 +182,11 @@ impl C2c9810 {
             5 | 7 | 9 | 0xb | 0xd | 0x1a | 0x25 | 0x29 => true,
             _ => false,
         }
+    }
+
+    /// FUN_00224610: remote thrower kinds 7 / 0xb (field row 1105, sym 961)
+    pub fn ee_sub_224610(&self) -> bool {
+        self.f_15c == 7 || self.f_15c == 0xb
     }
 
     /// FUN_00224688: thrower kind 0xb
@@ -415,11 +420,12 @@ impl C2c9810 {
         FUN_0022de88(&mut self.phys, dt);
     }
 
-    /// method 1110 FUN_00224e70(arg, self): FUN_001a58d0(self, 0, 1); FUN_00224bf8(arg, self, +0x174, +0x178,
+    /// method 1110 FUN_00224e70(radius, self): FUN_001a58d0(self, 0, 1); FUN_00224bf8(arg, self, +0x174, +0x178,
     /// position) -> REPLACED by `ClassHost::explode_224bf8`
-    pub fn ee_sub_224e70(&mut self, obj: usize, h: &mut dyn ClassHost) {
+    pub fn ee_sub_224e70(&mut self, obj: usize, arg: u32, h: &mut dyn ClassHost) {
         h.ee_sub_1a58d0(obj, 0, 1);
-        h.explode_224bf8(handle(obj), self.phys.pos, self.f_174, self.f_178);
+        // FUN_00224bf8(radius = the float argument, self, hit kind +0x174, damage +0x178, position)
+        h.explode_224bf8(handle(obj), self.f_174, self.phys.pos, f32::from_bits(arg), self.f_178);
     }
 
     /// rows `ROWS_101` (1109 / 1110 are run-time methods)
@@ -436,7 +442,7 @@ impl C2c9810 {
                 0x168 => self.f_168 = w,
                 0x16c => self.f_16c = w,
                 0x170 => self.f_170 = f32::from_bits(w),
-                0x174 => self.f_174 = f32::from_bits(w),
+                0x174 => self.f_174 = w,
                 0x178 => self.f_178 = w as i32,
                 _ => {}
             }
@@ -456,7 +462,7 @@ impl ClassSet {
             if o.class != 101 && o.class != 102 {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             let mut c = C2c9810::default();
             if o.class == 102 {
@@ -486,6 +492,22 @@ impl ClassSet {
                 self.k15.push((i, Inst::K15b(Box::new(c))));
             }
         }
+    }
+    /// POOL1 r30: FUN_001ffd98 member get / set of the class-101 field rows `ROWS_101` (script get-o / set-o):
+    /// 1104 thrower kind +0x15c, 1107 hit kind +0x174, 1108 damage +0x178 (ints), 1112 range +0x170 (float)
+    pub fn k15_101_member(&mut self, obj: usize, row: u16, set: Option<u32>) -> Option<u32> {
+        let c = self.k15_101_get(obj)?;
+        let f: &mut u32 = match row {
+            1104 => bytemuck_i32(&mut c.f_15c),
+            1107 => &mut c.f_174,
+            1108 => bytemuck_i32(&mut c.f_178),
+            1112 => bytemuck_f32(&mut c.f_170),
+            _ => return None,
+        };
+        if let Some(v) = set {
+            *f = v;
+        }
+        Some(*f)
     }
     /// K15 class-101 state at object index `obj`
     pub fn k15_101_get(&mut self, obj: usize) -> Option<&mut C2c9810> {
@@ -532,4 +554,13 @@ impl ClassSet {
             }
         }
     }
+}
+
+fn bytemuck_i32(v: &mut i32) -> &mut u32 {
+    // SAFETY: i32 and u32 have the same size and alignment
+    unsafe { &mut *(v as *mut i32 as *mut u32) }
+}
+fn bytemuck_f32(v: &mut f32) -> &mut u32 {
+    // SAFETY: f32 and u32 have the same size and alignment
+    unsafe { &mut *(v as *mut f32 as *mut u32) }
 }

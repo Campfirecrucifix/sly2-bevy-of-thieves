@@ -3,9 +3,36 @@
 #![allow(unused_variables, unused_mut, dead_code)]
 use crate::engine::classes::q::q10_e::pool_static_init;
 use crate::engine::classes::q::q2mem::{stack_pop, stack_push, QMem, V4};
-use crate::engine::game::q_00166008::{
-    ee_sub_166bd8, ee_sub_166e90, ee_sub_166ef0, ee_sub_166fe8, ee_sub_167048, ee_sub_1669e0, ee_sub_166920,
-};
+
+// GS packet helpers are separate functions in the original (jal), so they go through the call table;
+// the u64 ones use `QMem::call64` so the live host keeps all 64 bits.
+fn jal_16d698<M: QMem + ?Sized>(m: &mut M, tag: u16, pk: u32, out: u32) {
+    m.call(0x0016_d698, &[tag as i16 as i32 as u32, pk, out], &[]);
+}
+fn jal_16d6c8<M: QMem + ?Sized>(m: &mut M, pk: u32, f: u32, out: u32) {
+    m.call(0x0016_d6c8, &[pk, f, out], &[]);
+}
+fn ee_sub_166920<M: QMem + ?Sized>(m: &mut M, p: u32) -> u32 {
+    m.call(0x0016_6920, &[p], &[]).0
+}
+fn ee_sub_1669e0<M: QMem + ?Sized>(m: &mut M, p: u32, eop: u32) {
+    m.call(0x0016_69e0, &[p, eop], &[]);
+}
+fn ee_sub_166bd8<M: QMem + ?Sized>(m: &mut M, p: u32, prim: u64, nreg: u64, regs: u64) {
+    m.call64(0x0016_6bd8, &[p as u64, prim, nreg, regs]);
+}
+fn ee_sub_166e90<M: QMem + ?Sized>(m: &mut M, p: u32, reg: u64, data: u64) {
+    m.call64(0x0016_6e90, &[p as u64, reg, data]);
+}
+fn ee_sub_166ef0<M: QMem + ?Sized>(m: &mut M, p: u32, n: u64, regs: u64) {
+    m.call64(0x0016_6ef0, &[p as u64, n, regs]);
+}
+fn ee_sub_166fe8<M: QMem + ?Sized>(m: &mut M, p: u32, x: u64, y: i32) {
+    m.call64(0x0016_6fe8, &[p as u64, x, y as i64 as u64]);
+}
+fn ee_sub_167048<M: QMem + ?Sized>(m: &mut M, p: u32, x: u64, y: i32, z: u64) {
+    m.call64(0x0016_7048, &[p as u64, x, y as i64 as u64, z]);
+}
 
 /// FUN_0016d698(tag, pk, out): *out++ = { u16 tag, u16 ((pk+0xc) - (pk+4)) / 16 + 0x23 }
 pub fn ee_sub_16d698<M: QMem + ?Sized>(m: &mut M, tag: u16, pk: u32, out: u32) {
@@ -19,7 +46,7 @@ pub fn ee_sub_16d698<M: QMem + ?Sized>(m: &mut M, tag: u16, pk: u32, out: u32) {
 /// 0x100 / 0x200 mask presets, 0x10000..0x800000 channel masks)
 pub fn ee_sub_16d6c8<M: QMem + ?Sized>(m: &mut M, pk: u32, f: u32, out: u32) {
     ee_sub_166bd8(m, pk, 0x200, 1, 0xe);
-    ee_sub_16d698(m, if f & 4 == 0 { 5 } else { 4 }, pk, out);
+    jal_16d698(m, if f & 4 == 0 { 5 } else { 4 }, pk, out);
     if f & 0x200 == 0 {
         if f & 0x100 == 0 {
             let mut v: u64 = u64::MAX;
@@ -54,7 +81,7 @@ pub fn ee_sub_16d6c8<M: QMem + ?Sized>(m: &mut M, pk: u32, f: u32, out: u32) {
     } else {
         ee_sub_166e90(m, pk, 0x4d, 0x3fff_0200_0000);
     }
-    ee_sub_16d698(m, if f & 1 == 0 { 7 } else { 6 }, pk, out);
+    jal_16d698(m, if f & 1 == 0 { 7 } else { 6 }, pk, out);
     ee_sub_166e90(m, pk, 7, 0xe_a820_0000);
     ee_sub_166e90(m, pk, 0x15, 1);
     ee_sub_166e90(m, pk, 0x3f, 0);
@@ -110,7 +137,7 @@ pub fn ee_sub_16dd58<M: QMem + ?Sized>(m: &mut M, p: u32, _b: u32, mode: u32) {
         if m.r32(0x002d_eb74) != 0 {
             ee_sub_166bd8(m, pk, 0, 1, 0xe);
             let (mut i4, mut i3) = (0x7200u32, 0x7000u32);
-            ee_sub_16d698(m, 0, pk, out);
+            jal_16d698(m, 0, pk, out);
             let mut i2 = 0x1e0i32;
             ee_sub_166e90(m, pk, 0x4c, 0xffff_feff_0000_0000);
             ee_sub_166e90(m, pk, 0x47, 0x31001);
@@ -129,15 +156,15 @@ pub fn ee_sub_16dd58<M: QMem + ?Sized>(m: &mut M, p: u32, _b: u32, mode: u32) {
                 }
             }
         }
-        ee_sub_16d6c8(m, pk, 0x81_0095, out);
-        ee_sub_16d6c8(m, pk, 0x266, out);
+        jal_16d6c8(m, pk, 0x81_0095, out);
+        jal_16d6c8(m, pk, 0x266, out);
     }
     ee_sub_166bd8(m, pk, 0, 1, 0xe);
-    ee_sub_16d698(m, 0, pk, out);
+    jal_16d698(m, 0, pk, out);
     ee_sub_166e90(m, pk, 0x4c, 0);
     ee_sub_166e90(m, pk, 0x46, 1);
     if mode != 8 {
-        ee_sub_16d698(m, 2, pk, out);
+        jal_16d698(m, 2, pk, out);
         ee_sub_166e90(m, pk, 6, 0x6_a800_0000);
         ee_sub_166e90(m, pk, 0x14, 1);
         let g = m.r32(0x003e_1330);
@@ -163,13 +190,13 @@ pub fn ee_sub_16dd58<M: QMem + ?Sized>(m: &mut M, p: u32, _b: u32, mode: u32) {
         }
     }
     ee_sub_1669e0(m, pk, 1);
-    ee_sub_16d698(m, 0xffff, pk, out);
+    jal_16d698(m, 0xffff, pk, out);
     let (s, e) = (m.r32(pk + 4), m.r32(pk + 0xc));
     if e.wrapping_sub(s) >> 4 < 0x100 {
-        m.call(0x0022_6f28, &[s], &[]);
+        m.call(0x0022_6f28, &[p, 0xc, e.wrapping_sub(s) >> 4, s, 0x23], &[]);
     } else {
-        m.call(0x0022_6f28, &[s], &[]);
-        m.call(0x0022_6f28, &[s + 0xff0], &[]);
+        m.call(0x0022_6f28, &[p, 0xc, 0xff, s, 0x23], &[]);
+        m.call(0x0022_6f28, &[p, 0xc, (e.wrapping_sub(s) >> 4) - 0xff, s + 0xff0, 0x122], &[]);
     }
     m.call(0x0022_6d28, &[p], &[]);
     m.call(0x0022_6ce0, &[p, 0x1c48], &[]);

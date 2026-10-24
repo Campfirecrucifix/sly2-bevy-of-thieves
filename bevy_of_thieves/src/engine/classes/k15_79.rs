@@ -214,6 +214,9 @@ impl Proj {
             h.ee_sub_156698_fx(self.phys.pos, owner);
         }
         h.vcall(me, 0x4c);
+        // HEIST r17: slot 9 (vt+0x4c, RemoveLo) takes it out of the world: the inverse of FUN_001d6b00's slot 7
+        // (`in_play` models the projectile's world flag)
+        self.in_play = false;
         self.f_174 = 0;
         self.f_154 = f32::MAX;
         h.vcall_1c(obj, 5, 0);
@@ -531,8 +534,51 @@ impl C2cb780 {
 /// per frame of one projectile `Proj` (also K13 class 81): slot 57 with the host contacts (deferred slot 76
 /// returned), slot 15
 pub fn frame_proj(p: &mut Proj, obj: usize, cx: &mut Cx) -> Option<u32> {
-    let contacts = cx.h.proj_contacts_13aeb0(obj);
+    let mut contacts = cx.h.proj_contacts_13aeb0(obj, p.phys.pos);
+    // HEIST r15: a flying kind-0 projectile (EP3 spotlight bullets, ~10000 u/s = 160 u per frame) also gets the
+    // solver's swept contact over this frame's motion (REPLACED continuous collision; the point test above
+    // tunnels through Sly and the ground)
+    if contacts.is_empty() && p.in_play && p.f_150 == 0 && p.f_174 == 0 {
+        let p0 = p.phys.pos;
+        let p1 = [0, 1, 2].map(|k| p0[k] + p.phys.v[k] * cx.dt);
+        if let Some(c) = cx.h.proj_sweep_13aeb0(obj, p0, p1) {
+            contacts.push(c);
+        }
+    }
+    // BOSS R20 (REPLACED collision pairs): Sly's pair exists only for a fired (in play) projectile; pooled ones at rest
+    // are not in the collision world
+    // R53: nor with its own launcher: FUN_0013bc60's FUN_00134320 re-pairs the launcher (+0x200) without the
+    // projectile (a launcher riding a player character, Bentley's dart emitter, is the player's pair)
+    let root = if p.f_200 != 0 { cx.h.root_14(p.f_200) } else { 0 };
+    let own = root != 0 && [53, 54, 55].iter().any(|&k| cx.h.ee_sub_132b10(root, k) != 0);
+    if !p.in_play || own {
+        contacts.retain(|c| c.obj != guard::PLAYER_HANDLE);
+    }
+    // HEIST r17: no contact from an ignored pair: FUN_0013bc60's FUN_00134320 re-evaluates every SO pair of the
+    // projectile through FUN_00133a38 -> slot 60 (FUN_0013bbf8: e.g. the EP2 turret shells vs the turret's own
+    // class-98 SO 30820 under the launcher's root)
+    if p.in_play {
+        contacts.retain(|c| c.obj == 0 || c.obj == guard::PLAYER_HANDLE || p.ee_sub_13bbf8(obj, c.obj, &mut *cx.h) == 0);
+    }
     let d = if contacts.is_empty() { None } else { p.ee_sub_13aeb0(obj, &contacts, cx) };
+    // slot 73 FUN_001f7410 (inherited 0x2caf88) on the same contacts: every own hit part x guard contact ->
+    // hit {self, guard, part kind, part amount} through FUN_001f7598 (FUN_001f7530 owner walk: the guard root)
+    if !contacts.is_empty() {
+        let parts = cx.h.so_hit_parts(obj);
+        let mut cs = Vec::new();
+        for x in &contacts {
+            for &(kind, amount) in &parts {
+                let pt = [x.point[0], x.point[1], x.point[2], 1.0];
+                cs.push(guard::slots::Contact { kind, amount, other: x.obj, pos: pt, vec: [p.phys.v[0], p.phys.v[1], p.phys.v[2], 0.0] });
+            }
+        }
+        let h = &mut *cx.h;
+        let mut out = Vec::new();
+        guard::c56::Guard::ee_sub_1f7410(obj, &cs, &mut |o, _| o, &mut |hit| out.push(hit));
+        for hit in out {
+            h.ee_sub_1f7598(&hit);
+        }
+    }
     p.ee_sub_13ab58(obj, cx);
     d
 }
@@ -545,7 +591,7 @@ impl ClassSet {
             if !PORTED_K15_79.iter().any(|x| x.0 == o.class) {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             let mut c = C2cb780 { cls: o.class, ..Default::default() };
             match o.class {
@@ -581,6 +627,17 @@ impl ClassSet {
             }
         }
     }
+    /// HEIST r15: the TakeDamage source facts (FUN_001a16c8 / FUN_001a19a0 `HitSrc`) of a hit from projectile
+    /// handle `src`: its class is-a list (FUN_00132b10, 81 -> 0x51 / 0x50 / 0x4f) and for class 0x51 the
+    /// vt+0xfc vector (the projectile's velocity, recorded at the explosion: +0x1c0 restored by FUN_0013b860).
+    /// None when `src` is not a projectile (guards keep `GuardHit::to_p7`'s is-a 0x33 / 0x38).
+    pub fn proj_hit_src(&mut self, src: u32) -> Option<(Vec<i32>, Option<[f32; 3]>)> {
+        let obj = (src as usize).checked_sub(1)?;
+        let (cls, v) = if let Some(c) = self.k15_79_get(obj) { (c.cls, c.p.phys.v) } else { (81, self.k13_get(obj)?.p.phys.v) };
+        let isa: Vec<i32> = (0..199).filter(|&k| crate::engine::player::p4::FUN_00132b10(cls as i32, k)).collect();
+        let dir = isa.contains(&0x51).then_some(v);
+        Some((isa, dir))
+    }
     /// K15 slot 74 of a projectile (79 / 80 / 82, or the K13 class 81)
     pub fn k15_proj_hit(&mut self, obj: usize, hit: &guard::slots::GuardHit, h: &mut dyn ClassHost) -> Option<bool> {
         let (t, dt) = (self.g.t, self.g.dt);
@@ -604,6 +661,13 @@ impl ClassSet {
         let t = self.g.t;
         let k = self.k15.iter().position(|x| x.0 == proj && matches!(x.1, Inst::K15c(_)))?;
         let Inst::K15c(c) = &mut self.k15[k].1 else { return None };
+        // HEIST r18: as k16_fire: a projectile not in play is first pulled from its pool (FUN_001cb250 ->
+        // FUN_001caec8 starts it at the spawner's +0x60 frame). REPLACED: the spawner frame = the launcher's world
+        // origin (FUN_001a62e8, owner chain: the EP2 chopper's launcher 9070 and its class-6 missile spawner sit on
+        // the moving chopper)
+        if !c.p.in_play || h.pool_take_place(handle(proj)) {
+            c.p.phys.pos = h.ee_sub_1a62e8(handle(launcher));
+        }
         let out = launch::ee_sub_1d6b00(&launch::Launcher { l: &l, frame }, c.cls as i32, c.p.phys.pos, c.p.f_260, c.p.phys.gravity, &mut self.rng, h)?;
         c.p.ee_sub_13bc60(proj, handle(launcher), h);
         c.p.in_play = true;

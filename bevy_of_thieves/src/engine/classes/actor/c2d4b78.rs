@@ -48,6 +48,8 @@ pub struct C2d4b78 {
     pub f_168: u32,
     pub f_16c: u32,
     pub f_170: u32,
+    /// WIRE-EP8: FUN_00149ab8(PMF 0x2a7630 = FUN_001bb400) queued, run after the frame
+    pub pending: bool,
 }
 
 /// slot 5: FUN_00114030
@@ -187,6 +189,91 @@ impl C2d4b78 {
         self.f_170 = w;
         self.f_16c = other;
         h.ee_sub_149ab8(obj, PMF_2A7630, 0);
+        self.pending = true;
+    }
+
+    /// WIRE-EP8: FUN_001bb400 (deferred step, DAT_002a7630 = {-1, FUN_001bb400}): +0x168 = 0xe for the player
+    /// toucher, 8 for words 0x100 / 0x10000 / 0x20000 (or a state-0x3b toucher, REPLACED: not tested), else 0;
+    /// vslot +0x1c(0x10); bit 0 clear -> repeat count (+0x158) of the current entry reached -> next entry,
+    /// past the last -> vslot +0x24(0x10, this), vslot +0x1c(5) (the slot's script message 5) and event 0x11.
+    /// REPLACED: FUN_001bbe48 gate and FUN_00156b98 notify are not modelled.
+    pub fn ee_sub_1bb400(&mut self, obj: usize, h: &mut dyn ClassHost) {
+        let me = Alo::h(obj);
+        let pl = h.ee_sub_1c4840();
+        self.f_168 = if self.f_16c != 0 && self.f_16c == pl {
+            0xe
+        } else if [0x100, 0x10000, 0x20000].contains(&self.f_170) {
+            8
+        } else {
+            0
+        };
+        h.vcall_1c(obj, 0x10, 0);
+        if self.f_168 & 1 != 0 {
+            return;
+        }
+        // POOL1 r42: FUN_001bb648(self, record -1) then FUN_001bb648(self, current record)
+        let pre = self.pre.clone();
+        self.ee_sub_1bb648(obj, &pre, h);
+        if let Some(r) = self.rec(self.f_15c).cloned() {
+            self.ee_sub_1bb648(obj, &r, h);
+        }
+        let rep = self.rec(self.f_15c).map_or(0, |r| r.f_4);
+        if 0 < rep {
+            self.f_158 += 1;
+            if rep <= self.f_158 {
+                self.f_158 = 0;
+                self.f_15c += 1;
+                if self.stages.len() as i32 <= self.f_15c {
+                    h.vcall_24(obj, 0x10, me);
+                    h.vcall_1c(obj, 5, 0);
+                    h.ee_sub_1619a0(0x11, me);
+                }
+            }
+        }
+    }
+    /// FUN_001bb648(self, rec): fire the record's entries. Kinds 0..5 are skipped while +0x158 > 0 or for a
+    /// non-repeating record (rec+4 < 1); kinds 0, 1, 6, 7 resolve their oid (FUN_0015e938 kind 1) and are skipped
+    /// when unknown; 0xc = FUN_00161f48(0x2deb30, 1, &pair, self) (task oid pair[0] -> FUN_00164640 state pair[1]).
+    /// 6 = remember the target as the source of later kind-7 entries; 7 = (FUN_00132b10(target, 0x1e)) target
+    /// vt+0x19c(&{1, kind-6 source or target}) (POOL1 R54: EP3 gate 97824 -> emitter group 65653).
+    /// REPLACED: kinds 8 (FUN_0014f750), 9 (FUN_00187e28) and 10 (FUN_00154e10) are not modelled.
+    pub fn ee_sub_1bb648(&mut self, obj: usize, r: &Stage, h: &mut dyn ClassHost) {
+        let me = Alo::h(obj);
+        let mut src = 0;
+        for a in &r.acts {
+            if (0 < self.f_158 || r.f_4 < 1) && (0x3fu32 >> (a.kind & 0x1f)) & 1 != 0 {
+                continue;
+            }
+            let mut tgt = 0;
+            if (0xc3u32 >> (a.kind & 0x1f)) & 1 != 0 {
+                tgt = h.ee_sub_15e938(1, a.arg as i32, me);
+                if tgt == 0 {
+                    continue;
+                }
+            }
+            match a.kind {
+                0 => h.vcall(tgt, 0x44),
+                1 => h.vcall(tgt, 0x4c),
+                2 => h.ee_sub_1f6978(obj, a.arg as i32),
+                3 => h.ee_sub_1f69f8(obj, a.arg as i32),
+                4 => h.ee_sub_1f6ac8(obj, a.arg as i32),
+                5 => h.ee_sub_1f6b48(obj, a.arg as i32),
+                6 => src = tgt,
+                7 => {
+                    if h.ee_sub_132b10(tgt, 0x1e) != 0 {
+                        let mut q = [0u32; 15];
+                        q[0] = 1;
+                        q[1] = if src != 0 { src } else { tgt };
+                        h.vcall_19c(tgt, &q, &[[0.0; 4]; 6]);
+                    }
+                }
+                // HEIST r18: 0xb = (self vt+0x1c)(self, 4, 0, 1, &rec+4, 0) = script message 4 {the word} (EP2
+                // chopper 118349 stage records 105226 / 119813..119816 / 49660 -> its entry-186 s4 missile settings)
+                0xb => h.k27_script_msg(me, 4, &[a.arg]),
+                0xc => h.ee_sub_161f48_list(obj, &[a.pair]),
+                _ => {}
+            }
+        }
     }
     /// FUN_001baf18(obj, target): step the current stage to `target` (0x609 first, 0x60a past last, else id)
     pub fn ee_sub_1baf18(&mut self, obj: usize, target: i32, h: &mut dyn ClassHost) {

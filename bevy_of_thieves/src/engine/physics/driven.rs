@@ -63,21 +63,141 @@ impl Default for GameRng {
         Self(1)
     }
 }
+/// POOL1 R92: the original has ONE rand state (newlib reent [0x2c49d4] + 0x58 = 0x2c4740, never re-seeded: 1 at boot)
+/// that every FUN_0011d3c0 / FUN_0011d3f8 / FUN_0011d448 caller (classes, anims, sounds, scripts' RefOpRandom) advances.
+/// Shared mode routes every `GameRng` (and the splice VM's RefOpRandom) through this one state, as the original; the
+/// per-instance state (`self.0`) is the old behaviour. Process-wide, so concurrently running tests that enable it share
+/// it: enable it only in single-test runs (SLY2_RNG_SHARED=1 [SLY2_RNG_SEED=<hex>] or `rng_shared(Some(seed))`) or the
+/// game. The EE state at a savestate is `rng_state_ee(mem)` (diverge / feel tests seed the post-load state from it).
+static RNG_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RNG_STATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static RNG_ENV: std::sync::Once = std::sync::Once::new();
+/// R92: shared-mode draws since the last `rng_shared` (diagnostics: draws per frame vs the recordings' ~26)
+pub static RNG_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn rng_env() {
+    RNG_ENV.call_once(|| {
+        if std::env::var_os("SLY2_RNG_SHARED").is_some() {
+            let seed = std::env::var("SLY2_RNG_SEED").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(1);
+            RNG_STATE.store(seed, std::sync::atomic::Ordering::SeqCst);
+            RNG_SHARED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+
+/// R92: Some(seed) = shared mode from `seed` (the original's state, e.g. a savestate's 0x2c4740 after the level load);
+/// None = per-instance generators (old behaviour)
+pub fn rng_shared(seed: Option<u32>) {
+    rng_env();
+    if let Some(s) = seed {
+        RNG_STATE.store(s, std::sync::atomic::Ordering::SeqCst);
+        RNG_DRAWS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+    RNG_SHARED.store(seed.is_some(), std::sync::atomic::Ordering::SeqCst);
+}
+
+/// R92: the shared state (None when not shared)
+pub fn rng_shared_state() -> Option<u32> {
+    rng_env();
+    if RNG_SHARED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some(RNG_STATE.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    RNG_THREAD.with(|c| c.get())
+}
+
+/// R92: the original's rand state in an EE RAM image (`*(*(u32*)0x2c49d4 + 0x58)`)
+pub fn rng_state_ee(ee: &[u8]) -> Option<u32> {
+    let rd = |a: usize| ee.get(a..a + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    rd(rd(0x2c49d4)? as usize + 0x58)
+}
+
+thread_local! {
+    /// POOL1 R95: the one shared rand for the CURRENT thread only (used when the process-wide mode is off): a
+    /// test that drives a level on its own thread (engine_ep1a::Run, or an App with single-threaded schedules) gets the
+    /// original's single state without sharing it with the tests running in parallel (libtest: one thread per test)
+    static RNG_THREAD: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// POOL1 R96: a seed this thread's one rand takes at the next level load's end (= SLY2_RNG_LOADSEED per thread)
+    static RNG_THREAD_LOADSEED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+/// R96: at the next level load's end (plugin.rs, where SLY2_RNG_LOADSEED applies) this thread's one rand = `seed`
+/// (the original's state at level clock 0, e.g. a savestate's 0x2c4740); the load's own draws stay unseeded
+pub fn rng_thread_loadseed(seed: Option<u32>) {
+    RNG_THREAD_LOADSEED.with(|c| c.set(seed));
+}
+/// R96: take the pending per-thread load seed (plugin.rs)
+pub fn rng_thread_loadseed_take() -> Option<u32> {
+    RNG_THREAD_LOADSEED.with(|c| c.take())
+}
+/// R95: Some(seed) = this thread's draws all go through one state from `seed` (as the original); None = off
+pub fn rng_shared_thread(seed: Option<u32>) {
+    RNG_THREAD.with(|c| c.set(seed));
+}
+
+/// R92: one FUN_002342a0 step on the shared state; None when not shared
+pub fn rng_shared_next() -> Option<u32> {
+    rng_env();
+    if !RNG_SHARED.load(std::sync::atomic::Ordering::Relaxed) {
+        return RNG_THREAD.with(|c| {
+            let x = c.get()?.wrapping_mul(0x41c64e6d).wrapping_add(0x3039);
+            c.set(Some(x));
+            Some(x)
+        });
+    }
+    RNG_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let prev = RNG_STATE.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |x| Some(x.wrapping_mul(0x41c64e6d).wrapping_add(0x3039))).unwrap();
+    Some(prev.wrapping_mul(0x41c64e6d).wrapping_add(0x3039))
+}
+
+/// POOL1 R93: process-level serial lock for tests that run in shared mode (the state is process-wide: two seeded
+/// levels in parallel would interleave their draws). Poison-tolerant.
+pub static RNG_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub fn rng_serial() -> std::sync::MutexGuard<'static, ()> {
+    RNG_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// R93: per call-site draw counter (SLY2_RNG_SITES=1); `rng_sites_take()` returns and clears it
+pub static RNG_SITES: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+pub fn rng_sites_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SLY2_RNG_SITES").is_some())
+}
+pub fn rng_sites_take() -> Vec<(String, u64)> {
+    let mut v: Vec<_> = RNG_SITES.lock().unwrap().take().unwrap_or_default().into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+#[track_caller]
+fn rng_site() {
+    if rng_sites_on() {
+        let l = std::panic::Location::caller();
+        *RNG_SITES.lock().unwrap().get_or_insert_with(Default::default).entry(format!("{}:{}", l.file(), l.line())).or_default() += 1;
+    }
+}
+
 impl GameRng {
+    #[track_caller]
     pub fn FUN_002342a0(&mut self) -> i32 {
+        rng_site();
+        if let Some(x) = rng_shared_next() {
+            self.0 = x;
+            return (x & 0x7fffffff) as i32;
+        }
         self.0 = self.0.wrapping_mul(0x41c64e6d).wrapping_add(0x3039);
         (self.0 & 0x7fffffff) as i32
     }
     /// 0x11d3c0: rand() % 0x35f15e13
+    #[track_caller]
     pub fn FUN_0011d3c0(&mut self) -> i32 {
         self.FUN_002342a0() % 0x35f15e13
     }
     /// 0x11d3f8(lo, hi): lo + r % (hi - lo + 1)
+    #[track_caller]
     pub fn FUN_0011d3f8(&mut self, lo: i32, hi: i32) -> i32 {
         let r = self.FUN_0011d3c0();
         lo + r % (hi - (lo - 1))
     }
     /// 0x11d448(lo, hi): lo + (hi - lo) * (r % 0x16a1b) * 1.0787603e-05 (lo when equal, no draw)
+    #[track_caller]
     pub fn FUN_0011d448(&mut self, lo: f32, hi: f32) -> f32 {
         if lo == hi {
             return lo;
@@ -203,23 +323,20 @@ impl DrivenXf {
             _ => self.pos,
         }
     }
-    /// 0x0022c8c0: set the xf from a channel value by dof (1/4/5/9/10 translation with identity rows; 2/3
-    /// identity; 6/7 euler 0x11b628; 0xb shear rows[1][0], rows[2][0], rows[2][1]; 0xc scale diagonal).
+    /// 0x0022c8c0: set the xf from a channel value by dof (1/4/5/9/10 translation, rows kept (copy of the xf); 2/3
+    /// unchanged; 6/7 euler 0x11b628; 0xb shear rows[1][0], rows[2][0], rows[2][1]; 0xc scale diagonal).
     pub fn FUN_0022c8c0(&mut self, v: V3) {
         match self.dof {
-            1 | 4 | 5 | 9 | 10 => {
-                self.rot = IDENT;
-                self.pos = v;
-            }
+            // ANIM-ALL R16: FUN_0023320c(dst, xf, 0x40) first copies the xf matrix (the rows stay; no identity)
+            1 | 4 | 5 | 9 | 10 => self.pos = v,
+            2 | 3 => {}
             6 | 7 => self.rot = m3(&FUN_0011b628(v)),
             0xb => {
-                self.rot = IDENT;
                 self.rot[1][0] = v[0];
                 self.rot[2][0] = v[1];
                 self.rot[2][1] = v[2];
             }
             0xc => {
-                self.rot = IDENT;
                 self.rot[0][0] = v[0];
                 self.rot[1][1] = v[1];
                 self.rot[2][2] = v[2];

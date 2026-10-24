@@ -391,6 +391,10 @@ impl ClassSet {
     /// slot 16 FUN_001e6340
     pub(super) fn frame_k11(&mut self, h: &mut dyn ClassHost) {
         for (i, x) in &mut self.k11 {
+            // FEEL R33: slot 15 runs from the world update list only (LO +0x28 bit 60)
+            if h.lo_removed(*i) {
+                continue;
+            }
             if let Inst::K11(k) = x {
                 match k.as_mut() {
                     K11::C2c9a80(c) => c.ee_sub_231368(h),

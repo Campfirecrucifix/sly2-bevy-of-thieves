@@ -93,7 +93,7 @@ pub fn ee_sub_147410<M: QMem + ?Sized>(m: &mut M, o: u32, new: i32) {
     if cur == -1 {
         m.w32(0x002d_d644, o);
         m.call(0x001f_e5b8, &[0x003d_d040, 2, 0], &[]);
-        m.call(0x0014_d1d0, &[0, 0x002d_ded0, 8], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 8], &[super::q5util::f4(0.0)]);
         m.call(0x0020_efc0, &[0x003d_d490, 0], &[]);
         vcall(m, o, 0xc, 0x44, &[], &[]);
         if m.call(0x001a_61a0, &[o], &[]).0 == 0 {
@@ -103,19 +103,19 @@ pub fn ee_sub_147410<M: QMem + ?Sized>(m: &mut M, o: u32, new: i32) {
             vcall(m, q, 0xc, 0xbc, &[], &[]);
         }
     } else if cur == 3 && m.r32(o + 0x160) != 0 {
-        m.call(0x0013_1a20, &[0x3f80_0000], &[]);
+        { let c = m.r32(o + 0x160); m.call(0x0013_1a20, &[c], &[super::q5util::f4(1.0)]); }
     }
     m.w32(o + 0x150, new as u32);
     let t = m.r32(0x002d_df0c);
     m.w32(o + 0x154, t);
     if new == -1 {
         m.w32(0x002d_d644, 0);
-        m.call(0x0014_d1d0, &[0x3f80_0000, 0x002d_ded0, 8], &[]);
+        m.call(0x0014_d1d0, &[0x002d_ded0, 8], &[super::q5util::f4(1.0)]);
         m.call(0x001f_e5b8, &[0x003d_d040, 2, 1], &[]);
         m.call(0x0020_f030, &[0x003d_d490, 0], &[]);
         vcall(m, o, 0xc, 0x4c, &[], &[]);
     } else if new == 3 && m.r32(o + 0x160) != 0 {
-        m.call(0x0013_1a20, &[0], &[]);
+        { let c = m.r32(o + 0x160); m.call(0x0013_1a20, &[c], &[super::q5util::f4(0.0)]); }
     }
 }
 /// FUN_001475c0: two GS sprite setups on the 0x2dea00 packet (frame-buffer copy rectangles)
@@ -218,13 +218,15 @@ pub fn ee_sub_147c20<M: QMem + ?Sized>(m: &mut M, o: u32, a: u32, t: u32) {
             let v = m.r32(f) | 0x100;
             m.w32(f, v);
         }
-        m.call(0x0013_05b8, &[0, 0x3f80_0000, l, o, 4, o + 0x160], &[]);
+        m.call(0x0013_05b8, &[l, o, 4, o + 0x160], &[super::q5util::f4(0.0), super::q5util::f4(1.0)]);
         ee_sub_147410(m, o, 0);
     }
 }
-/// FUN_00147e20(a, b): unlink b from the list at a + 0x20 (head cache at +0x39a4)
+/// FUN_00147e20(a, b): unlink b from the list at a + 0x20 (head cache at +0x39a4). BOSS R21: FUN_0011a380 gets
+/// b too (a1 is passed through unchanged; the decompile drops it): without it FUN_00147e88 re-inserted a
+/// listed node and the proximity list looped on itself (barrel FUN_00183b80 -> FUN_00147f40)
 pub fn ee_sub_147e20<M: QMem + ?Sized>(m: &mut M, a: u32, b: u32) {
-    if m.call(0x0011_a380, &[a + 0x20], &[]).0 != 0 {
+    if m.call(0x0011_a380, &[a + 0x20, b], &[]).0 != 0 {
         if m.r32(a + 0x39a4) == b {
             let n = m.r32(b + 4);
             m.w32(a + 0x39a4, n);

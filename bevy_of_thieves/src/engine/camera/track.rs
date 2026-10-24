@@ -7,8 +7,8 @@
 //! (camera/follow.rs) reads the track's +0x114 params entry while it is on top of the CM priority stack;
 //! a higher track wins, leaving restores the next entry (cm.rs stack + FUN_0014d8c0 blend).
 //! Ported 1:1: FUN_00221298, FUN_00221178 (camera half), FUN_00221388's +0x13c gate.
-//! REPLACED: the focus is always Sly (isA 0x34 true); jt+0x2dc (jtbs) is taken as -1 (PlayerFocus does not
-//! carry it), so the state is re-evaluated every frame; the vtable +0x1c messages 5 / 6 of FUN_00221178
+//! The focus is always Sly (isA 0x34 true); jt+0x2dc (JMP +0x1c, jtbs) = `focus_jtbs` (FEEL R37: while Sly is
+//! in a jump body state the volume result is not applied, the track keeps its state); the vtable +0x1c messages 5 / 6 of FUN_00221178
 //! (script listeners) are counted in `msgs`, not dispatched. classes/c2db6b8.rs holds the class-side port
 //! whose ClassHost camera hooks are not wired to the CM; this module drives the CM directly.
 #![allow(non_snake_case)]
@@ -59,6 +59,8 @@ pub struct TrackSet {
     pub focus: u32,
     /// vtable +0x1c messages sent (5 enter, 6 leave)
     pub msgs: Vec<(u32, i32)>,
+    /// focus jt+0x2dc (Jt::jtbs; None = -1)
+    pub focus_jtbs: Option<i32>,
 }
 
 fn word(b: &[u8]) -> u32 {
@@ -105,7 +107,7 @@ impl TrackSet {
                 track: follow_track(props, !nested.is_empty()),
             });
         }
-        Self { tracks, focus: 0, msgs: Vec::new() }
+        Self { tracks, focus: 0, msgs: Vec::new(), focus_jtbs: None }
     }
 
     /// The C2db858 view of track `pv`.
@@ -152,18 +154,20 @@ impl TrackSet {
             let l = xf(&tr.inv, pos);
             s = (!tr.bsp.nodes.is_empty() && FUN_00118fb0(&tr.geom, &tr.bsp, 0, 0x7fffffff, l).is_some()) as i32;
         }
-        // !isA(focus, 0x34) == false, focus +0x2dc == -1 (REPLACED, see module doc)
-        let jtbs_free = true;
+        // !isA(focus, 0x34) == false (the focus is Sly); focus +0x2dc == -1
+        let jtbs_free = self.focus_jtbs.unwrap_or(-1) == -1;
         if tr.f_124 || jtbs_free || cut || tr.f_13c != -1 {
             self.FUN_00221178(k, s, t, out);
         }
     }
 
-    /// One frame of every track's slot 15 (FUN_00221388: deferred only when +0x13c != 0).
-    pub fn update(&mut self, focus: u32, pos: [f32; 3], cut: bool, t: f32) -> Vec<TrackCm> {
+    /// One frame of every track's slot 15 (FUN_00221388: deferred only when +0x13c != 0). Slot 15 runs only
+    /// for objects in the world's update list: `in_world(obj)` = LO +0x28 bit 60 (a track removed by
+    /// vtable +0x4c FUN_001a5630, e.g. a job toggle FUN_001620b0, is not updated).
+    pub fn update(&mut self, focus: u32, pos: [f32; 3], cut: bool, t: f32, in_world: &dyn Fn(usize) -> bool) -> Vec<TrackCm> {
         let mut out = Vec::new();
         for k in 0..self.tracks.len() {
-            if self.tracks[k].f_13c != 0 {
+            if self.tracks[k].f_13c != 0 && in_world(self.tracks[k].obj) {
                 self.FUN_00221298(k, focus, pos, cut, t, &mut out);
             }
         }

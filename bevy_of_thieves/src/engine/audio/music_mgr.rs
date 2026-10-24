@@ -59,6 +59,15 @@ pub trait MusicHost {
     fn release_obj(&mut self, _obj: u32) {}
 }
 pub struct NoMusicHost;
+
+/// AUD3: the live game's host: the player (class 0x34) position + FUN_001fdc08 fields; the other calls
+/// keep their no-op defaults (DAT_003e14c4 / slot objects are not live objects yet).
+pub struct LiveMusicHost(pub Option<([f32; 3], PlayerMusic)>);
+impl MusicHost for LiveMusicHost {
+    fn player(&self) -> Option<([f32; 3], PlayerMusic)> {
+        self.0
+    }
+}
 impl MusicHost for NoMusicHost {}
 
 /// Clock values FUN_001fd830 reads.
@@ -211,7 +220,7 @@ impl MusicMgr {
             self.f70 = 0.0;
         } else if self.f6c == 0 {
             self.f6c = 1;
-            snd.cmds.push(SndCmd::Sukr { cmd: 0xb });
+            snd.ee_sub_2330d0(0xb);
         }
         let mut pos = [0.0; 3];
         let mut active = false;
@@ -237,7 +246,7 @@ impl MusicMgr {
         // 0x001fdba8
         if self.fa0 == 0 {
             self.fa0 = 1;
-            snd.cmds.push(SndCmd::Sukr { cmd: 0xc });
+            snd.ee_sub_2330d0(0xc);
         }
     }
     pub fn sukr_result_0c(&mut self, v: u32) {
@@ -399,7 +408,7 @@ impl MusicMgr {
     pub fn ee_sub_1fd700(&mut self, es: &mut EmitterSystem, snd: &mut Snd989, h: &mut dyn MusicHost) {
         // 0x001fd700
         snd.cmds.push(SndCmd::StopAll);
-        snd.cmds.push(SndCmd::Sukr { cmd: 10 });
+        snd.ee_sub_2330d0(10);
         snd.flush_231c48(es);
         snd.step_138 = 0;
         let bank = snd.table.bank;
@@ -417,6 +426,21 @@ impl MusicMgr {
         self.f68 = 3;
         *es = EmitterSystem::default();
         self.ee_sub_1fedf0(es, snd);
+    }
+
+    /// AUD3: the level music starts (REPLACED FUN_001fe150 push of the level's KPV instance): a new
+    /// instance on top of the +0x204 stack, flagged starting (+0x52) until the host's players run.
+    pub fn start_track(&mut self, es: &mut EmitterSystem, sound: i32) -> EmitterId {
+        let id = es.alloc_instance(sound);
+        if let Some(e) = es.get_mut(id) {
+            e.s52 = 1;
+        }
+        if self.stack.len() == 8 {
+            let old = self.stack.remove(0);
+            es.release(old);
+        }
+        self.stack.push(id);
+        id
     }
 
     /// FUN_001fd830(0x3dd040): one manager step (see module doc).

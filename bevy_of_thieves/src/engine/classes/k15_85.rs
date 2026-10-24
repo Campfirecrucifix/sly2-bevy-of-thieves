@@ -429,7 +429,7 @@ impl ClassSet {
             if o.class != 85 {
                 continue;
             }
-            let src = o.clone_of.unwrap_or(i);
+            let src = super::clone_src(w, i);
             let props = w.objects.get(src).and_then(crate::engine::game::fields::object_props);
             let mut c = C2d8738::default();
             c.ee_sub_1de400(i, h);
@@ -465,8 +465,19 @@ impl ClassSet {
         for (i, x) in &mut self.k15 {
             let Inst::K15e(c) = x else { continue };
             let i = *i;
+            // CRAWL: an LO removed by the level script (FUN_001a5630) is out of the update list
+            if h.lo_removed(i) {
+                continue;
+            }
             c.ee_sub_1df3a0(i, dt, h);
-            let now = h.so_overlaps_85(i);
+            let q = h.ee_sub_1a62e8(i as u32 + 1);
+            // SO overlap (REPLACED +0xe4 beam geometry): candidates whose position is within reach of a beam
+            let full: Vec<_> = c.beams.iter().map(|b| c.ee_sub_1def98(i, b, h)).collect();
+            let mut now = h.so_overlaps_85(i);
+            now.retain(|&o| {
+                let q = h.ee_sub_1a62e8(o);
+                full.iter().any(|(p0, p1, _)| seg_capsule_hit(*p0, *p1, q, 120.0, 30.0).is_some())
+            });
             for o in std::mem::take(&mut c.touching) {
                 if now.contains(&o) {
                     c.touching.push(o);
@@ -487,4 +498,32 @@ impl ClassSet {
             h.beam_draw_85(i, &segs);
         }
     }
+}
+
+/// WIRE-OBJ: segment p0 -> p1 against the vertical capsule (base `q`, height `hgt`, radius `r`): the beam point
+/// closest to the capsule axis when within `r` (closest points of two segments)
+pub fn seg_capsule_hit(p0: [f32; 3], p1: [f32; 3], q: [f32; 3], hgt: f32, r: f32) -> Option<[f32; 3]> {
+    let d1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    let d2 = [0.0, 0.0, hgt];
+    let rr = [p0[0] - q[0], p0[1] - q[1], p0[2] - q[2]];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, rr));
+    if a <= 1e-6 {
+        return None;
+    }
+    let (b, c) = (dot(d1, d2), dot(d1, rr));
+    let den = a * e - b * b;
+    let mut s = if den > 1e-6 { ((b * f - c * e) / den).clamp(0.0, 1.0) } else { 0.0 };
+    let mut t = (b * s + f) / e;
+    if t < 0.0 {
+        t = 0.0;
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        t = 1.0;
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    let c1 = [p0[0] + d1[0] * s, p0[1] + d1[1] * s, p0[2] + d1[2] * s];
+    let c2 = [q[0], q[1], q[2] + hgt * t];
+    let d = [c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]];
+    (dot(d, d) <= r * r).then_some(c1)
 }

@@ -148,8 +148,8 @@ impl Jt {
             self.binoc_r3(anim); // WP-P15
             return;
         }
-        if self.joy.FUN_001c46c0(self.t, 0.2, BTN_CIRCLE) != 0 {
-            // FUN_001938c0(jt+0x4c0, 0xffff, 0)
+        if (self.po_move.is_none() || std::env::var_os("SLY2_NO_R94_POPICK").is_some()) && self.joy.FUN_001c46c0(self.t, 0.2, BTN_CIRCLE) != 0 {
+            // CRAWL R94: not for a po stand-in (see Jt::input, the po's Circle is its class state code's pick)
             self.calls.push((super::CALL_GROUND_ATTACK, 0xffff));
             self.FUN_001938c0(anim);
             return;

@@ -14,7 +14,9 @@
 //! rate 1 (the ASEGA +0x40 of a flags-9 rate-1 request).
 //! WP-P24 REPLACED (as the JT, playerdraw::BLEND_TIME): a change of the driving anim (run block, or the newest
 //! live ASEGA) cross-fades the bone locals from the last pose over BLEND_TIME (FUN_0012f9b8 blend-in).
-//! UNPORTED: the FUN_001a0300 plain blends (+0x14e0 / +0x15f0 / Murray +0x17f0) and their weights.
+//! ANIM R25: the FUN_001a0300 plain blends (+0x14e0 / +0x15f0 / Murray +0x17f0, FUN_00137a30 of the 8 entry
+//! ASEGs) are in `blends` under their out field; the class's request of one (`plain`, p23::po_plain) plays it
+//! like a run block at rate 1 (flags 9: looped) while no ASEGA and no run block drives the po.
 use super::jtblend::{ee_sub_20b868, JtBlend};
 use super::{aseg_of, bind_channels, blend_local, ee_sub_15e938_below, JtRig, BLEND_TIME};
 use crate::engine::anim::pose::Mat4;
@@ -52,6 +54,8 @@ pub struct PoAnimator {
     pub key: Option<(u8, usize)>,
     pub from: Vec<Mat4>,
     pub fade: f32,
+    /// ANIM R25: the plain blend (out field) the class plays this frame (set by the caller before `step`)
+    pub plain: Option<u32>,
 }
 
 impl PoAnimator {
@@ -69,7 +73,16 @@ impl PoAnimator {
                 blends.insert(blk, b);
             }
         }
-        PoAnimator { po, rig, blends, bindings: HashMap::new(), blk: None, blend_t: 0.0, source: PoSource::Hold, last_t: HashMap::new(), fired: vec![], key: None, from: vec![], fade: 0.0 }
+        let table = crate::engine::player::p23::bind_table(w.objects[po].class);
+        for &(field, first) in crate::engine::player::p23::plain_fields(w.objects[po].class) {
+            let a: Vec<Option<usize>> = (0..8)
+                .map(|k| table.iter().find(|r| r.2 == first + 0x20 * k).and_then(|r| ee_sub_15e938_below(w, po, r.1)).filter(|&o| aseg_of(w, o).is_some()))
+                .collect();
+            if let Some(b) = super::jtblend::ee_sub_137a30(w, &rig, &a, &[]) {
+                blends.insert(field, b);
+            }
+        }
+        PoAnimator { po, rig, blends, bindings: HashMap::new(), blk: None, blend_t: 0.0, source: PoSource::Hold, last_t: HashMap::new(), fired: vec![], key: None, from: vec![], fade: 0.0, plain: None }
     }
 
     /// One frame: `plays` = live ASEGAs on the po (ASEG object, time) oldest first, `bb58` = the class's
@@ -80,6 +93,8 @@ impl PoAnimator {
             b.motion = 0;
         }
         let bb = bb58.filter(|b| self.blends.contains_key(&b.0));
+        let plain = if bb.is_none() { self.plain.filter(|f| self.blends.contains_key(f)) } else { None };
+        let bb = bb.or(plain.map(|f| (f, 1.0)));
         let key = if plays.is_empty() { bb.map(|b| (1u8, b.0 as usize)) } else { plays.last().map(|p| (2u8, p.0)) };
         if key.is_some() && key != self.key {
             self.from = self.rig.pose.bones.iter().map(|b| b.local).collect();
@@ -95,7 +110,9 @@ impl PoAnimator {
                     self.blend_t = 0.0;
                 }
                 let b = self.blends.get_mut(&blk).expect("blend");
-                b.ee_sub_20bb58(u, std::slice::from_mut(&mut self.blend_t));
+                if plain.is_none() {
+                    b.ee_sub_20bb58(u, std::slice::from_mut(&mut self.blend_t));
+                }
                 let t0 = self.blend_t;
                 self.blend_t += dt;
                 if b.length > 0.0 {

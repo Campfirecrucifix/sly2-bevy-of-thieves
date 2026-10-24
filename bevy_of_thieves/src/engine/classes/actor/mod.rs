@@ -78,6 +78,7 @@ impl ClassSet {
     /// K5 tests read those initial values. Class 98 keeps running through the hand path
     /// (slot 57 contact latch is class-98-specific and not yet replayed through the store).
     pub(super) fn frame_k5(&mut self, h: &mut dyn ClassHost) {
+        self.so_fly_k5(h);
         let mut peers: Vec<(u32, u32)> = Vec::new();
         let lists: Vec<(u32, Vec<(i32, u32)>)> = self
             .k5
@@ -105,5 +106,59 @@ impl ClassSet {
                 c.ee_sub_1baed8(*i, me, 0, h);
             }
         }
+        for (i, x) in &mut self.k5 {
+            if let Inst::C2d4b78(c) = x {
+                if std::mem::take(&mut c.pending) {
+                    c.ee_sub_1bb400(*i, h);
+                }
+            }
+        }
     }
 }
+
+impl crate::engine::classes::ClassSet {
+    /// TAKEN BY MURRAY: thrown SO objects (Murray FUN_001b7970 / 1b7ae8 vt+0x11c velocity) against the class-98
+    /// staged switches: the thrower's slot 73 FUN_001f7410 contact -> FUN_001f7598 -> target slot 74
+    /// FUN_001badf0 with the part word +0x18 (FUN_001f7a68(x, 2) = 0x10000) and +0x44 = FUN_001f78d8(target).
+    /// REPLACED: the SO collision pair pass (FUN_00133a38 / 133c68 / 1a7c18) is a sphere test of radius
+    /// `SO_HIT_R` around the switch origin (the switch collision geometry is not loaded).
+    pub(super) fn so_fly_k5(&mut self, h: &mut dyn ClassHost) {
+        let fl = h.so_fly_step(self.g.dt);
+        for (x, p, kind) in fl {
+            if kind == 0 {
+                continue;
+            }
+            let mut hit = false;
+            for (i, inst) in self.k5.iter_mut() {
+                let Inst::C2d4b78(c) = inst else { continue };
+                let me = *i as u32 + 1;
+                if me == x || c.f_154.is_empty() {
+                    continue;
+                }
+                let touch = match h.so_touch(x, p, me) {
+                    Some(t) => t,
+                    // no collision geometry loaded for the switch: REPLACED origin sphere
+                    None => {
+                        let q = h.ee_sub_1a62e8(me);
+                        let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= SO_HIT_R * SO_HIT_R
+                    }
+                };
+                if std::env::var("MPROBE").is_ok() && touch { eprintln!("SOTOUCH {x} -> {me} geom {:?}", h.so_touch(x, p, me)); }
+                if !touch {
+                    continue;
+                }
+                let f44 = crate::engine::player::p8_hazard::FUN_001f78d8(&h.alo_110(me), kind) as u32;
+                let t = crate::engine::classes::actor::alo::Touch { other: x, w_c: kind, flags_40: (f44 as u64) << 32, w_44: f44 };
+                c.ee_sub_1badf0(*i, &t, h);
+                hit = true;
+                break;
+            }
+            if hit {
+                h.so_land(x);
+            }
+        }
+    }
+}
+/// REPLACED (only for switches without collision geometry): hit radius around the switch origin
+pub const SO_HIT_R: f32 = 250.0;

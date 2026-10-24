@@ -141,7 +141,9 @@ impl C2cf378 {
                 1242 => self.f_78 = word(b) as u8,
                 1243 => self.f_64 = h.ee_sub_15e938(0, word(b) as i32, me),
                 1244 => self.f_68 = h.ee_sub_15e938(0, word(b) as i32, me),
-                1245 => self.f_6c = word(b) as i32,
+                // LOOK R39: 2-byte scalars are s16 (k4::word keeps only b[0]: job name ids 458..484 came out
+                // 202..228; PS2 EP4 028 C2cf378 +0x6c = 484 'Operation: Trojan Tank' etc.)
+                1245 => self.f_6c = if b.len() == 2 { i16::from_le_bytes([b[0], b[1]]) as i32 } else { word(b) as i32 },
                 1246 => self.f_70 = word(b) as i32,
                 1253 => self.f_f0 = word(b) as i32,
                 1254 => self.f_f4 = word(b) as i32,

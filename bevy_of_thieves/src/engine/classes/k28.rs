@@ -32,6 +32,12 @@ pub fn ee_sub_200da0(msg: u32, words: &[u32]) -> Option<Vec<Ref>> {
             0 => Ref::Bool(w != 0),
             1 => Ref::F32(f32::from_bits(w)),
             5..=8 | 0xe..=0x11 | 0x13..=0x15 => Ref::S32(w as i32),
+            // CRAWL: message 7 {set, cleared} behaviour-bit words (FUN_00209890 / 00209970)
+            0x1010 => Ref::S32(w as i32),
+            // HEIST: message 0x1c (FUN_00154080 sensor state change {&entry, &old, &new}): the entry's object
+            // (handle = index + 1; the k16 sender maps the player) and the two int states
+            0x2002 if msg == 0x1c && k == 0 => w.checked_sub(1).map_or(Ref::Nil, Ref::Basic),
+            0x106b if msg == 0x1c => Ref::S32(w as i32),
             _ => Ref::Nil,
         })
         .collect();
@@ -49,8 +55,11 @@ impl super::plugin::EngineHost {
         // 0x00131290 (cases 7..0x10)
         use crate::engine::anim::events::EffectCall as E;
         use super::ClassHost;
-        let Some(a) = self.k25.asegas.get(&h) else { return };
-        let (tgt, aseg) = (a.obj, a.aseg as u32 + 1);
+        let Some((tgt, aseg)) = self.k25.asegas.get(&h).map(|a| (a.obj, a.aseg)).or_else(|| self.k25.gone.get(&h).copied()) else { return };
+        let aseg = aseg as u32 + 1;
+        if std::env::var_os("SLY2_K22DBG").is_some() && matches!(c, E::Ef { .. }) {
+            eprintln!("[R50] k28 Ef {c:?} tgt {tgt} aseg {aseg}");
+        }
         let ctx = if tgt == 0 { aseg } else { tgt };
         self.k28_events += 1;
         match c {
@@ -71,6 +80,9 @@ impl super::plugin::EngineHost {
                 let o = if a != -1 { self.ee_sub_15e938(4, a, ctx) } else { tgt };
                 if o != 0 && self.ee_sub_132b10(o, 0x30) != 0 {
                     let i = o as usize - 1;
+                    // BOSS R28: the same call on a live-image object (applied by vm_state flush_live_deferred)
+                    let f = match (matches!(c, E::Ed { .. }), on) { (true, true) => 0x1f6978, (true, false) => 0x1f69f8, (false, true) => 0x1f6ac8, (false, false) => 0x1f6b48 };
+                    self.live_calls.push((f, o, b as u32));
                     match (matches!(c, E::Ed { .. }), on) {
                         (true, true) => self.ee_sub_1f6978(i, b),
                         (true, false) => self.ee_sub_1f69f8(i, b),

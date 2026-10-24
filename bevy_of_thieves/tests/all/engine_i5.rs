@@ -97,7 +97,7 @@ fn i5_region_tracks_level0() {
     assert_eq!(ts.tracks.len(), 22);
     assert_eq!(ts.tracks.iter().filter(|t| t.f_13c == 0).count(), 5);
     let far = [1.0e7, 1.0e7, 1.0e7];
-    assert!(ts.update(7, far, false, 0.0).is_empty(), "outside every volume: state stays 0");
+    assert!(ts.update(7, far, false, 0.0, &|_| true).is_empty(), "outside every volume: state stays 0");
     let mut hit = 0;
     for k in 0..ts.tracks.len() {
         if ts.tracks[k].f_13c != -1 {
@@ -105,11 +105,11 @@ fn i5_region_tracks_level0() {
         }
         let Some(p) = inside_point(&ts.tracks[k]) else { continue };
         let (pv, cpp) = (ts.tracks[k].pv, ts.tracks[k].track.f_128 + 2);
-        let a = ts.update(7, p, false, 1.0);
+        let a = ts.update(7, p, false, 1.0, &|_| true);
         assert!(a.contains(&TrackCm::Push { cpp, pv }), "{a:?}");
         assert_eq!(ts.tracks[k].f_134, 1);
-        assert!(ts.update(7, p, false, 1.1).is_empty(), "no change while inside");
-        let a = ts.update(7, far, false, 2.0);
+        assert!(ts.update(7, p, false, 1.1, &|_| true).is_empty(), "no change while inside");
+        let a = ts.update(7, far, false, 2.0, &|_| true);
         assert!(a.contains(&TrackCm::Revoke { pv }), "{a:?}");
         assert!(ts.tracks.iter().all(|t| t.f_134 == 0));
         hit += 1;

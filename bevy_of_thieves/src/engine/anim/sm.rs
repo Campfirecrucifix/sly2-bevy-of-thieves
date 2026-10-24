@@ -247,6 +247,10 @@ pub struct Sma {
     pub mask: u32,
     /// FUN_001f13a8 state changes (old, new), drained by the caller
     pub changes: Vec<(i32, i32)>,
+    /// CRAWL R50: instant transitions of FUN_001f0d88 (finish / zero length): FUN_0012f9b8 with flags & 2 runs
+    /// FUN_00131100 (the state events, e.g. collision part links 0xf / 0x10) before the inline FUN_00130b18;
+    /// drained by the caller, which starts + retracts them
+    pub instant: Vec<SmaPlay>,
 }
 
 impl Sma {
@@ -254,7 +258,7 @@ impl Sma {
     /// FUN_001f0d88(sma, 0). `length` = ASEG +0x74 of a transition's ASEG object.
     pub fn ee_sub_1f01b8(sm: &Sm, rng: &mut GameRng, label: i32, flags: u32, mask: u32, length: &dyn Fn(usize) -> f32) -> Sma {
         // 0x001f01b8
-        let mut s = Sma { flags, asega: None, cur: 0, next: -1, goal: 0, trans: None, svt: 1.0, mask, changes: vec![] };
+        let mut s = Sma { flags, asega: None, cur: 0, next: -1, goal: 0, trans: None, svt: 1.0, mask, changes: vec![], instant: vec![] };
         if label != -1 {
             let i = ee_sub_1f0400(&sm.states, label);
             s.cur = i;
@@ -329,11 +333,29 @@ impl Sma {
                     new = self.next;
                     self.cur = new;
                     self.next = -1;
-                    self.asega = None; // FUN_00130b18
+                    // FUN_0012f9b8 (FUN_00131100) + FUN_00130b18; bounded for SMA users that never drain it
+                    let p = self.asega.take();
+                    if self.instant.len() < 8 {
+                        self.instant.extend(p);
+                    }
                 }
             }
             self.changes.push((old, new));
         }
+    }
+
+    /// FUN_001f1350(sma, mask): +0x48 = mask; a playing transition whose +0x10 bits meet the new mask is
+    /// cut (FUN_001f08d0: ASEGA retract + FUN_001f0fa0) and the walk restarts (FUN_001f0d88(sma, 0)).
+    /// Returns whether the transition was cut.
+    pub fn ee_sub_1f1350(&mut self, sm: &Sm, rng: &mut GameRng, mask: u32, length: &dyn Fn(usize) -> f32) -> bool {
+        // 0x001f1350
+        self.mask = mask;
+        let hit = self.asega.is_some() && self.trans.is_some_and(|t| sm.trans[t].f10 as u32 & mask != 0);
+        if hit {
+            self.ee_sub_1f0fa0();
+            self.ee_sub_1f0d88(sm, rng, false, length);
+        }
+        hit
     }
 
     /// FUN_001f0fa0: the transition ASEGA is done; enter its target state.

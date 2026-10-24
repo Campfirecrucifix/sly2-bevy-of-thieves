@@ -198,13 +198,15 @@ pub fn ee_sub_1e81c0<M: QMem + ?Sized>(m: &mut M, t: u32, o2: u32) -> u32 {
 pub fn ee_sub_1f35c8<M: QMem + ?Sized>(m: &mut M, p1: f32, o: u32) {
     let b = m.r32(o + 0xe8);
     let f = m.rf(b + 0xd0);
-    m.wf(b + 0xd0, f * (p1 / f));
-    ee_sub_1f35f8(m, o, o);
+    // VER5: FUN_001f35f8(o, $f12 = p1 / f) (PS2 div.s)
+    let q = crate::engine::math::ps2f::ps2_div(p1, f);
+    m.wf(b + 0xd0, f * q);
+    ee_sub_1f35f8(m, o, q);
 }
 /// FUN_001f35f8: scale the three 4-float rows of the block (+0xe8) by `s` (bits), then clear the 0x30 bytes
 /// after it when FUN_0011b318(block, block + 0x30) is 0
-pub fn ee_sub_1f35f8<M: QMem + ?Sized>(m: &mut M, s_bits: u32, o: u32) {
-    let s = f32::from_bits(s_bits);
+/// VER5: ABI per asm: o = a0, s = $f12
+pub fn ee_sub_1f35f8<M: QMem + ?Sized>(m: &mut M, o: u32, s: f32) {
     let b = m.r32(o + 0xe8);
     for r in 0..3 {
         let mut v = m.rv(b + 0x10 * r);
@@ -425,12 +427,12 @@ pub fn ee_sub_1f5078<M: QMem + ?Sized>(m: &mut M, o: u32) {
     }
 }
 /// FUN_001f5480: grow the box of the record (+0xec): min(.., p - r), max(.., p + r), and the radius (+0x30)
-/// to the distance from the centre (+0x20). `r` (a0 bits) is splatted; `p` is the a2 128-bit register.
-pub fn ee_sub_1f5480<M: QMem + ?Sized>(m: &mut M, r_bits: u32, o: u32, p: V4) {
-    let r = f32::from_bits(r_bits);
+/// to the distance from the centre (+0x20). `r` (f12) is splatted; `p` is the a1 128-bit register.
+/// VER4: o = a0, p = a1 (qword), r = f12 (caller order `&[o], &[p, s(f)]`); vmini/vmax are .xyz (w kept)
+pub fn ee_sub_1f5480<M: QMem + ?Sized>(m: &mut M, o: u32, p: V4, r: f32) {
     let b = m.r32(o + 0xec);
     let (mut lo, mut hi) = (m.rv(b), m.rv(b + 0x10));
-    for k in 0..4 {
+    for k in 0..3 {
         lo[k] = lo[k].min(p[k] - r);
         hi[k] = hi[k].max(p[k] + r);
     }
@@ -445,15 +447,17 @@ pub fn ee_sub_1f5480<M: QMem + ?Sized>(m: &mut M, r_bits: u32, o: u32, p: V4) {
 }
 /// FUN_001f5510: out[0..4] = unit(rows(rec) . weights[idx]) (or DAT_002a2dd0 when shorter than 1e-4),
 /// out[+0x10] = DAT_002c3c20[idx]
-pub fn ee_sub_1f5510<M: QMem + ?Sized>(m: &mut M, rec: u32, idx: u32, out: u32) {
+/// (a0 unused; rec = a1, idx = a2, out = a3; xyz from the rows, w lane = rec+0x2c (vmaddz.xyz keeps vf03.w))
+pub fn ee_sub_1f5510<M: QMem + ?Sized>(m: &mut M, _o: u32, rec: u32, idx: u32, out: u32) {
     let k = m.r32(0x002c_3c20 + idx * 4);
     m.w32(out + 0x10, k);
     let (r0, r1, r2) = (m.rv(rec), m.rv(rec + 0x10), m.rv(rec + 0x20));
     let w = m.rv(0x002c_3ba0 + idx * 0x10);
     let mut v = [0f32; 4];
-    for i in 0..4 {
+    for i in 0..3 {
         v[i] = r0[i] * w[0] + r1[i] * w[1] + r2[i] * w[2];
     }
+    v[3] = r2[3];
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     let o = if l < 0.0001 {
         m.rv(0x002a_2dd0)
@@ -506,7 +510,7 @@ fn slot_update<M: QMem + ?Sized>(m: &mut M, o: u32, k: u32, slot: u32, outoff: u
         m.call(0x0023_03a0, &[o, s, 1], &[]);
     }
     let b = m.r32(o + 0xe8);
-    ee_sub_1f5510(m, s, k, b + outoff);
+    ee_sub_1f5510(m, o, s, k, b + outoff);
     ee_sub_1f55c8(m, o);
     if rr(m, o + 0xe8, chk) != 3 {
         m.call(0x001f_8668, &[o, 0], &[]);
@@ -550,18 +554,17 @@ pub fn ee_sub_1f58f0<M: QMem + ?Sized>(m: &mut M, o: u32, out: u32) {
     for k in 0..4 {
         m.wf(out + 0x10 + 4 * k as u32, q[k]);
     }
+    // VFIX3 per asm: `jal 0x22d348; sq v0, 16(s1)` then `sq v0, 32(s1)` = the full 128-bit return (FUN_0022d348
+    // ends `lq v0, 144(sp)`), not x/y + the input z/w
     let r = m.call(0x0022_d348, &[i1, 0], &[q]);
-    // FUN_0022d348 returns auStack_70._0_8_ = the low 64 bits of its result vector = two floats (x, y). The
-    // decompile stored the full undefined8; .0 is the x word, the high word is the y float (r.1[1]). [HARD2]
-    m.w32(out + 0x20, r.0);
-    m.w32(out + 0x24, r.1[1].to_bits());
-    m.wf(out + 0x28, q[2]);
-    m.wf(out + 0x2c, q[3]);
-    let sp = stack_push(m, 0x10);
+    m.wv(out + 0x20, r.1);
+    // BOSS R29: FUN_0011b938 writes 3 quadwords at param_3 (the original's fStack_60 frame slot); a 0x10
+    // reservation let the +0x20 row land on the emulated SP word (q2mem stack_push overflow panics)
+    let sp = stack_push(m, 0x30);
     m.call(0x0011_b938, &[i1 + 0x40, 0, sp], &[]);
     let (f0, f1) = (m.rf(sp), m.rf(sp + 4));
     let a = m.call(0x0024_58f0, &[(-f1).to_bits(), (-f0).to_bits()], &[]).1[0];
-    stack_pop(m, 0x10);
+    stack_pop(m, 0x30);
     m.wf(out + 0x30, a);
     m.w32(out + 0x34, 0x42c8_0000);
     m.w32(out, 0);
@@ -662,13 +665,25 @@ pub fn ee_sub_1fb2f8<M: QMem + ?Sized>(m: &mut M, o: u32, flag: u32) {
     let (c, v) = (m.rv(0x002a_2dd0), m.rv(o + 0x20));
     let mut eq = true;
     for k in 0..3 {
-        if m.call(0x0011_d4d0, &[c[k].to_bits(), v[k].to_bits(), 0x38d1_b717], &[]).0 == 0 {
+        if m.call(0x0011_d4d0, &[], &[[c[k], 0.0, 0.0, 0.0], [v[k], 0.0, 0.0, 0.0], [f32::from_bits(0x38d1_b717), 0.0, 0.0, 0.0]]).0 == 0 {
             eq = false;
             break;
         }
     }
     if eq {
         m.call(0x001f_b658, &[o, 0x200, 0], &[]);
+    }
+}
+/// FUN_001fb658(o, mask, val): +0x50 = +0x50 & !mask | val & mask; nonzero -> FUN_001fb6a8 (register)
+/// else FUN_001fb710 (unregister)
+pub fn ee_sub_1fb658<M: QMem + ?Sized>(m: &mut M, o: u32, mask: u32, val: u32) {
+    let (mask, val) = (mask & 0xffff, val & 0xffff);
+    let f = (m.r16(o + 0x50) as u32 & !mask | val & mask) & 0xffff;
+    m.w16(o + 0x50, f as u16);
+    if f != 0 {
+        m.call(0x001f_b6a8, &[o], &[]);
+    } else {
+        m.call(0x001f_b710, &[o], &[]);
     }
 }
 /// FUN_001fb520: empty virtual

@@ -61,6 +61,9 @@ pub const EV_STOPPED: i32 = 0x22;
 pub struct Job {
     pub obj: usize,
     pub oid: i32,
+    /// BOSS: **(+0xa8) = the +0xe8 save variable float ("suck" difficulty, FUN_00154c90 job path), written by
+    /// FUN_00154dc8 (FUN_00154a90 cases 0x10 / 0x1d / 0x25)
+    pub suck: f32,
     /// WP-J15: save-variable handles +0xc8 (unused) / +0xd0 / +0xd8 / +0xe0 / +0xe8 (props 1262 / 1263 /
     /// 1260 / 1261, kind 0x16 symbol paths; empty = null handle)
     pub save: [Vec<u16>; 5],
@@ -220,6 +223,10 @@ pub struct JobMgr {
     pub reloads: Vec<JobReload>,
     /// unported / script side effects (address, arg)
     pub calls: Vec<(u32, i32)>,
+    /// CRAWL R114 (merged FEEL R98): entries `replay_calls_through` removed from `calls` so far (`vm_state::job_messages`
+    /// keeps a running index calls_drained + calls.len(): that shrink is no new world) and a per-`load` generation
+    pub calls_drained: usize,
+    pub load_gen: u64,
     /// WP-J15: messages 0x1657d0 sends to the task itself through its vtable +0x1c (0x16 before /
     /// 0x15 after a state change): (task index, message), delivered by `vm_state::job_messages`
     pub task_msgs: Vec<(usize, u32)>,
@@ -227,6 +234,9 @@ pub struct JobMgr {
     /// (vt+0x1c, nargs 2): (world object index, event, argument object handle = index + 1, 0 = none),
     /// delivered by `vm_state::job_messages` (the job script's event handler, e.g. method 1069 = 0x162e38)
     pub ev_msgs: Vec<(usize, i32, u32)>,
+    /// WIRE-EP6: message 0x17 {arg} of FUN_00165118 (task time limit +0x78 expired) to the task object
+    /// (vt+0x1c, nargs 1): (world object index, argument), delivered by `vm_state::job_messages`
+    pub msg17: Vec<(usize, i32)>,
     /// world+0x3b10 (DAT_003e0fa0) current task (WP-P9)
     pub cur_task: Option<usize>,
     /// DAT_002deb28 0x164df0 re-entry guard
@@ -265,14 +275,23 @@ fn scalar_i32(props: &[Prop], f: i16) -> Option<i32> {
     props.iter().rev().find(|p| p.field == f).and_then(|p| match &p.value {
         PropValue::Scalar(b) if b.len() >= 4 => Some(i32::from_le_bytes([b[0], b[1], b[2], b[3]])),
         PropValue::Scalar(b) if b.len() >= 2 => Some(i16::from_le_bytes([b[0], b[1]]) as i32),
+        // WIRE-EP6: one-byte (bool) props, e.g. 1272 -> +0x70 / 1271 -> +0x6c = [1]
+        PropValue::Scalar(b) if b.len() == 1 => Some(b[0] as i32),
         _ => None,
     })
 }
 
+/// CRAWL R103: functions `JobMgr` (jobs/*.rs) ports itself and records in `calls` as (address, trace tag): never
+/// replayed into the live image by `replay_calls_through` (their second word is no guest argument).
+pub const JOB_TRACE_ADDRS: &[u32] = &[0x0001_9400, 0x0014_3380, 0x0015_4a90, 0x0015_4d88, 0x0016_1660, 0x0016_29a0, 0x0016_2a60, 0x0016_2bb8,
+    0x0016_3e88, 0x0016_4df0, 0x0016_5118, 0x0016_5170, 0x0016_57d0, 0x0018_c000, 0x001a_4e80, 0x001a_6ca8, 0x001a_bd98, 0x001d_8b20,
+    0x001d_a4b8, 0x001d_a578, 0x0020_efc0, 0x0020_f030, 0x0021_3b00, 0x0022_83d0, 0x002d_eb44];
+
 impl JobMgr {
     /// Jobs and tasks of a loaded world (props of 0x1624a8 / 0x1635f8; ctor defaults -1).
     pub fn load(w: &World) -> Self {
-        let mut m = JobMgr { cur_row: -1, ..Default::default() };
+        static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut m = JobMgr { cur_row: -1, load_gen: GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed), ..Default::default() };
         let mut jp = Vec::new();
         let mut tp = Vec::new();
         for (i, o) in w.objects.iter().enumerate() {
@@ -294,6 +313,13 @@ impl JobMgr {
         for (k, p) in jp.iter().enumerate() {
             m.jobs[k].start = task_of(&m, scalar_i32(p, 1243));
             m.jobs[k].end = task_of(&m, scalar_i32(p, 1244));
+            // WIRE-EP8: load-time method row 1258 (thunk 0x10eda8 -> FUN_00162660): +0xac complete aseg oid,
+            // +0xb0 / +0xb4 start / outro labels (FUN_00162780 then resolves +0xb8 by +0xac); e.g. job 1771 aseg
+            // 1750 -> FUN_00162f10 -> FUN_00163170 picks +0xc0 = 1799 (hub return; PCSX2 trace 048)
+            if let Some(PropValue::Array(a)) = p.iter().rev().find(|x| x.field == 1258).map(|x| &x.value) {
+                let e = |i: usize| crate::engine::game::job_flow::item_i32(a.get(i));
+                m.FUN_00162660(k, e(0), e(1), e(2));
+            }
             // WP-P9: field bindings of class 132 (fieldbind_gen FIELD_MEMBER): 1242 -> +0x78
             m.jobs[k].f_78 = scalar_i32(p, 1242).unwrap_or(0);
             // WP-J14: 1259 -> +0xcc (object oid)
@@ -366,6 +392,7 @@ impl JobMgr {
     /// `arg` = the event object handle (world index + 1, 0 = none).
     pub fn FUN_001619a0(&mut self, ev: i32, arg: i32) {
         self.calls.push((0x00154a90, ev));
+        self.ee_sub_154a90(ev, arg);
         for t in 0..self.tasks.len() {
             if self.tasks[t].job == self.cur {
                 self.FUN_00165170(t, ev, arg);
@@ -579,16 +606,67 @@ impl JobMgr {
         use crate::engine::classes::q::live::{is_queue, trivial};
         use crate::engine::classes::q::q2mem::QMem;
         let mut keep = Vec::with_capacity(self.calls.len());
+        let old_len = self.calls.len();
         let mut n = 0usize;
         for (addr, arg) in std::mem::take(&mut self.calls) {
+            // CRAWL R103 (USER P0, title START crash): the job manager's own trace entries are no guest calls:
+            // `JobMgr` already ran these functions natively and logged (address, trace tag), e.g.
+            // (0x1629a0, 0x13) = "job start, msg 0x13" from `FUN_001629a0`. Replayed, FUN_001629a0(j = 0x13) read the
+            // job record at guest 0x13 (ELF bytes) -> FUN_001620b0 looped over a garbage toggle count until the
+            // budget panic killed the game. They are consumed (as before) but not dispatched. Opt-out
+            // SLY2_NO_R103_JOBTRACE (old replay).
+            if JOB_TRACE_ADDRS.contains(&addr) && std::env::var_os("SLY2_NO_R103_JOBTRACE").is_none() {
+                continue;
+            }
             if is_queue(addr) || trivial(addr).is_some() {
-                let _ = mem.call(addr, &[arg as u32], &[]);
+                // CRAWL R103 (USER P0): under the budget / panic guard like every other host-side live call
+                // (a guest loop over unmodelled data must never kill the game)
+                if mem.guarded(|m| m.call(addr, &[arg as u32], &[])).is_none() {
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        log::warn!("[jobs] replay_calls_through: FUN_{addr:08x}({arg}) aborted (budget / panic); further aborts not logged");
+                    }
+                }
                 n += 1;
             } else {
                 keep.push((addr, arg));
             }
         }
+        self.calls_drained += old_len - keep.len();
         self.calls = keep;
         n
+    }
+}
+
+/// BOSS: DAT_002bdc00 (FUN_00154a90 case 3 table at 0x2de578 +0x14): clamp [+0, +4], +8 death step, +0xc task-done
+/// step, +0x20 / +0x24 damage scale at suck 0 / 1 (FUN_00155228)
+pub const SUCK_2BDC00: [f32; 4] = [0.0, 1.0, 0.1, -0.2];
+pub const SUCK_SCALE_2BDC20: [f32; 2] = [1.0, 0.5];
+
+impl JobMgr {
+    /// BOSS: FUN_00154c90(0x2de578), job path: **(DAT_003e0f9c + 0xa8) (the non-job save-history mean is not
+    /// modelled: 0.0, as `vm_state` bif 103)
+    pub fn ee_sub_154c90(&self) -> f32 {
+        self.cur.map_or(0.0, |j| self.jobs[j].suck)
+    }
+    /// BOSS: FUN_00154a90(0x2de578, ev, arg): 0x10 / 0x1d (death) -> FUN_00154d88(+8), 0x25 (task `arg` done in
+    /// the current job, state 2, +0x68 == 1) -> FUN_00154d88(+0xc). FUN_00154d88(d) = FUN_00154dc8(f + d):
+    /// job current -> **(job + 0xa8) = FUN_0011d948(v, clamp table). Case 3 (load) / 0x22 (save) are not state.
+    pub fn ee_sub_154a90(&mut self, ev: i32, arg: i32) {
+        let d = match ev {
+            0x10 | 0x1d => SUCK_2BDC00[2],
+            0x25 => {
+                let t = (arg as usize).checked_sub(1).and_then(|o| self.tasks.iter().position(|t| t.obj == o));
+                match t {
+                    Some(t) if self.tasks[t].job == self.cur && self.cur.is_some() && self.tasks[t].state == 2 && self.tasks[t].n_68 == 1 => SUCK_2BDC00[3],
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        if let Some(j) = self.cur {
+            let v = self.ee_sub_154c90() + d;
+            self.jobs[j].suck = v.clamp(SUCK_2BDC00[0], SUCK_2BDC00[1]);
+        }
     }
 }

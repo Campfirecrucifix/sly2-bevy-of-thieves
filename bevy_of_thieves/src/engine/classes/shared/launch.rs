@@ -7,7 +7,7 @@
 //! Class-112 launcher (K7 `C2d7f40`) rows 460-467: 460 +0x60 frame object (kind 0x2002), 461 +0x50 target
 //! (vector), 462 +0x70 flight-time poly, 463 +0x80 its clamp, 464 +0x90 speed poly, 465 +0xa0 its clamp, 466
 //! +0xa8 spin range, 467 +0xb0 ballistic blend.
-//! REPLACED: the frame's world matrix (slot 31 + FUN_0011c168) = translation FUN_001a62e8(frame), no rotation;
+//! HEIST r17: the frame's world matrix (slot 31 + FUN_0011c168) = vtable +0xfc (rotation included). REPLACED:
 //! the moving-frame prediction FUN_002309e8(frame, 0, m, 0) over the flight time = the static frame; the
 //! world bookkeeping FUN_0013bc60 (+0x200 owner + collision-ignore refresh FUN_00134320), slot 7 (add to
 //! world), FUN_001f5720 / FUN_001f57c0 (xfLin / xfAng act reset), FUN_001a58d0 = not modelled (the projectile
@@ -35,9 +35,15 @@ impl Launcher<'_> {
     /// +0x80) (prediction REPLACED); speed s = clamp(poly +0x90 (d), +0xa0) (lower bound first, then the upper,
     /// as the original: min if below, max if above); aim = p0 + unit(T - p0) * s
     pub fn aim(&self, p0: [f32; 3], h: &mut dyn ClassHost) -> [f32; 3] {
-        let o = if self.frame == 0 { [0.0; 3] } else { h.ee_sub_1a62e8(self.frame) };
         let l = self.l;
-        let t = [o[0] + l.f_50[0], o[1] + l.f_50[1], o[2] + l.f_50[2]];
+        // HEIST r17: slot 31 world matrix of the frame (FUN_0011c168: T = +0x50 x M), the rotation included (the
+        // EP2 turret barrels' 2c4a frames follow the class-69 yaw / pitch pin, FUN_0012d108)
+        let t = if self.frame == 0 {
+            [l.f_50[0], l.f_50[1], l.f_50[2]]
+        } else {
+            let m = h.vcall_fc(self.frame);
+            std::array::from_fn(|k| l.f_50[0] * m[0][k] + l.f_50[1] * m[1][k] + l.f_50[2] * m[2][k] + m[3][k])
+        };
         let d = [t[0] - p0[0], t[1] - p0[1], t[2] - p0[2]];
         let n = len3(d);
         let s = l.f_90[0] + n * (l.f_90[1] + n * l.f_90[2]);

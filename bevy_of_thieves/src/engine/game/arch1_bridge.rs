@@ -32,6 +32,8 @@ pub struct Arch1Bridge {
     pub calls_dispatched: usize,
     pub messages_delivered: usize,
     pub jt_syncs: usize,
+    /// CRAWL R113: World the frontiers belong to (a level load replaces `JobMgr`: its message lists restart)
+    pub world_key: usize,
 }
 
 /// WP-ARCH1 (a + b): run after `tick_live_q` and `tick_scripts`; drive the store with everything
@@ -64,6 +66,22 @@ pub fn arch1_bridge_tick(
 
     // (2) Deliver vt+0x1c messages through the store too (hand splice path still runs).
     // Snapshot the frontier BEFORE calling `deliver_message` so re-entrant pushes stay buffered.
+    // CRAWL R113 (FEEL R93 live --table 2 crash "slice index 213 out of range for length 198" after a reload):
+    // a level load builds a new `JobMgr` (JobMgr::load), so its `task_msgs` / `ev_msgs` restart while the
+    // frontiers kept the old world's counts. Reset them on a new World or a shrunk list, as
+    // vm_state::job_messages does for the hand splice path.
+    let wk = &*w as *const World as usize;
+    if bridge.world_key != wk {
+        bridge.world_key = wk;
+        bridge.task_msg_seen = 0;
+        bridge.ev_msg_seen = 0;
+    }
+    if jobs.0.task_msgs.len() < bridge.task_msg_seen {
+        bridge.task_msg_seen = 0;
+    }
+    if jobs.0.ev_msgs.len() < bridge.ev_msg_seen {
+        bridge.ev_msg_seen = 0;
+    }
     let new_task = jobs.0.task_msgs.len();
     let task_oids: Vec<(i32, u32)> = jobs.0.task_msgs[bridge.task_msg_seen..new_task]
         .iter()

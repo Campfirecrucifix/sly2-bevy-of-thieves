@@ -8,7 +8,7 @@
 //! WP-P24: a class-15 track (`pv` != 0, `FollowWorld::track`) without a path (+0x10c == 0, +300 == 0) and
 //! with mode bits +0x164 & 7 == 4 (+0x168 / +0x16c / +0x190 == 0) is ported: its +0x114 params entry (live,
 //! like the original's pointer), the +0x188 fov target and the +0x184 cut (the glider camera 0x5f4).
-//! Not ported: the activate-time focus correction FUN_00220dd8(.., track) (0x00221408 / 0x002215c0), the
+//! FEEL R23: the activate-time focus FUN_00220dd8(.., track) is ported (no-path case). Not ported: the
 //! entry selection 0x0015e988 over several +0x114 entries and the camera-track (path +0x10c / +300,
 //! +0x164 mode bits 1|2) helpers 0x00221408/0x002215c0/0x00221ce8/0x001e6f60/0x001e7380 and the
 //! (needs world objects that are not loaded yet; see port_tracking). WP-P17: the cut placement search
@@ -208,6 +208,12 @@ pub struct FollowJt {
     pub pos_500: V3,
     /// +0x10e4
     pub f_10e4: i32,
+    /// FEEL R25: +0x4c8 / +0x4cc (attach kind / substate, -1 unattached) and +0x528 (track_blend's own-track
+    /// test), and the ALO row 0 xy (0x001a6318, heading_weight) for a focus with no `pso_addr`
+    pub a_4c8: u32,
+    pub a_4cc: u32,
+    pub t_528: u32,
+    pub fwd: [f32; 2],
 }
 
 /// World access of the follow policy (replaces vtable/global calls).
@@ -255,6 +261,14 @@ pub trait FollowWorld: CmWorld + Send + Sync {
     /// route through `QMem::call`). None: the struct-side track subset only.
     fn mem(&mut self) -> Option<&mut dyn QMem> {
         None
+    }
+    /// FEEL R24: `mem` address of track handle `pv` (None: not in memory). Default: pv is the address.
+    fn track_addr(&mut self, pv: u32) -> Option<u32> {
+        Some(pv)
+    }
+    /// FEEL R24: `mem` address of the focus `pso` (None: the focus is not in memory).
+    fn pso_addr(&mut self, pso: u32) -> Option<u32> {
+        Some(pso)
     }
 }
 
@@ -496,7 +510,13 @@ impl CplcyFollow {
         if x.path == 0 && x.ring == 0 {
             w = 1.0;
         } else {
-            let own = jt && self.world.mem().map(|m| m.r32(self.pso + 0x528)) == Some(x.t);
+            let pa = self.world.pso_addr(self.pso);
+            let j = self.world.jt(self.pso);
+            let t528 = match pa {
+                Some(a) => self.world.mem().map(|m| m.r32(a + 0x528)),
+                None => j.map(|j| j.t_528),
+            };
+            let own = jt && t528 == Some(x.t);
             if own {
                 w = 3.0;
             } else if self.mode == 1 {
@@ -504,8 +524,12 @@ impl CplcyFollow {
             } else if self.mode == 2 {
                 w = 1.0;
                 use_b = true;
-            } else if let Some(m) = self.world.mem() {
-                let (hw, b) = follow_track::heading_weight(m, x, self.pso);
+            } else if let Some((m, a)) = pa.and_then(|a| self.world.mem().map(|m| (m, a))) {
+                let (hw, b) = follow_track::heading_weight(m, x, a);
+                w = hw;
+                use_b = b;
+            } else if let (Some(j), Some(m)) = (j.filter(|_| pa.is_none()), self.world.mem()) {
+                let (hw, b) = follow_track::heading_weight_dir(m, x, j.fwd);
                 w = hw;
                 use_b = b;
             } else {
@@ -515,9 +539,10 @@ impl CplcyFollow {
         let (ty, tp) = if use_b { (tb[0], tb[1]) } else { (ta[0], ta[1]) };
         let mut f18 = 0.0;
         if jt {
-            let (a, b) = match self.world.mem() {
-                Some(m) => (m.r32(self.pso + 0x4cc), m.r32(self.pso + 0x4c8)),
-                None => (u32::MAX, 0),
+            let pa = self.world.pso_addr(self.pso);
+            let (a, b) = match pa.and_then(|p| self.world.mem().map(|m| (m, p))) {
+                Some((m, p)) => (m.r32(p + 0x4cc), m.r32(p + 0x4c8)),
+                None => self.world.jt(self.pso).map_or((u32::MAX, 0), |j| (j.a_4cc, j.a_4c8)),
             };
             let k = if a == u32::MAX || b != 0 { 0.0016666667 } else { 0.005 };
             f18 = ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() * k).min(1.0);
@@ -591,6 +616,9 @@ impl CplcyFollow {
 }
 
 impl Cplcy for CplcyFollow {
+    fn g_follow(&self) -> Option<f32> {
+        Some(self.g_follow)
+    }
     /// 0x00221a18 (pv == 0 path).
     fn activate(&mut self, cm: &mut Cm, pso: u32, pv: u32, clk: CmClock) {
         self.save = FUN_0014fcc8(cm);
@@ -600,6 +628,9 @@ impl Cplcy for CplcyFollow {
         let track = if pv != 0 { self.world.track(pv) } else { None };
         if let Some(t) = &track {
             self.params = t.params;
+            if std::env::var_os("SLY2_FEEL_CAMLOG").is_some() {
+                eprintln!("FEEL cam activate track {pv:#x} simple={} {:?}", t.simple(), t);
+            }
         }
         self.first = true;
         FUN_00220d40(&mut self.params);
@@ -607,7 +638,23 @@ impl Cplcy for CplcyFollow {
             self.world.set_track_params(pv, &self.params);
         }
         let c = FUN_0014e968(cm, pso, self.world.as_mut());
-        let target = FUN_00220dd8(&self.params, &c);
+        let mut target = FUN_00220dd8(&self.params, &c);
+        // FEEL R23: the track branch FUN_00220dd8(.., track) of the initial focus (0x00221a18:1233-1248)
+        if pv != 0 && std::env::var_os("SLY2_FEEL_NOTRKACT").is_none() {
+            let prm = self.params;
+            let ta = self.world.track_addr(pv).unwrap_or(0);
+            if let Some(m) = self.world.mem().filter(|_| ta != 0) {
+                if std::env::var_os("SLY2_FEEL_CAMLOG").is_some() {
+                    eprintln!("FEEL cam activate track pv {pv:#x} @ {ta:#x} path={:#x} ring={:#x} grf={:#x} i168={} i16c={}", m.r32(ta + 0x10c), m.r32(ta + 300), m.r32(ta + 0x164), m.r32(ta + 0x168), m.r32(ta + 0x16c));
+                }
+                if let Some(t) = follow_track::activate_target(m, ta, &prm, &c) {
+                    if std::env::var_os("SLY2_FEEL_CAMLOG").is_some() {
+                        eprintln!("FEEL cam activate target {t:?} (track-less {target:?})");
+                    }
+                    target = t;
+                }
+            }
+        }
         let focus = add(target, cm.pos_adjust1);
         let (yaw, pitch, dist) = FUN_0011efb0(sub(v3(cm.mat[3]), focus));
         self.yaw = yaw;
@@ -620,7 +667,6 @@ impl Cplcy for CplcyFollow {
         self.t_move = clk.t;
         self.latched = false;
         self.t_manual = clk.t - T_MANUAL_GRACE;
-        // the track branch FUN_00220dd8(.., track) (0x00221408 / 0x002215c0) of the initial focus: unported
         if track.is_some_and(|t| t.f_184 != 0) {
             FUN_0014d8c0(cm);
         }
@@ -649,8 +695,12 @@ impl Cplcy for CplcyFollow {
         let mut trk: Option<TrackCtx> = None;
         let mut target_t = None;
         if self.track != 0 {
-            if let Some(m) = self.world.mem() {
-                let (x, f, tg) = follow_track::begin(m, self.track, &mut self.params, &cm.cpdefi);
+            let ta = self.world.track_addr(self.track);
+            if let Some((m, ta)) = ta.and_then(|a| self.world.mem().map(|m| (m, a))) {
+                let (x, f, tg) = follow_track::begin(m, ta, &mut self.params, &cm.cpdefi);
+                if std::env::var_os("SLY2_FEEL_CAMLOG").is_some() {
+                    eprintln!("FEEL cam tick track @ {ta:#x} grf={:#x} target {tg:?} base {:?} a {:?} b {:?}", x.grf, cm.cpdefi.pos_base, x.a, x.b);
+                }
                 uvar7 = x.grf;
                 target_t = Some((tg, f));
                 trk = Some(x);
@@ -886,6 +936,9 @@ impl Cplcy for CplcyFollow {
         }
         let off = FUN_0011e208(s_yaw, s_pitch, s_dist);
         let mut want = add(focus, off);
+        if std::env::var_os("SLY2_FEEL_CAMLOG").is_some() {
+            eprintln!("FEEL cam want cut {} mode {} yaw {s_yaw} pitch {s_pitch} dist {s_dist} focus {focus:?} want {want:?}", cm.cut, self.mode);
+        }
         if trk.is_some_and(|x| x.f18c != 0) {
             // track +0x18c: no collision / cut placement
         } else if cm.cut == 0 {

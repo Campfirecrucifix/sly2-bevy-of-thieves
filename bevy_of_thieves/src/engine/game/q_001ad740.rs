@@ -199,6 +199,19 @@ pub fn ee_sub_1ae150<M: QMem + ?Sized>(m: &mut M) -> u32 {
     m.r32(0x002f_6388).wrapping_sub(m.r32(0x002f_6384))
 }
 
+/// FUN_001ae1d0: bottom-up frame-scratch block for {size +0, align +4} at `req` (FUN_001ae1c8 is an
+/// empty stub): bottom DAT_002f6384 aligned up, advanced by the 16-rounded size; 0 for size 0
+pub fn ee_sub_1ae1d0<M: QMem + ?Sized>(m: &mut M, req: u32) -> u32 {
+    let n = m.r32(req);
+    if n == 0 {
+        return 0;
+    }
+    let al = m.r32(req + 4);
+    let v = m.r32(0x002f_6384).wrapping_sub(1).wrapping_add(al) & al.wrapping_neg();
+    m.w32(0x002f_6384, v.wrapping_add(n.wrapping_add(15) & !15));
+    v
+}
+
 /// FUN_001ae238: bottom-up scratch block for {size, align} at `req`, filled from `src`
 /// (FUN_001ae5a0)
 pub fn ee_sub_1ae238<M: QMem + ?Sized>(m: &mut M, req: u32, src: u32) -> u32 {
@@ -335,15 +348,16 @@ pub fn ee_sub_1ae5a0<M: QMem + ?Sized>(m: &mut M, d: u32, s: u32, n: u32) {
         if a & 0xf == 0 {
             ee_sub_1ae528(m, d, s, n >> 4);
         } else {
+            // HEIST r42: EE addu wraps (a bad caller pointer near 0xffffffff must not panic the debug build)
             for k in 0..n >> 2 {
-                let w = m.r32(s + 4 * k);
-                m.w32(d + 4 * k, w);
+                let w = m.r32(s.wrapping_add(4 * k));
+                m.w32(d.wrapping_add(4 * k), w);
             }
         }
     } else {
         for k in 0..n {
-            let b = m.r8(s + k);
-            m.w8(d + k, b);
+            let b = m.r8(s.wrapping_add(k));
+            m.w8(d.wrapping_add(k), b);
         }
     }
 }

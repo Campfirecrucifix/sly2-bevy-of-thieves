@@ -338,6 +338,8 @@ pub fn ee_sub_1574b8<M: QMem + ?Sized>(m: &mut M, p: u32) {
 }
 
 fn ref_like<M: QMem + ?Sized>(m: &mut M, p: u32, lo: u32, hi: u32) {
+    // `or` of the sign-extended 64-bit a1 with addr << 32: a negative lo word fills the hi word
+    let hi = if (lo as i32) < 0 { 0xffff_ffff } else { hi };
     let open = m.r32(p + 8) != 0;
     if open {
         ee_sub_1576f0(m, p);

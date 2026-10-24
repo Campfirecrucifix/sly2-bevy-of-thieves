@@ -11,6 +11,8 @@ pub mod font;
 pub mod hud;
 pub mod hud_slots;
 pub mod language;
+#[cfg(feature = "game")]
+pub mod live_menu;
 pub mod menu;
 pub mod movie;
 pub mod meter;
@@ -22,3 +24,5 @@ pub mod thiefnet;
 pub mod title;
 #[cfg(feature = "game")]
 pub mod plugin;
+#[cfg(feature = "game")]
+pub mod world_label;

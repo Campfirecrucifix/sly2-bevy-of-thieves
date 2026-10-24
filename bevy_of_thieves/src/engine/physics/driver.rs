@@ -274,6 +274,28 @@ pub fn FUN_001f9e70(b: &mut AloPhys, dt: f32) {
     }
 }
 
+/// 0x001fa328 (ALO vt +0x214, the 0x1f9410 bit-0-clear apply: mode 2 / restitution pass): consume +0xf0 / +0x100
+/// impulses (0x230598 wakes kind 3 -> 1, 0x22fcc8 constraint) into v / w (+0xb0) only, 0x1f4bf8 notify per part.
+/// Unlike 0x1f9e70 (vt +0x20c, mode 1) there is NO pos / rotation half-step. FEEL R115: vt 0x2d2e98 words +0x20c =
+/// 0x1f9e70, +0x214 = 0x1fa328, +0x21c = 0x1fa528 (read from SCUS_973.16; the earlier "0x214 = 0x1f9e70" was off by one).
+pub fn FUN_001fa328(b: &mut AloPhys) {
+    let (jl, ja) = (constrain(b, b.imp_lin), b.imp_ang);
+    if !near_zero(b.imp_lin) {
+        if b.kind == 3 {
+            b.kind = 1;
+        }
+        b.v = add(b.v, jl);
+        b.imp_lin = [0.0; 3];
+    }
+    if !near_zero(ja) {
+        if b.kind == 3 {
+            b.kind = 1;
+        }
+        b.w = add(b.w, ja);
+        b.imp_ang = [0.0; 3];
+    }
+}
+
 /// 0x001f9c48: put to sleep — undo half a step (pos -= v dt/2, R = expmap(-w dt/2) R), v = w = 0, kind 1 -> 3.
 pub fn FUN_001f9c48(b: &mut AloPhys, dt: f32) {
     if b.kind == 1 {
@@ -299,66 +321,83 @@ pub fn impulse_at(b: &mut AloPhys, j: V3, p: V3, radius: f32) {
     b.imp_ang = add(b.imp_ang, scale(cross(r, j), 2.5 / (radius * radius)));
 }
 
-/// One frame of 0x1f8dd8 for a single sphere body against the level: slot16, contacts (replaced island LCP with
-/// a penetration bias, since 0x1f9e70 only moves pos by J dt/2), slot64, sleep. Returns the contacts' normals.
+/// One frame of 0x1f8dd8 for a single sphere body against the level: slot16, contacts (0x1f9410 mode 1 velocity pass,
+/// slot64, re-gather, mode 4 positional pass gated as 0x1f9240; PHYS1: no velocity penetration bias), sleep. Returns the mode-1 contacts' normals.
 pub fn FUN_001f8dd8(cw: &CollisionWorld, b: &mut AloPhys, radius: f32, dt: f32) -> Vec<V3> {
     if b.kind == 3 && near_zero(b.imp_lin) && near_zero(b.imp_ang) {
         return Vec::new(); // asleep: skipped by 0x1f8f80 mode 1 (all xfs static per 0x230348)
     }
     FUN_001f3980(b, dt);
-    let mut normals = Vec::new();
-    let pos = b.pos;
-    let mut cb = |_c: V3, v: V3, s: &Sbi| {
-        let n = [s.plane[0], s.plane[1], s.plane[2]];
-        normals.push(n);
-        // plane w = n.q (0x119390 / geom plane w = n.v0): gap = n.c - w
-        let pen = radius - (dot(n, pos) - s.plane[3]);
-        // n.J >= max(-n.v, 2 pen/dt): 0x1f9e70 moves pos by J dt/2 only
-        dot(n, v).min(if pen > 0.0 { -2.0 * pen / dt } else { f32::MAX })
-    };
-    // contact gather (0x1f90d0 max 0x40; narrowphase = 0x1a93c8 per collider) and island LCP: x = 0x11ad30 with
-    // the 0x1f9410 bound 2*sqrt(max |v|^2) (0x158e20 first arg), A = n_i.n_j, b = callback.
+    // contact gather (0x1f9240 -> level_contacts, max 0x40; narrowphase = 0x1a93c8 per collider) for SolveIslands(1)
     let mut sbi = Vec::new();
     for col in &cw.colliders {
         let left = 0x40 - sbi.len();
         if left == 0 {
             break;
         }
+        if !col.near(b.pos, radius) {
+            continue;
+        }
         FUN_001a93c8(radius, b.pos, &col.geom, &col.bsp, left, &mut sbi);
     }
     let n = sbi.len();
     let nrm = |s: &Sbi| [s.plane[0], s.plane[1], s.plane[2]];
+    let normals: Vec<V3> = sbi.iter().map(nrm).collect();
     let mut a = vec![0.0f32; n * n];
     for i in 0..n {
         for k in 0..n {
-            a[i * n + k] = dot(nrm(&sbi[i]), nrm(&sbi[k]));
+            a[i * n + k] = dot(normals[i], normals[k]);
         }
     }
-    let bb: Vec<f32> = sbi.iter().map(|s| cb(b.pos, b.v, s)).collect();
-    // REPLACED detail: the bound also covers the penetration bias (the original's separate 0x1f8f80 mode-4
-    // depenetration pass is not ported), else a slow body sleeps while still embedded.
-    let speed = bb.iter().fold(dot(b.v, b.v).sqrt(), |m, x| m.max(x.abs()));
-    let x = if n > 0 { FUN_0011ad30(speed + speed, &a, &bb) } else { Vec::new() };
-    let mut v = b.v;
-    for i in 0..n {
-        v = add(v, scale(nrm(&sbi[i]), x[i]));
-    }
-    let j = [v[0] - b.v[0], v[1] - b.v[1], v[2] - b.v[2]];
-    // the bias part of J moves the body out (pos += J dt/2) but must not stay as velocity: split it off
-    let mut jv = j;
-    if !normals.is_empty() {
-        // velocity after the solve may not separate faster than it approached (no bounce): drop the bias from v
-        let vn: Vec<f32> = normals.iter().map(|n| dot(*n, v)).collect();
-        for (n, d) in normals.iter().zip(vn) {
-            if d > 0.0 {
-                let keep = dot(*n, b.v).max(0.0);
-                jv = add(jv, scale(*n, keep - d));
-            }
+    // SolveIslands(1) (0x1f8f80: runs for a moving body vs the static level): 0x1f9410 mode 1 velocity LCP,
+    // b = n.v (contact +0xb0 relative velocity), bound 0x158e20(2 sqrt(max |v|^2)); slot 0x20c -> J (0x1f9e70).
+    let vn: Vec<f32> = normals.iter().map(|nn| dot(*nn, b.v)).collect();
+    if n > 0 {
+        let speed = dot(b.v, b.v).sqrt();
+        let x = FUN_0011ad30(speed + speed, &a, &vn);
+        let mut j = [0.0f32; 3];
+        for i in 0..n {
+            j = add(j, scale(normals[i], x[i]));
         }
+        b.imp_lin = add(b.imp_lin, j);
     }
-    b.imp_lin = add(b.imp_lin, j);
+    // mode 2 (only when some contact n.v < -5 after mode 1): b = n.v (1 + e rand(0.9, 1.1)) with e = +0x98 = 0
+    // for these level contacts = the mode-1 system again, already satisfied: not repeated.
     FUN_001f9e70(b, dt);
-    b.v = add(b.v, [jv[0] - j[0], jv[1] - j[1], jv[2] - j[2]]);
+    // SolveIslands(6) re-gathers (0x1f9240 -> level_contacts) after the mode-1 apply and UpdateBroadphase
+    let mut sbi = Vec::new();
+    for col in &cw.colliders {
+        let left = 0x40 - sbi.len();
+        if left == 0 {
+            break;
+        }
+        if !col.near(b.pos, radius) {
+            continue;
+        }
+        FUN_001a93c8(radius, b.pos, &col.geom, &col.bsp, left, &mut sbi);
+    }
+    let n = sbi.len();
+    let n6: Vec<V3> = sbi.iter().map(nrm).collect();
+    let mut a = vec![0.0f32; n * n];
+    for i in 0..n {
+        for k in 0..n {
+            a[i * n + k] = dot(n6[i], n6[k]);
+        }
+    }
+    // contact +0x90 = signed gap (plane w = n.q, 0x119390): d = n.c - w - r (< 0 = penetration)
+    let pos = b.pos;
+    let gap: Vec<f32> = sbi.iter().map(|s| dot(nrm(s), pos) - s.plane[3] - radius).collect();
+    // SolveIslands(6), mode 4 (0x1f9240: only when some contact has +0x90 < -2): positional LCP, b = +0x90 + 1,
+    // bound 0x158e20(2 max|+0x90|); slot 0x21c moves the body by sum x n. Velocity is untouched.
+    if gap.iter().any(|&d| d < -2.0) {
+        let bb: Vec<f32> = gap.iter().map(|d| d + 1.0).collect();
+        let m = gap.iter().fold(0.0f32, |m, d| m.max(d.abs()));
+        let x = FUN_0011ad30(m + m, &a, &bb);
+        for i in 0..n {
+            b.pos = add(b.pos, scale(n6[i], x[i]));
+        }
+        b.xf_gen += 1;
+    }
     if sleep_test(b) {
         FUN_001f9c48(b, dt);
     }

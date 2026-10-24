@@ -16,6 +16,13 @@ pub trait QMem {
     fn w8(&mut self, a: u32, v: u8);
     /// engine function `addr` (not in the calling package / not ported here)
     fn call(&mut self, addr: u32, a: &[u32], v: &[V4]) -> (u32, V4);
+    /// call with full 64-bit integer args (GS packet helpers 0x166e90/0x166ef0/0x166fe8/0x167048,
+    /// whose register/GIFtag args are u64). Default records through `call` with the low 32 bits
+    /// (unit-test / verifier hosts stub callees); the live host overrides it to keep all 64 bits.
+    fn call64(&mut self, addr: u32, a: &[u64]) {
+        let lo: Vec<u32> = a.iter().map(|&x| x as u32).collect();
+        self.call(addr, &lo, &[]);
+    }
     /// PAD1: record a FUN_001619a0(addr, event, arg) call for host drain (default: no-op)
     fn record_1619a0(&mut self, _addr: u32, _ev: i32, _arg: i32) {}
     /// PAD1: record a FUN_00164640(handle, state) call for host drain (default: no-op)
@@ -24,6 +31,9 @@ pub trait QMem {
     /// entry_id = the gadget entry, purchased = true/false.
     fn record_gadget_purchase(&mut self, _entry_id: u32, _purchased: bool) {}
 
+    /// VFIX3: stack_pop zeroes released bytes (WIRE-Q2) unless false; FlatMem (unit-test mock) keeps them so
+    /// tests can inspect the arg buffers a port passed to a recorded callee
+    fn scrub_popped_stack(&self) -> bool { true }
     fn r16(&mut self, a: u32) -> u16 {
         u16::from_le_bytes([self.r8(a), self.r8(a + 1)])
     }
@@ -41,7 +51,7 @@ pub trait QMem {
         }
     }
     fn r64(&mut self, a: u32) -> u64 {
-        self.r32(a) as u64 | (self.r32(a + 4) as u64) << 32
+        self.r32(a) as u64 | (self.r32(a.wrapping_add(4)) as u64) << 32
     }
     fn rf(&mut self, a: u32) -> f32 {
         f32::from_bits(self.r32(a))
@@ -50,16 +60,16 @@ pub trait QMem {
         self.w32(a, v.to_bits())
     }
     fn rv(&mut self, a: u32) -> V4 {
-        [self.rf(a), self.rf(a + 4), self.rf(a + 8), self.rf(a + 12)]
+        [self.rf(a), self.rf(a.wrapping_add(4)), self.rf(a.wrapping_add(8)), self.rf(a.wrapping_add(12))]
     }
     fn wv(&mut self, a: u32, v: V4) {
         for (i, x) in v.into_iter().enumerate() {
-            self.wf(a + 4 * i as u32, x);
+            self.wf(a.wrapping_add(4 * i as u32), x);
         }
     }
     /// 4 quadwords at `a` (VU0 matrix: rows = basis vectors, row 3 = translation)
     fn rm(&mut self, a: u32) -> [V4; 4] {
-        [self.rv(a), self.rv(a + 0x10), self.rv(a + 0x20), self.rv(a + 0x30)]
+        [self.rv(a), self.rv(a.wrapping_add(0x10)), self.rv(a.wrapping_add(0x20)), self.rv(a.wrapping_add(0x30))]
     }
     fn wm(&mut self, a: u32, m: [V4; 4]) {
         for (i, r) in m.into_iter().enumerate() {
@@ -85,9 +95,17 @@ pub fn stack_push<M: QMem + ?Sized>(m: &mut M, n: u32) -> u32 {
 }
 
 /// release a `stack_push(n)` reservation (LIFO)
+/// WIRE-Q2: the released bytes are zeroed, so a later frame's uninitialised local (e.g. FUN_00210b28's out
+/// word when the save lookup is not modelled) reads 0 (fresh game) instead of a previous callee's pointer
 pub fn stack_pop<M: QMem + ?Sized>(m: &mut M, n: u32) {
     let sp = m.r32(SCRATCH_SP);
-    m.w32(SCRATCH_SP, sp + ((n + 15) & !15));
+    let n = (n + 15) & !15;
+    if m.scrub_popped_stack() {
+        for k in (0..n).step_by(4) {
+            m.w32(sp + k, 0);
+        }
+    }
+    m.w32(SCRATCH_SP, sp + n);
 }
 
 /// vtable word offset of virtual slot `slot` (the DB's class_slots numbering): fn at +8n+0xc,
@@ -98,9 +116,9 @@ pub const fn slot_off(slot: u32) -> u32 {
 
 /// `(**(code **)(*(obj + 0xc) + 8n + 0xc))(obj + *(short *)(*(obj + 0xc) + 8n + 8), ..)`
 pub fn vslot<M: QMem + ?Sized>(m: &mut M, obj: u32, slot: u32, a: &[u32], v: &[V4]) -> (u32, V4) {
-    let vt = m.r32(obj + 0xc);
-    let f = m.r32(vt + slot_off(slot));
-    let adj = m.r16(vt + slot_off(slot) - 4) as i16 as i32;
+    let vt = m.r32(obj.wrapping_add(0xc));
+    let f = m.r32(vt.wrapping_add(slot_off(slot)));
+    let adj = m.r16(vt.wrapping_add(slot_off(slot)).wrapping_sub(4)) as i16 as i32;
     let mut args = vec![obj.wrapping_add(adj as u32)];
     args.extend_from_slice(a);
     m.call(f, &args, v)
@@ -117,6 +135,7 @@ pub struct FlatMem {
 }
 
 impl QMem for FlatMem {
+    fn scrub_popped_stack(&self) -> bool { false }
     fn r8(&mut self, a: u32) -> u8 {
         self.mem.get(&a).copied().unwrap_or(0)
     }

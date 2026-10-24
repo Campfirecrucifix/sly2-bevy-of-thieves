@@ -129,8 +129,10 @@ pub enum DmgEv {
     Aseg { state: i32, oid: Option<i32>, flags: u32 },
     /// the heal ASEG DMG[0x42]
     HealAseg(i32),
-    /// +0x4c8 == 1: the hit goes to the attach partner +0x4d4 (slot 74)
-    Delegated,
+    /// +0x4c8 == 1: the hit goes to the attach partner +0x4d4 (slot 74, the TNT barrel C2d20d0 FUN_00183e08):
+    /// the 0x60-byte message (kind +0xc, amount +0x10) for the engine to deliver; BOSS R21: the consumer is
+    /// classes::q::barrel::deliver (the original returns the partner's slot-74 result; the port returns false)
+    Delegated { partner: Option<usize>, kind: i32, amount: i32 },
     /// slot 92 0x1a2388 (death)
     Die,
     /// 0x161a58 case 0x10: level reload request
@@ -221,11 +223,10 @@ pub struct Dmg {
     /// f32::MAX when the state has an ASEG (the anim driver writes the real end) or state 7 (ended by the
     /// landing in 0x1a1358); a state without ASEG is done at once.
     pub aseg_end: f32,
-    /// jt+0x298 invulnerable, jt+0x29c no damage, jt+0xf20 == 1 immune, +0x4c8 attach state
+    /// jt+0x298 invulnerable, jt+0x29c no damage, jt+0xf20 == 1 immune (BOSS R21: +0x4c8 is `jt.attach.kind`)
     pub f_298: bool,
     pub f_29c: bool,
     pub f_f20: bool,
-    pub att_4c8: i32,
     /// jt+0x15c
     pub f_15c: bool,
     /// engine effects of this frame
@@ -255,7 +256,6 @@ impl Default for Dmg {
             f_298: false,
             f_29c: false,
             f_f20: false,
-            att_4c8: -1,
             f_15c: false,
             ev: Vec::new(),
         }
@@ -337,7 +337,7 @@ pub fn FUN_001a2230(jt: &Jt, env: &DmgEnv, kind: i32) -> bool {
     if kind == 0x2000 || kind == 0x4000 {
         return match d.state {
             3 | 5 | 10 | 0xb => true,
-            -1 => match d.att_4c8 {
+            -1 => match jt.attach.kind {
                 1 | 2 | 5 | 6 | 9 => false,
                 -1 => {
                     // +0x2dc = JMP +0x1c (jtbs)
@@ -561,8 +561,8 @@ pub fn FUN_001a19a0(jt: &mut Jt, h: &Hit, env: &DmgEnv, anim: &mut dyn JtAnim) -
         if FUN_001a21a0(jt, env, h.kind) {
             return false;
         }
-        if jt.dmg.att_4c8 == 1 {
-            jt.dmg.ev.push(DmgEv::Delegated);
+        if jt.attach.kind == 1 {
+            jt.dmg.ev.push(DmgEv::Delegated { partner: jt.attach.target, kind: h.kind, amount: h.amount });
             return false;
         }
         let mut d = 0;

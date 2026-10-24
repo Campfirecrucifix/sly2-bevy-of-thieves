@@ -86,6 +86,7 @@ pub fn drain_snd_cmds(
         match c {
             SndCmd::Play { bank_sound, mask, vol, pan, voice, .. } => {
                 let Some(p) = sys.sound_pcm(bank_sound) else { continue };
+                snd.played += 1;
                 let p = if mask & 8 != 0 { pan_pcm(&p, pan) } else { p };
                 if let Some(m) = mon.as_deref_mut() {
                     m.record(bank_sound, gain(mask, vol), &p, time.elapsed_secs_f64());

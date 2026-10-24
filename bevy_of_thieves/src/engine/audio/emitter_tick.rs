@@ -125,6 +125,8 @@ pub const STEP_ROW_2A8350: [i32; 25] = [6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5
 #[derive(Resource, Clone, Debug, Default)]
 pub struct Snd989 {
     pub table: SoundTable,
+    /// AUD3: Play commands the host has started (bevy_out::drain_snd_cmds), for the live-audio proof
+    pub played: u64,
     pub cmds: Vec<SndCmd>,
     pub next_voice: u32,
     /// voices the host has finished (FUN_001fbfb0 poll answers 0 for them)
@@ -142,6 +144,11 @@ pub struct Snd989 {
 }
 
 impl Snd989 {
+    /// Sukr 0x002330d0: packs the 7 args and sends IOP command 0x4c (snd_SendIOPCommandNoWait); the IOP
+    /// request is REPLACED by queueing SndCmd::Sukr (its reply comes back through the MusicMgr callbacks).
+    pub fn ee_sub_2330d0(&mut self, cmd: u32) {
+        self.cmds.push(SndCmd::Sukr { cmd });
+    }
     fn voice(&mut self) -> u32 {
         self.next_voice = self.next_voice.wrapping_add(1).max(1);
         self.next_voice

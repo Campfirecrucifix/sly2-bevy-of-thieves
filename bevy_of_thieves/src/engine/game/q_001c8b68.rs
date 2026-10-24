@@ -105,12 +105,13 @@ pub fn ee_sub_1c8dd8<M: QMem + ?Sized>(m: &mut M, p: u32) {
 }
 
 /// FUN_001c9058: start the spinner: *t = clock, DAT_002dd314 = t, SignalSema(go)
-pub fn ee_sub_1c9058<M: QMem + ?Sized>(m: &mut M, _a0: u32, t: u32) {
+/// VER5: ABI per asm: t = a0; FUN_00234a40(s, t) (a1 = t)
+pub fn ee_sub_1c9058<M: QMem + ?Sized>(m: &mut M, t: u32) {
     let s = m.r32(S_GO);
     let c = m.r32(CLOCK);
     m.w32(t, c);
     m.w32(T0, t);
-    m.call(SIGNAL, &[s], &[]);
+    m.call(SIGNAL, &[s, t], &[]);
 }
 
 /// FUN_001c9090: empty

@@ -52,6 +52,19 @@ pub fn read_descriptor(disc: &dyn SectorSource, d: &Descriptor) -> io::Result<Ve
     disc.read_bytes(d.lsn(), d.size() as usize)
 }
 
+/// AUD3 (port addition, mods): a whole sound file (989snd bank SBlk or KPV music stream) replaced by
+/// `mods/<mod>/sounds/<lsn:07>.bin` (same format as the disc file; last mod in load order wins), else the disc.
+pub fn sound_file_path(lsn: u32) -> String {
+    format!("sounds/{lsn:07}.bin")
+}
+
+pub fn read_descriptor_modded(mods: &crate::engine::disc::mods::ModOverlay, disc: &dyn SectorSource, d: &Descriptor) -> io::Result<Vec<u8>> {
+    match mods.resolve(&sound_file_path(d.lsn())) {
+        Some(p) => std::fs::read(p),
+        None => read_descriptor(disc, d),
+    }
+}
+
 /// Mono/multi PCM ready for playback.
 #[derive(Clone, Debug, Default)]
 pub struct Pcm {

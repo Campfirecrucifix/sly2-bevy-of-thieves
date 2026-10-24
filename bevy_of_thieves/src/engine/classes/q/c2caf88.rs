@@ -43,7 +43,7 @@ pub fn ee_sub_12e3f0<M: QMem + ?Sized>(m: &mut M, a0: u32, a1: u32, a2: u32) -> 
 
 /// FUN_001336f0: new 0x60-byte watch record for `obj` (pool world +0x3ce0, list +0x34 inited, +0x60 obj)
 /// on world +0x3d10 (and +0x3d1c when obj +0x14 is in the world's +0x2c set); two 0xc-byte hooks
-/// {0, rec, rec + 4k, 1, rec, rec + 0x10 + 4k} appended at world +0x3cd4 / +0x3cd8 [+0x3cd0], count += 2.
+/// {0, rec, rec + 4k, 1, rec, rec + 0x10 + 4k} appended at world +0x3cd4 / +0x3cd8 / +0x3cdc [+0x3cd0], count += 2.
 pub fn ee_sub_1336f0<M: QMem + ?Sized>(m: &mut M, w: u32, obj: u32) -> u32 {
     let r = m.call(0x0011_ccc0, &[w + 0x3ce0], &[]).0;
     m.call(0x0011_a1f8, &[r + 0x34, 0x60], &[]);
@@ -53,7 +53,8 @@ pub fn ee_sub_1336f0<M: QMem + ?Sized>(m: &mut M, w: u32, obj: u32) -> u32 {
     if m.call(0x0011_a380, &[w + 0x2c, id], &[]).0 != 0 {
         m.call(0x0011_a220, &[w + 0x3d1c, r], &[]);
     }
-    for k in 0..2u32 {
+    // asm: a3 = 2, loop `a3 -= 1 .. bgez a3` = 3 passes (hook arrays +0x3cd4 / +0x3cd8 / +0x3cdc)
+    for k in 0..3u32 {
         let n = m.r32(w + 0x3cd0);
         let h = m.r32(w + 0x3cd4 + k * 4) + n * 0xc;
         m.w32(h + 8, r + k * 4);

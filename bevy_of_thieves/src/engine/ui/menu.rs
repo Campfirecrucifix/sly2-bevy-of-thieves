@@ -203,7 +203,7 @@ impl MenuMgr {
             saved: SavedOpts::default(),
             slots: [0.0; 3],
             cur_slot: None,
-            gfx: GraphicsOpts { raytraced: false, rt_available: false, hor_plus: true, ink_outlines: true },
+            gfx: GraphicsOpts::default(),
             video: VideoOpts::default(),
             audio: AudioOpts::default(),
             mods: ModsOpts::default(),
@@ -444,48 +444,65 @@ impl MenuMgr {
         }
     }
 
+    /// FUN_001b0270 item callback: close all menus.
+    fn FUN_001b0270(&mut self, it: MenuItem) -> u32 {
+        self.FUN_001af660();
+        it.flags
+    }
+
+    /// FUN_001b06d8 item callback: push the item's list in place.
+    fn FUN_001b06d8(&mut self, it: MenuItem) -> u32 {
+        let items = self.items(it.list, it.n);
+        self.FUN_001af390(items, it.list);
+        it.flags | 2
+    }
+
+    /// FUN_001b0688 item callback: push the item's list as a submenu.
+    fn FUN_001b0688(&mut self, it: MenuItem) -> u32 {
+        let items = self.items(it.list, it.n);
+        self.FUN_001af4d8(items, it.list, 0, it.anims);
+        it.flags | 2
+    }
+
+    /// FUN_001b0668 item callback: back.
+    fn FUN_001b0668(&mut self, it: MenuItem) -> u32 {
+        self.FUN_001af490();
+        it.flags
+    }
+
+    /// FUN_001b0720 item callback: slider.
+    fn FUN_001b0720(&mut self, it: MenuItem) -> u32 {
+        self.FUN_001af6a0();
+        it.flags
+    }
+
+    /// FUN_001b0740 item callback: controls screen of the current character (no rows).
+    fn FUN_001b0740(&mut self, ctx: &MenuCtx, it: MenuItem) -> u32 {
+        let anims = match ctx.player_char {
+            Some(0x35) => 0x002c_01d0,
+            Some(0x37) => 0x002c_01f0,
+            Some(0x36) => 0x002c_0210,
+            _ => return it.flags,
+        };
+        self.FUN_001af4d8(Vec::new(), 0, 0, anims);
+        it.flags | 2
+    }
+
     /// Item +4 callback; returns the item flags after the call (+0x1c, bit 2 = handled, 1 = back).
     fn select(&mut self, ctx: &MenuCtx, it: MenuItem) -> u32 {
         let handled = it.flags | 2;
         match it.on_select {
             0 => it.flags,
-            0x001b_0270 => {
-                self.FUN_001af660();
-                it.flags
-            }
-            0x001b_06d8 => {
-                let items = self.items(it.list, it.n);
-                self.FUN_001af390(items, it.list);
-                handled
-            }
-            0x001b_0688 => {
-                let items = self.items(it.list, it.n);
-                self.FUN_001af4d8(items, it.list, 0, it.anims);
-                handled
-            }
-            0x001b_0668 => {
-                self.FUN_001af490();
-                it.flags
-            }
+            0x001b_0270 => self.FUN_001b0270(it),
+            0x001b_06d8 => self.FUN_001b06d8(it),
+            0x001b_0688 => self.FUN_001b0688(it),
+            0x001b_0668 => self.FUN_001b0668(it),
             0x001b_04e0 => {
                 self.FUN_001b04e0(ctx, true);
                 handled
             }
-            0x001b_0720 => {
-                self.FUN_001af6a0();
-                it.flags
-            }
-            0x001b_0740 => {
-                // controls screen of the current character (no rows)
-                let anims = match ctx.player_char {
-                    Some(0x35) => 0x002c_01d0,
-                    Some(0x37) => 0x002c_01f0,
-                    Some(0x36) => 0x002c_0210,
-                    _ => return it.flags,
-                };
-                self.FUN_001af4d8(Vec::new(), 0, 0, anims);
-                handled
-            }
+            0x001b_0720 => self.FUN_001b0720(it),
+            0x001b_0740 => self.FUN_001b0740(ctx, it),
             0x001a_ffc0 => self.FUN_001affc0(it),
             PORT_GFX_OPEN => {
                 self.port_open_graphics();

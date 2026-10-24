@@ -232,11 +232,11 @@ pub fn ee_sub_166ef0<M: QMem + ?Sized>(m: &mut M, p: u32, n: u64, regs: u64) {
     m.w32(p + 0x24, 0);
 }
 
-/// FUN_00166f70: REGLIST dword lo | hi << 32 (hi sign-extended; the packet is the 2nd argument)
-pub fn ee_sub_166f70<M: QMem + ?Sized>(m: &mut M, hi: i32, p: u32, lo: u64) {
+/// FUN_00166f70(pkt a0, lo a1, f f12): REGLIST dword (lo as u32) | f32 bits(f) << 32
+pub fn ee_sub_166f70<M: QMem + ?Sized>(m: &mut M, p: u32, lo: u64, f: f32) {
     ee_sub_166a50(m, p);
     let c = take(m, p, 8);
-    w64(m, c, lo & 0xffff_ffff | (hi as i64 as u64) << 0x20);
+    w64(m, c, lo & 0xffff_ffff | (f.to_bits() as u64) << 0x20);
 }
 
 fn sx16(y: i32) -> u64 {

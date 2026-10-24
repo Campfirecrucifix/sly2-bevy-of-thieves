@@ -27,7 +27,13 @@ pub fn ee_sub_114120() -> u32 {
 }
 
 fn w(b: &[u8], i: usize) -> u32 {
-    b.get(i * 4..i * 4 + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])).unwrap_or(0)
+    // CRAWL R81: short (bool / byte) items zero-extend (field 601's dir arrives as tag 0, 1 byte: One(0, [1]))
+    let x = b.get(i * 4..).unwrap_or(&[]);
+    let mut v = [0u8; 4];
+    for (k, &y) in x.iter().take(4).enumerate() {
+        v[k] = y;
+    }
+    u32::from_le_bytes(v)
 }
 
 /// FUN_001709a8: 0 if the object has a class-0xd ancestor, else 1 for class 0xb, else -1

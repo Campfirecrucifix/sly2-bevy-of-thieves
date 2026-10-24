@@ -132,6 +132,7 @@ pub fn ee_sub_1545f0(w: &World, cw: &CollisionWorld, guard: usize, eye: V3, pt: 
         }
         let mut out = Vec::new();
         if FUN_00118668(&c.geom, &c.bsp, 0, c.bsp.nodes.len(), eye, pt, 2, &mut out) > 0 {
+            if std::env::var_os("SLY2_R84_SEE").is_some() { let o = &w.objects[c.object]; eprintln!("R84LOS g{guard} blocked by obj {} oid {} class {} owner {:?} clone {:?} bbox {:?}..{:?} eye {:?} pt {:?} hits {:?}", c.object, o.oid, o.class, o.owner, o.clone_of, a.map(|v| v as i32), b.map(|v| v as i32), eye, pt, out.iter().map(|l| (l.t, l.pos, l.plane)).collect::<Vec<_>>()); }
             return true;
         }
     }
@@ -181,18 +182,18 @@ pub fn ee_sub_154770(c: &Cover, tpos: V3, spos: V3) -> bool {
 /// FUN_00204e38(t, guard, task): root velocity of the anim task's ASEG = FUN_0012ff10(aseg, guard, 1, 1)
 /// channel (flagged vector channel whose target bone kind is 1: the guard skeletons' shared ASEGs target the
 /// skeleton-local oid, not the guard's), curve slot 2 (vt+0x1c) at (t, rate) with the velocity output.
-/// Bezier curves give the velocity directly (KeyVB::eval); REPLACED for the other curve kinds (no velocity
-/// output ported): central difference of the value over 1/240 s.
+/// Bezier curves: FUN_0012b9d0 (KeyVB::eval). Kind 2/3/4 (FUN_0012be68 / FUN_0012c440 / FUN_0012ca68): the key
+/// segment's FUN_00117120 / per-axis FUN_00117030 velocity output, which is scaled by `rate` (ANIM R28: the old
+/// central difference of the value dropped that factor, so walks ran at 1/0.8 = 1.25x the captured 200);
+/// axes without a curve and constant curves give 0.
 pub fn ee_sub_204e38(a: &Aseg, t: f32, rate: f32) -> V3 {
     let Some(v) = a.channels.iter().find(|c| c.flag && c.kind == 1).and_then(|c| c.vec.as_ref()) else { return [0.0; 3] };
     match v {
         VecCurve::Bez(k) => KeyVB::eval(k, t, rate).1,
-        _ => {
-            const H: f32 = 1.0 / 480.0;
-            let (Some(p0), Some(p1)) = (v.eval((t - H).max(0.0), rate), v.eval((t + H).min(a.length.max(t + H)), rate)) else { return [0.0; 3] };
-            let dt = (t + H).min(a.length.max(t + H)) - (t - H).max(0.0);
-            [0, 1, 2].map(|i| (p1[i] - p0[i]) / dt)
-        }
+        _ => match v.segment(t) {
+            Some(s) if s.mode == 1 && !s.rewired_time => crate::engine::anim::keys::ee_sub_117120(s.t1 - s.t0, t - s.t0, rate, s.p0, s.v0, s.p1, s.v1).1,
+            _ => [0.0; 3],
+        },
     }
 }
 
@@ -213,12 +214,68 @@ pub fn anim_oid(w: &World, guard: usize, id: i32) -> Option<i32> {
     None
 }
 
+/// CRAWL R84: FUN_001caec8 spawner records (+0xec count, +0xf0 0x18-byte rows = the class-6 load's overrides):
+/// key 6 = FUN_0013e818 of the row's property stream on the handed-out copy itself (key 5 rows are skipped; other
+/// keys = a sub-object by oid, not used by guards). A field-243 row replaces the anim-table entry of the same id
+/// mask in place (MREC9: pump guards handed out by spawner 125315 have entry #3, anim 9, = ASEG 13216 instead of
+/// the template's 19954; count stays 28). -> (anim id, ASEG oid) per single-id row.
+pub fn spawner_anim_ovr(w: &World, sp: usize) -> Vec<(i32, i32)> {
+    use crate::engine::world::loads_b4::B4Load;
+    use crate::engine::world::objects::{LoadData, Payload};
+    use crate::engine::world::props::{ArrayItem, PropValue};
+    let word = |b: &Vec<u8>| b.get(..4).map(|x| i32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+    let mut src = sp;
+    while !matches!(&w.objects[src].payload, Payload::Loaded(LoadData::B4(_))) {
+        match w.objects[src].clone_of.filter(|&c| c != src) {
+            Some(c) => src = c,
+            None => break,
+        }
+    }
+    let mut out = Vec::new();
+    let Payload::Loaded(LoadData::B4(b)) = &w.objects[src].payload else { return out };
+    let B4Load::Class6 { overrides, .. } = &**b else { return out };
+    for o in overrides.iter().filter(|o| o.key == 6) {
+        for p in o.props.iter().flatten().filter(|p| p.field == 243) {
+            let PropValue::Array(items) = &p.value else { continue };
+            let ids: Vec<i32> = items.iter().filter_map(|i| if let ArrayItem::List(_, l) = i { Some(l.iter().filter_map(word).collect::<Vec<_>>()) } else { None }).next().unwrap_or_default();
+            let oid = items.iter().find_map(|i| if let ArrayItem::One(6, b) = i { word(b) } else { None });
+            if let (&[id], Some(oid)) = (ids.as_slice(), oid) {
+                out.push((id, oid));
+            }
+        }
+    }
+    out
+}
+
+/// CRAWL R89: the key-6 rows of spawner `sp` with property `field` (FUN_0013e818 on the handed-out copy), e.g. the
+/// EP1 pump-yard spawner 123920's field 273 (+0x2e8 routine = class-113 125367, MREC9 guard 0x78bd40 +0x2e8)
+pub fn spawner_key6_props(w: &World, sp: usize, field: u32) -> Vec<crate::engine::world::props::Prop> {
+    use crate::engine::world::loads_b4::B4Load;
+    use crate::engine::world::objects::{LoadData, Payload};
+    let mut src = sp;
+    while !matches!(&w.objects[src].payload, Payload::Loaded(LoadData::B4(_))) {
+        match w.objects[src].clone_of.filter(|&c| c != src) {
+            Some(c) => src = c,
+            None => break,
+        }
+    }
+    let Payload::Loaded(LoadData::B4(b)) = &w.objects[src].payload else { return Vec::new() };
+    let B4Load::Class6 { overrides, .. } = &**b else { return Vec::new() };
+    overrides.iter().filter(|o| o.key == 6).flat_map(|o| o.props.iter().flatten()).filter(|p| p.field as u32 == field).cloned().collect()
+}
+
 /// FUN_00209618 (walk task 0x9d branch) for the guard at object `guard`: anim `id` from the table, its ASEG
 /// (FUN_0015e938 oid lookup), looped at the playback time `t` -> FUN_00204e38 velocity v (+0x190 = -v; the
 /// port's Body::f_190 keeps v). The +0xfc4 speed record (`*(+8)` scale) is 1.
 pub fn root_velocity(w: &World, guard: usize, id: i32, t: f32, rate: f32) -> V3 {
-    let Some(oid) = anim_oid(w, guard, id) else { return [0.0; 3] };
-    let Some(a) = w.find_oid(oid).iter().find_map(|&k| crate::engine::playerdraw::aseg_of(w, k)) else { return [0.0; 3] };
+    root_velocity_ovr(w, guard, id, None, t, rate)
+}
+
+/// CRAWL R84: `root_velocity` with a spawner-overridden table entry (`ovr` = ASEG oid, see `spawner_anim_ovr`)
+pub fn root_velocity_ovr(w: &World, guard: usize, id: i32, ovr: Option<i32>, t: f32, rate: f32) -> V3 {
+    let Some(a) = crate::engine::npcdraw::anim_object_ovr(w, guard, id, ovr).and_then(|k| crate::engine::playerdraw::aseg_of(w, k)) else { return [0.0; 3] };
+    // FUN_00204e38 evaluates at the ASEGA's +0x40 = rate * ASEG +0x78 (FUN_0012f9b8), and the ASEGA time runs at +0x40
+    let (t, rate) = (t * a.f78(), rate * a.f78());
     let t = if a.length > 0.0 { t.rem_euclid(a.length) } else { 0.0 };
     ee_sub_204e38(a, t, rate)
 }
@@ -226,6 +283,10 @@ pub fn root_velocity(w: &World, guard: usize, id: i32, t: f32, rate: f32) -> V3 
 /// K32: length of anim `id` of the guard at object `guard` (the table ASEG as `root_velocity` finds it;
 /// 0 = no ASEG: the anim goal reaches state 1 at once)
 pub fn anim_length(w: &World, guard: usize, id: i32) -> f32 {
-    let Some(oid) = anim_oid(w, guard, id) else { return 0.0 };
-    w.find_oid(oid).iter().find_map(|&k| crate::engine::playerdraw::aseg_of(w, k)).map_or(0.0, |a| a.length)
+    anim_length_ovr(w, guard, id, None)
+}
+
+/// CRAWL R84: `anim_length` with a spawner-overridden table entry
+pub fn anim_length_ovr(w: &World, guard: usize, id: i32, ovr: Option<i32>) -> f32 {
+    crate::engine::npcdraw::anim_object_ovr(w, guard, id, ovr).and_then(|k| crate::engine::playerdraw::aseg_of(w, k)).map_or(0.0, |a| a.length)
 }

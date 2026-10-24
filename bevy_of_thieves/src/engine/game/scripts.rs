@@ -48,8 +48,11 @@ pub fn run_level_scripts_with(vm: &mut Vm, level: &[u8], w: &World, host: &mut d
 pub fn run_level_scripts_framed(vm: &mut Vm, level: &[u8], w: &World, host: &mut dyn crate::engine::splice::SpliceHost) -> (ScriptRunReport, Vec<Vec<FrameRef>>) {
     // 0x001ff858 / 0x001ffa70
     let mut r = ScriptRunReport::default();
-    let mut frames = Vec::with_capacity(w.entries.len());
-    for (ei, e) in w.entries.iter().enumerate() {
+    let mut frames = Vec::with_capacity(w.entries.len() + w.copy_inst_entry.len());
+    // HEIST: + one run of the entry block per template-copy instance (World::copy_inst), frames after the entries
+    let order = (0..w.entries.len()).chain(w.copy_inst_entry.iter().copied());
+    for ei in order {
+        let e = &w.entries[ei];
         r.entries += 1;
         let mut slots = Vec::new();
         let off = e.start_offset as usize + 12;
@@ -64,6 +67,7 @@ pub fn run_level_scripts_framed(vm: &mut Vm, level: &[u8], w: &World, host: &mut
         for (xi, x) in blk.iter().enumerate() {
             r.exprs += 1;
             let fr = new_frame(None);
+            fr.borrow_mut().script_slot = true;
             let res = match x {
                 Some(p) => {
                     let car = p.borrow().car.clone();

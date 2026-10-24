@@ -75,7 +75,7 @@ pub fn ee_sub_13c000<M: QMem + ?Sized>(m: &mut M, o: u32) {
             let pos = m.call(0x001a_62e8, &[o], &[]).1;
             let basis = m.call(0x001a_6318, &[o], &[]).0;
             m.call(0x0011_c210, &[mat, basis, e], &[pos]);
-            m.call(0x001a_5ee8, &[0x3f80_0000, 0x3f80_0000, o, mat], &[]);
+            m.call(0x001a_5ee8, &[o, mat], &[super::q5util::f4(1.0), super::q5util::f4(1.0)]);
             stack_pop(m, 0x40);
             stack_pop(m, 0x10);
         }

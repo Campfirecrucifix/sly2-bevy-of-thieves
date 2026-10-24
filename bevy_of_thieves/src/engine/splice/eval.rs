@@ -369,6 +369,10 @@ impl Vm {
 
     /// Replacement for FUN_0011d3f8: uniform int in [lo, hi].
     pub(crate) fn rand_int(&mut self, lo: i32, hi: i32) -> i32 {
+        // POOL1 R92: shared rand mode -> the original FUN_0011d3f8 on the one shared state
+        if crate::engine::physics::driven::rng_shared_state().is_some() && hi >= lo {
+            return crate::engine::physics::driven::GameRng(0).FUN_0011d3f8(lo, hi);
+        }
         if hi <= lo {
             return lo;
         }
@@ -378,6 +382,10 @@ impl Vm {
 
     /// Replacement for FUN_0011d448: uniform float in [lo, hi).
     pub(crate) fn rand_float(&mut self, lo: f32, hi: f32) -> f32 {
+        // POOL1 R92: shared rand mode -> the original FUN_0011d448 on the one shared state
+        if crate::engine::physics::driven::rng_shared_state().is_some() {
+            return crate::engine::physics::driven::GameRng(0).FUN_0011d448(lo, hi);
+        }
         lo + (self.next_rand() as f32 / 4_294_967_296.0) * (hi - lo)
     }
 }

@@ -9,6 +9,7 @@ use super::splice_host::RumbleRequest;
 use crate::engine::audio::bevy_out::AudioMonitor;
 use crate::engine::audio::emitter::{EmitterId, EmitterSystem};
 use crate::engine::audio::emitter_tick::Snd989;
+use crate::engine::audio::music_mgr::{LiveMusicHost, MusicClock, MusicMgr};
 use crate::engine::audio::music_layers::{self, InstState, MusicLayers, PlayerMusic};
 use crate::engine::audio::{self, bank::Bank, music, vpk, AudioSystem, Pcm, SoundFileKind};
 use crate::engine::camera::{cm, Cm, CmClock};
@@ -132,7 +133,7 @@ pub fn activate_world(mut g: ResMut<LevelGame>, w: Option<Res<World>>, opt: Opti
     g.active = spawn::active_objects(&w);
     let LevelGame { anims, active, .. } = &mut *g;
     anims.start_live(&w, active);
-    info!("level activated: {} live objects, spawn {:?} (requested oid {oid}, found {found:?})", g.active.len(), g.spawn);
+    info!("level activated: {} live objects, spawn {:?} (oid {:?}; requested oid {oid}, found {found:?})", g.active.len(), g.spawn, g.spawn.map(|i| (w.objects[i].oid, w.objects[i].class)));
 }
 
 /// Places the CM once the geometry exists: behind the spawn object at the follow-camera default distance
@@ -207,6 +208,13 @@ pub struct GameAudio {
 }
 
 impl GameAudio {
+    /// AUD3: looping music layer players spawned for the current level
+    pub fn music_players(&self) -> usize {
+        self.music.len()
+    }
+}
+
+impl GameAudio {
     pub fn new(music_volume: f32, sfx_volume: f32) -> Self {
         Self { music_volume, sfx_volume, ..Default::default() }
     }
@@ -220,6 +228,9 @@ pub fn start_level_audio(mut ga: ResMut<GameAudio>, g: Res<LevelGame>, loader: O
     }
     let Some(loader) = loader else { return };
     ga.loaded_for = Some(key);
+    // AUD3: 0x3dd040 for the new level (FUN_001fcea0 globals; the old one's FUN_001fd700 teardown is the
+    // emitter / stream reset below)
+    commands.insert_resource(MusicMgr::default());
     // level change: FUN_002321b8 stop streams, emitters freed with the world
     sys.stop_all();
     *emitters = EmitterSystem::default();
@@ -229,11 +240,12 @@ pub fn start_level_audio(mut ga: ResMut<GameAudio>, g: Res<LevelGame>, loader: O
         commands.entity(e).despawn();
     }
     let iso = loader.iso.clone();
+    let mods = loader.mods.clone();
     let (bank_d, music_d) = key;
     ga.task = Some(AsyncComputeTaskPool::get().spawn(async move {
         let mut out = AudioLoad { bank: None, music: vec![], errors: vec![] };
         if let Some(d) = bank_d {
-            match audio::read_descriptor(&*iso, &d) {
+            match audio::read_descriptor_modded(&mods, &*iso, &d) {
                 Ok(b) => out.bank = audio::bank::parse(&b).or_else(|| {
                     out.errors.push(format!("bank lsn {} does not parse", d.lsn()));
                     None
@@ -242,7 +254,7 @@ pub fn start_level_audio(mut ga: ResMut<GameAudio>, g: Res<LevelGame>, loader: O
             }
         }
         if let Some(d) = music_d {
-            match audio::read_descriptor(&*iso, &d) {
+            match audio::read_descriptor_modded(&mods, &*iso, &d) {
                 Ok(b) => match vpk::decode(&b) {
                     Some((h, ch)) => {
                         out.music = (0..music_layers::layer_count(ch.len()))
@@ -266,7 +278,7 @@ fn source(pcm: &Pcm) -> AudioSource {
     AudioSource { bytes: Arc::from(pcm.to_wav()) }
 }
 
-pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands, time: Res<Time>) {
+pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>, mut sources: ResMut<Assets<AudioSource>>, mut commands: Commands, time: Res<Time>, (mgr, mut es): (Option<ResMut<MusicMgr>>, ResMut<EmitterSystem>)) {
     let Some(t) = ga.task.as_mut() else { return };
     let Some(r) = block_on(future::poll_once(t)) else { return };
     ga.task = None;
@@ -288,16 +300,30 @@ pub fn poll_level_audio(mut ga: ResMut<GameAudio>, mut sys: ResMut<AudioSystem>,
     }
     ga.music_frames = 0;
     ga.layers.vol = [0.0; 6];
+    // AUD3: the level track is the +0x204 stack top of the live music manager
+    if let (Some(mut m), false) = (mgr, ga.music.is_empty()) {
+        m.start_track(&mut es, -1);
+    }
 }
 
 /// WP-J16: the FUN_001fd830 layer step (FUN_001fdc08 / FUN_001fc2e0) on the running game: player = the
 /// first `Player` (jt+0x10ec focus mode, +0x4c8 attach kind; +0x10c8 is not modelled by player/ -> -1);
 /// the instance is the level music while its layer players exist.
-pub fn update_music_layers(mut ga: ResMut<GameAudio>, players: Query<&crate::engine::player::plugin::Player>, mut sinks: Query<&mut AudioSink>, time: Res<Time>) {
+pub fn update_music_layers(mut ga: ResMut<GameAudio>, players: Query<&crate::engine::player::plugin::Player>, mut sinks: Query<&mut AudioSink>, time: Res<Time>, (mgr, mut es): (Option<ResMut<MusicMgr>>, ResMut<EmitterSystem>)) {
     let player = players.iter().next().map(|p| PlayerMusic { f_10ec: p.jt.p13.f_10ec, f_10c8: -1, f_4c8: p.jt.attach.kind });
     let inst = (!ga.music.is_empty()).then(|| InstState { starting: ga.music_frames == 0 });
     let dt = time.delta_secs();
-    ga.layers.ee_sub_1fdc08(player, inst, dt);
+    if let Some(mut m) = mgr {
+        // AUD3: the layer step runs inside the manager's FUN_001fd830 (tick_sound_emitters); this applies
+        // its result. The instance stops "starting" once its players exist.
+        if let Some(e) = m.stack.last().and_then(|&i| es.get_mut(i)).filter(|_| !ga.music.is_empty()) {
+            e.s52 = 0;
+        }
+        ga.layers.vol = m.layers.vol;
+        ga.layers.dirty |= std::mem::take(&mut m.layers.dirty);
+    } else {
+        ga.layers.ee_sub_1fdc08(player, inst, dt);
+    }
     if inst.is_some() {
         ga.music_frames += 1;
     }
@@ -349,6 +375,7 @@ pub fn tick_sound_emitters(
     mut snd: ResMut<Snd989>,
     mut sys: ResMut<AudioSystem>,
     (w, cm, players, sly): (Option<Res<World>>, Res<Cm>, Query<&crate::engine::player::plugin::Player>, Option<Res<crate::engine::playerdraw::plugin::SlyDraw>>),
+    (mgr, time): (Option<ResMut<MusicMgr>>, Res<Time>),
 ) {
     sys.sfx_volume = ga.sfx_volume;
     if let Some(t) = &g.snd_table {
@@ -364,8 +391,25 @@ pub fn tick_sound_emitters(
         jt.extend(w.objects.get(first).and_then(|o| o.owner));
     }
     let world = GameEmitterWorld { w: w.as_deref(), cm: &cm, player: players.iter().next().map(|p| p.jt.phys.pos), jt };
-    crate::engine::audio::music_mgr::tick_all(&mut es, &mut snd, &world);
-    snd.flush_231c48(&mut es);
+    let Some(mut m) = mgr else {
+        crate::engine::audio::music_mgr::tick_all(&mut es, &mut snd, &world);
+        snd.flush_231c48(&mut es);
+        return;
+    };
+    // AUD3: the live 0x3dd040 step FUN_001fd830 (pause gate, layer step, cues, pause fade, emitter walk,
+    // flush). Slot 1 of the volume matrix = the options (music bus 1, effects buses 0 / 3).
+    if m.vol[1][0] != audio_clamp(ga.sfx_volume) || m.vol[1][1] != audio_clamp(ga.music_volume) {
+        m.set_option_volumes(&mut es, &mut snd, ga.music_volume, ga.sfx_volume);
+    }
+    let host_player = players.iter().next().map(|p| (p.jt.phys.pos, PlayerMusic { f_10ec: p.jt.p13.f_10ec, f_10c8: -1, f_4c8: p.jt.attach.kind }));
+    let dt = time.delta_secs();
+    // FUN_0014d240: EE bus cycles (294.912 MHz); in game (DAT_002bd4c0 = 3)
+    let clk = MusicClock { ticks: (time.elapsed_secs_f64() * 294_912_000.0) as u64, dt, dt_unscaled: dt, game_state: 3 };
+    m.ee_sub_1fd830(&mut es, &mut snd, &world, &mut LiveMusicHost(host_player), clk);
+}
+
+fn audio_clamp(v: f32) -> f32 {
+    crate::engine::audio::emitter_tick::clamp01_11d948(v)
 }
 
 /// `EmitterWorld` of the running game.
@@ -490,6 +534,7 @@ pub fn tick_scripts(t: f32, dt: f32, clk: CmClock, g: &mut LevelGame, st: &mut s
     super::vm_state::send_messages(vm, errors, frames, &mut host);
     super::vm_state::tick_world_update(vm, errors, &mut host, t, dt);
     *ticks += 1;
+    po_moves_r107(w, host.live_q.as_deref(), &mut host.sched.cls.host);
     // WP-EP1b: coverage log (no behaviour): every 600 script ticks, the errors raised by callbacks /
     // messages since the level load (HostUnimplemented = UNIMPL) and the recorded (counted-only) class calls
     if *ticks % 600 == 0 {
@@ -502,6 +547,34 @@ pub fn tick_scripts(t: f32, dt: f32, clk: CmClock, g: &mut LevelGame, st: &mut s
         g.anims.play(w, o as usize, svt);
     }
     g.anims.step(w, dt, clk.dt_real, emitters, &mut rumble.0, Some(cm), clk, &mut retract);
+}
+
+/// CRAWL R107: the live image's slot-37 MoveToObject (FUN_002052e0) moves the image copy only; the PO bodies the
+/// port draws (Bentley / Murray K27 `CharPo`) follow it (safehouse 249.1 s2: the gang to their seat locators).
+/// Runs after the script world update. SLY2_NO_R107_POMOVE=1 = old (image only).
+pub fn po_moves_r107(w: &World, live_q: Option<&crate::engine::classes::q::live::LiveQ>, eh: &mut crate::engine::classes::plugin::EngineHost) {
+    let mv = crate::engine::classes::q::q6_runs::PO_MOVES.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    if mv.is_empty() || std::env::var_os("SLY2_NO_R107_POMOVE").is_some() {
+        return;
+    }
+    let Some(m) = live_q.and_then(|l| l.mem.as_ref()) else { return };
+    let placed: Vec<(usize, usize)> = mv.iter().filter_map(|&(o, x)| Some((m.obj_at(o)?, m.obj_at(x)?))).collect();
+    let moved = crate::engine::player::p22::apply_po_placements(w, &placed, eh);
+    // CRAWL R108: Sly's JT (class 53) follows too, through the k22 teleport queue the player layer drains
+    // (SetPosition to the locator; rec[5] = 1: no JT state change, the script's m734 sets the seated state)
+    for &(a, b) in &placed {
+        if w.objects.get(a).is_some_and(|o| o.class == 53) && std::env::var_os("SLY2_NO_R108_SLYSEAT").is_none() && eh.k22_teleports.len() < 64 {
+            // CRAWL R113: FUN_002052e0 places the PO at locator xf * -(+0x240) (Sly +0x240 = (0,0,-75): cap_table_seated
+            // 000 Sly (-2332.4,-3148.9,546.6) = seat 27331 (z 471.6) + 75; the port stopped at 502). Tag 0x100 = that
+            // offset (player::plugin drain). SLY2_NO_R113_SEAT240=1 = old (locator pos).
+            let tag = if std::env::var_os("SLY2_NO_R113_SEAT240").is_none() { 0x101 } else { 1 };
+            eh.k22_teleports.push((a as u32 + 1, b as u32 + 1, tag));
+        }
+    }
+    info!("R107 slot-37 moves {placed:?} -> po moved {moved:?}");
+    if std::env::var_os("R107DBG").is_some() {
+        eprintln!("R107 slot-37 moves {mv:x?} {placed:?} -> po moved {moved:?}");
+    }
 }
 
 /// WP-EP1b: `UNIMPL <n> rec <n> err <n>` + the top distinct messages / recorded callees.
@@ -606,6 +679,15 @@ pub fn screenshot_driver(mut req: ResMut<ScreenshotRequest>, g: Res<LevelGame>, 
 
 /// Gives the class runtime lent to the scripts (`vm_state::Schedule::cls`) back to `Classes` before
 /// `classes::plugin::tick_classes` (which rebuilds / ticks it).
+/// WIRE-EP8 (POOL1): between frames the set stays lent (`SpliceState::sched.cls.set`, contract of
+/// wired_qmem); readers outside the script window use [`lent_class_set`].
+pub fn lent_class_set<'a>(c: &'a mut crate::engine::classes::plugin::Classes, st: Option<&'a mut super::vm_state::SpliceState>) -> &'a mut crate::engine::classes::ClassSet {
+    match st.and_then(|s| s.sched.cls.set.as_mut()) {
+        Some(s) => s,
+        None => &mut c.set,
+    }
+}
+
 pub fn return_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: Option<NonSendMut<super::vm_state::SpliceState>>, pad: Option<Res<PadInput>>) {
     let Some(mut st) = st else { return };
     let l = &mut st.sched.cls;
@@ -619,19 +701,60 @@ pub fn return_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st
 
 /// Lends the class runtime to the scripts after `tick_classes`: the script tick (FUN_00226550 ->
 /// FUN_00149c80) runs method rows / deferred nodes on the live class instances.
-pub fn lend_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: Option<NonSendMut<super::vm_state::SpliceState>>, mut jobs: Option<ResMut<crate::engine::player::plugin::PlayerJobs>>) {
-    let Some(mut st) = st else { return };
+pub fn lend_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: Option<NonSendMut<super::vm_state::SpliceState>>, mut jobs: Option<ResMut<crate::engine::player::plugin::PlayerJobs>>, lg: Option<Res<LevelGame>>, w: Option<Res<World>>, js: Option<ResMut<GameJobSlots>>) {
+    let Some(mut st) = st else {
+        // FEEL R34: no script state: the run-time overlay stays the class host's in-world state
+        c.host.rt_queue.clear();
+        return;
+    };
     // WP-J15: methods 1258 / 1284 of the last script tick
     if let Some(j) = jobs.as_mut() {
         // WP-K28: job-manager calls of the class tick (the class runtime is in `Classes` until lent below)
         let q = std::mem::take(&mut c.host.k28_task_calls);
         st.sched.cls.host.k28_task_calls.extend(q);
         super::vm_state::apply_job_calls(&mut st.sched, &mut j.0);
+        // CRAWL R26: task states for the class code (FUN_001f1cf8)
+        c.host.task_states = st.sched.cls.host.task_states.clone();
+    }
+    // FEEL R34: the class code's run-time Add / Remove (pool / spawner copies) into the scripts' object state
+    // ANIM R44: only once this world's level scripts ran (as the job toggles below / FEEL R36): the original
+    // evaluates them inside the world load, before any class update; the port's `enter_level` resets the object
+    // state, which dropped the first frames' spawner Adds (EP2 row 8 class-119 copy 983 stayed out of the world).
+    // Until then the queue and the host's run-time overlay are held.
+    let rt_ready = lg.as_ref().is_none_or(|g| st.level == Some(g.loads));
+    if let Some(w) = c.host.world.clone().filter(|_| rt_ready) {
+        for (o, on) in std::mem::take(&mut c.host.rt_queue) {
+            st.sched.objs.set_in_world_lo(&w, o, on);
+        }
+    }
+    // CRAWL R54: the 0x1620b0 job / task state toggles (task field 1287, e.g. row 7 task 1880 -> 2 removes group
+    // 124103 with its Murray barrier 124996) call the objects' vtable +0x44 / +0x4c at once in the original; they
+    // were only applied by the level load (`job_level_loaded`)
+    // FEEL R36: and only once this world's level scripts ran: the original evaluates them inside the world load,
+    // before 0x161a58 case 5; the port's `enter_level` resets the object state (`job_level_loaded` holds them)
+    if let (Some(j), Some(w), Some(mut js)) = (jobs.as_ref(), w.as_ref(), js) {
+        if lg.as_ref().is_none_or(|g| st.level == Some(g.loads)) {
+            super::job_flow::apply_toggles(&j.0, &mut st.sched.objs, w, &mut js.toggle_seen);
+            // CRAWL R118: and the 0x162250 task / job cue records (SMA goals, e.g. the cellar slab 136544)
+            if let Some(aw) = c.host.world.clone() {
+                super::job_flow::apply_anims(&j.0, &mut c.host.k25, &aw, &mut js.anim_seen);
+            }
+        }
+    }
+    // FEEL R32: LO +0x28 bit 60 changes of the scripts / job toggles reach the class host (updates, collision)
+    c.host.sync_in_world(&st.sched.objs);
+    if rt_ready {
+        c.host.rt_overlay.clear();
     }
     // WP-J9: read-only job manager view for BIF 100 / 101 / 102
     st.sched.jobs = jobs.as_ref().map(|j| super::vm_state::JobView::of(&j.0)).unwrap_or_default();
     // WP-J10: script messages of the job code since the last frame
-    if let Some(j) = &jobs {
+    // WIRE-JOB: the original evaluates the level scripts inside the world load (FUN_001ff858), before
+    // FUN_00161a58 case 5 enters the job / task (msg 0x13); the port's `level_scripts` system may run after
+    // this one, and its `enter_level` drops pending messages: hold the job messages (they stay in
+    // `JobMgr::calls` / `task_msgs`) until the scripts of the current world ran.
+    let scripts_ready = lg.as_ref().is_none_or(|g| st.level == Some(g.loads));
+    if let Some(j) = jobs.as_ref().filter(|_| scripts_ready) {
         super::vm_state::job_messages(&mut st.sched, &j.0);
     }
     let l = &mut st.sched.cls;
@@ -646,11 +769,13 @@ pub fn lend_classes(mut c: ResMut<crate::engine::classes::plugin::Classes>, st: 
 /// Read-only: an ALO entity whose object the scripts removed (LO Remove / vtable +0x4c, J6
 /// `ObjectFields::vis`) is hidden; shown again (Inherited) when a script adds it back. Only entities this
 /// system hid are touched, so other visibility owners (playerdraw JT subtree) keep theirs.
-pub fn apply_script_vis(st: Option<NonSend<super::vm_state::SpliceState>>, mut q: Query<(Entity, &crate::engine::gfx::game::AloObject, &mut Visibility)>, mut hid: Local<HashSet<Entity>>) {
+/// FEEL R32: also an object out of the world (LO +0x28 bit 60 clear, `fields::lo_in_world`: e.g. a job
+/// toggle Remove 0x1620b0 or the load-time field-26 Remove): the draw pass walks the world's object lists.
+pub fn apply_script_vis(st: Option<NonSend<super::vm_state::SpliceState>>, w: Option<Res<World>>, mut q: Query<(Entity, &crate::engine::gfx::game::AloObject, &mut Visibility)>, mut hid: Local<HashSet<Entity>>) {
     let Some(st) = st else { return };
     let vis = &st.sched.objs.vis;
     for (e, o, mut v) in &mut q {
-        let off = !vis.drawn(o.0);
+        let off = !vis.drawn(o.0) || w.as_ref().is_some_and(|w| !super::fields::lo_in_world(Some(&st.sched.objs), w, o.0));
         if off && hid.insert(e) {
             *v = Visibility::Hidden;
         } else if !off && hid.remove(&e) {
@@ -689,6 +814,8 @@ pub fn apply_script_record_vis(st: Option<NonSend<super::vm_state::SpliceState>>
 pub struct GameJobSlots {
     pub slots: super::job_flow::JobSlots,
     pub toggle_seen: usize,
+    /// CRAWL R118: how many `JobMgr::anims` reached the class SMAs
+    pub anim_seen: usize,
 }
 
 /// WP-J13: 0x00161a58 case 5 on the level's new `PlayerJobs` (FUN_0020e890 after the load): task
@@ -725,7 +852,9 @@ pub fn job_level_loaded(w: Option<Res<World>>, mut jobs: ResMut<crate::engine::p
         }
     }
     js.toggle_seen = 0;
-    if let Some(mut st) = st {
+    js.anim_seen = 0;
+    // FEEL R36: only once this world's level scripts ran (else `lend_classes` applies them after)
+    if let Some(mut st) = st.filter(|st| lg.as_ref().is_none_or(|g| st.level == Some(g.loads))) {
         super::job_flow::apply_toggles(&jobs.0, &mut st.sched.objs, &w, &mut js.toggle_seen);
     }
 }
@@ -736,9 +865,9 @@ pub struct ScriptClassesPlugin;
 impl Plugin for ScriptClassesPlugin {
     fn build(&self, app: &mut App) {
         use crate::engine::classes::plugin::tick_classes;
-        app.add_systems(Update, (return_classes.before(tick_classes), lend_classes.after(tick_classes), apply_script_vis, apply_script_record_vis));
+        app.add_systems(Update, (return_classes.before(tick_classes), lend_classes.after(tick_classes), super::music_link::apply_music_link.after(lend_classes), apply_script_vis, apply_script_record_vis));
         // WP-J13: job manager level-load path between the job load and the script lending
         app.init_resource::<GameJobSlots>();
-        app.add_systems(Update, job_level_loaded.after(crate::engine::player::plugin::load_player_world).before(lend_classes));
+        app.add_systems(Update, job_level_loaded.after(crate::engine::player::plugin::load_player_world).before(tick_classes).before(lend_classes));
     }
 }

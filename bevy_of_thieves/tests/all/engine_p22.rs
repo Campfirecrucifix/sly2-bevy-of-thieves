@@ -23,8 +23,8 @@ fn tables() -> (LevelLoader, Vec<sly2_recomp::engine::disc::descriptor::Descript
 /// FUN_0020bb58: weights {1-u, u}, +0x190 = -(sum w_i v_i len_i / blend length); entry 1 absent: entry 0 only.
 #[test]
 fn p22_bb58_blend() {
-    let e0 = LocoEntry { v: [100.0, 0.0, 0.0], len: 1.0 };
-    let e1 = LocoEntry { v: [300.0, 0.0, 0.0], len: 1.0 };
+    let e0 = LocoEntry { v: [100.0, 0.0, 0.0], len: 1.0, rate: 1.0 };
+    let e1 = LocoEntry { v: [300.0, 0.0, 0.0], len: 1.0, rate: 1.0 };
     let v = ee_sub_20bb58(&[Some(e0), Some(e1)], 0.5, 1.0);
     assert!((v[0] + 200.0).abs() < 1e-3, "{v:?}");
     let v = ee_sub_20bb58(&[Some(e0), Some(e1)], 1.0, 1.0);
@@ -51,6 +51,7 @@ fn p22_204108_forces() {
         f_1a4: 0,
         w_1e0: [0.0; 3],
         mv: [10.0, 0.0, 0.25, 1.0],
+        jump: true,
     };
     let dt = 1.0 / 60.0;
     let a = ee_sub_204108(&jt.phys, &m, true, dt);

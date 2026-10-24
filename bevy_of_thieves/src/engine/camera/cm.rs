@@ -498,19 +498,22 @@ pub fn FUN_0014e768(cm: &mut Cm, jt_state: Option<i32>, clk: CmClock) {
     let target = FUN_0014e698(&cm.cpdefi);
     let cut = cm.cut;
     let dt = clk.dt;
+    // FEEL R25: the +0x2e0 spring call passes no FUN_0014e698 target (Ghidra drops arg 6): it springs to 0 --
+    // every rec5 EE state has cm +0x2e0 / +0x2f0 = 0 while +0x2c0 = the 100-unit adjust. A/B SLY2_FEEL_ADJ1OLD=1.
+    let t1 = if std::env::var_os("SLY2_FEEL_ADJ1OLD").is_some() { target } else { [0.0; 3] };
     let (mut p0, mut v0, mut p1, mut v1) = (cm.pos_adjust0, cm.v_adjust0, cm.pos_adjust1, cm.v_adjust1);
     match jt_state {
         None => {
             FUN_0014e6d0(cut, 5.0, -3.5, &mut p0, &mut v0, target, dt);
-            FUN_0014e6d0(cut, 5.0, -3.5, &mut p1, &mut v1, target, dt);
+            FUN_0014e6d0(cut, 5.0, -3.5, &mut p1, &mut v1, t1, dt);
         }
         Some(0) => {
             FUN_0014e6d0(cut, 5.0, -3.5, &mut p0, &mut v0, target, dt);
-            FUN_0014e6d0(cut, 5.0, -3.5, &mut p1, &mut v1, target, dt);
+            FUN_0014e6d0(cut, 5.0, -3.5, &mut p1, &mut v1, t1, dt);
         }
         Some(1) => {
             FUN_0014e6d0(cut, 1.0, -10.0, &mut p0, &mut v0, target, dt);
-            FUN_0014e6d0(cut, 0.0, -10.0, &mut p1, &mut v1, target, dt);
+            FUN_0014e6d0(cut, 0.0, -10.0, &mut p1, &mut v1, t1, dt);
         }
         Some(2) => FUN_0014e6d0(cut, 5.0, -3.5, &mut p0, &mut v0, target, dt),
         Some(_) => {}

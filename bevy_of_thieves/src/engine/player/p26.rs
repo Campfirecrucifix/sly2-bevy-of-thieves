@@ -312,3 +312,195 @@ pub fn ee_sub_21fb70(m: &mut Mem, off: u32, smooth: bool, cx: &CarryCx, h: &mut 
     m.set_f(w(0x2c), elev);
     pts
 }
+
+/// What one FUN_0021f418 pass asks of its owner (class side).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ev21f418 {
+    /// FUN_002206c8(machine, s)
+    Set(i32),
+    /// owner vt +0x2c0(0): the owner's SetState(0)
+    OwnerIdle,
+    /// +0x12c listener vt +0x48
+    Listener(u32),
+}
+
+/// 0x0021f418 FUN_0021f418(machine) state switch, class side (q_part2::ee_sub_21f418 is the QMem twin).
+/// `busy` = the owner's +0x1030 anim slot still runs (FUN_00131968 == 0); `press(mask)` = FUN_001c46c0(owner
+/// +0x150, mask, 0.1). 0: yaw offset to the target past +/-[5] -> 2 / 1, else the blend weights [0x10] / [0x13]
+/// (FUN_001384c0 on [0x16] is the anim layer's). 1 / 2: done -> 0. 3: done -> 4 when `b13d0` (DAT_002dd5bc
+/// Bentley +0x13d0) == 8, else 0. 4..6: carried is-a 100 with +0x158 != -1 -> owner idle; 0xc0 -> 7; 0x30 ->
+/// 0 (anim [0x16]) or owner idle, then the listener (the Sly-thrown branch is the JT's); running in 4 -> the
+/// aim yaw past +/-[6] -> 6 / 5; done -> 4. 7: done -> 0 / owner idle.
+/// REPLACED: the original re-runs the switch while FUN_002206c8 changes the state within one call; here each
+/// request is applied by the frame's carry queue (player::p23::apply_switches) and the next pass sees it.
+pub fn ee_sub_21f418(m: &mut Mem, off: u32, owner: u32, busy: bool, b13d0: i32, h: &mut dyn ClassHost, press: &mut dyn FnMut(u32) -> bool) -> Vec<Ev21f418> {
+    let w = |k: u32| off + 4 * k;
+    let st = m.i(w(1));
+    let pos = h.ee_sub_1a62e8(owner);
+    let yaw = m.f(0x1a8);
+    let rel = |d: [f32; 3]| {
+        let mut a = d[1].atan2(d[0]) - yaw;
+        while a > std::f32::consts::PI { a -= 2.0 * std::f32::consts::PI; }
+        while a < -std::f32::consts::PI { a += 2.0 * std::f32::consts::PI; }
+        a
+    };
+    let mut out = vec![];
+    match st {
+        0 => {
+            let tp = h.ee_sub_1a62e8(m.u(w(4)));
+            let a = rel([tp[0] - pos[0], tp[1] - pos[1], 0.0]);
+            let lim = m.f(w(5));
+            if lim < a {
+                out.push(Ev21f418::Set(2));
+            } else if a < -lim {
+                out.push(Ev21f418::Set(1));
+            } else {
+                let t = a / lim * 0.5 + 0.5;
+                m.set_f(w(0x13), t);
+                m.set_f(w(0x10), 1.0 - t);
+            }
+        }
+        1 | 2 => {
+            if !busy {
+                out.push(Ev21f418::Set(0));
+            }
+        }
+        3 => {
+            // TAKEN BY HEIST: FUN_0021f418 case 3 reads DAT_002dd5bc +0x13d0 (Bentley's state): 8 (mounted on
+            // Murray) -> LAB_0021f95c SetState 4 (aim), else LAB_0021fa20 SetState 0
+            if !busy {
+                out.push(Ev21f418::Set(if b13d0 == 8 { 4 } else { 0 }));
+            }
+        }
+        4..=6 => {
+            let t = m.u(w(4));
+            if h.ee_sub_132b10(t, 100) != 0 && h.obj_i32(t, 0x158) != -1 {
+                out.push(Ev21f418::OwnerIdle);
+            } else if press(0xc0) {
+                out.push(Ev21f418::Set(7));
+            } else if press(0x30) {
+                out.push(if m.u(w(0x16)) != 0 { Ev21f418::Set(0) } else { Ev21f418::OwnerIdle });
+                let l = m.u(off + 0x12c);
+                if l != 0 {
+                    out.push(Ev21f418::Listener(l));
+                }
+            } else if busy {
+                if st == 4 {
+                    let a = rel({ let e = m.v3(off + 0xe0); [e[0] - pos[0], e[1] - pos[1], 0.0] });
+                    let lim = m.f(w(6));
+                    if lim < a {
+                        out.push(Ev21f418::Set(6));
+                    } else if a < -lim {
+                        out.push(Ev21f418::Set(5));
+                    }
+                }
+            } else {
+                out.push(Ev21f418::Set(4));
+            }
+        }
+        7 => {
+            if !busy {
+                out.push(if m.u(w(0x16)) != 0 { Ev21f418::Set(0) } else { Ev21f418::OwnerIdle });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// DAT_002c40e0: FUN_0021f418 aim range scale with bif 138(0x24).
+pub const DAT_002C40E0: f32 = 1.5;
+
+/// TAKEN BY HEIST: the FUN_0021f418 prelude of states 4..6 (aim point +0xe0, before the state switch).
+/// [0x4a] == 0: d = horizontal (+0xe0 - owner) + FUN_0011e1a0(joy angle (+0x150 +0x18), joy mag (+0x1c) *
+/// dt * [10]); FUN_0011ef08(d) radius clamped to [[7], [8]] ([8] x 1.5 with bif 138(0x24)); +0xe0 = owner +
+/// FUN_0011e1a0(angle, radius) (z = owner z). Else the FUN_00220508 tween: t past [0x48] + [0x49] -> [0x4a] = 0,
+/// +0xe0 = +0x110 (the end point); otherwise +0xe0 = lerp(+0x100, +0x110, (t - [0x48]) / [0x49]).
+/// Returns true when the caller then runs FUN_0021fb70(machine, 1) (states 4..6).
+pub fn ee_sub_21f418_aim(m: &mut Mem, off: u32, pos: [f32; 3], joy_angle: f32, joy_mag: f32, t: f32, dt: f32, bif138: bool) -> bool {
+    use crate::engine::camera::math::{FUN_0011e1a0, FUN_0011ef08};
+    let w = |k: u32| off + 4 * k;
+    let st = m.i(w(1));
+    if !(4..7).contains(&st) {
+        return false;
+    }
+    if m.i(w(0x4a)) == 0 {
+        let lo = m.f(w(7));
+        let hi = if bif138 { m.f(w(8)) * DAT_002C40E0 } else { m.f(w(8)) };
+        let e = m.v3(off + 0xe0);
+        let d = [e[0] - pos[0], e[1] - pos[1], 0.0];
+        let v = FUN_0011e1a0(joy_angle, joy_mag * dt * m.f(w(10)), 0.0);
+        let (a, r, _) = FUN_0011ef08([d[0] + v[0], d[1] + v[1], d[2] + v[2]]);
+        let r = r.max(lo).min(hi);
+        let q = FUN_0011e1a0(a, r, 0.0);
+        m.set_v3(off + 0xe0, [pos[0] + q[0], pos[1] + q[1], pos[2] + q[2]]);
+    } else {
+        let t0 = m.f(w(0x48));
+        let t1 = t0 + m.f(w(0x49));
+        if t1 <= t {
+            m.set_u(w(0x4a), 0);
+            for k in 0..4 {
+                m.set_u(off + 0xe0 + 4 * k, m.u(off + 0x110 + 4 * k));
+            }
+        } else {
+            let u = (t - t0) / (t1 - t0);
+            let (a, b) = (m.v3(off + 0x100), m.v3(off + 0x110));
+            m.set_v3(off + 0xe0, [0, 1, 2].map(|k| a[k] * (1.0 - u) + b[k] * u));
+        }
+    }
+    true
+}
+
+/// 0x002205a8 FUN_002205a8(machine): release the carried [4]. Bentley carried ([4] == DAT_002dd5bc): only
+/// when his +0x13d0 == 8 (FUN_00136530 is his class's, skipped here: Bentley is not carried class side);
+/// else FUN_001a58d0([4], 0, 3), FUN_001f5720([4], 0) (FUN_001f57c0 is the same SO flag pair). Then [4]
+/// vt +0x124 = FUN_001a6fc0(owner, [0xc] local velocity) in the world; is-a 100 -> vt +0x264(1) (flying).
+/// The +0x12c listener vt +0x4c. REPLACED: pool copies ride their spawner through FUN_001cb488's record,
+/// so the detach also clears it (FUN_001cb4b8); vt +0x118 (the carried's release hook) is the class's.
+pub fn ee_sub_2205a8(m: &Mem, off: u32, owner: u32, bentley: u32, b13d0: i32, h: &mut dyn ClassHost) {
+    let t = m.u(off + 0x10);
+    if t != 0 && t == bentley {
+        // TAKEN BY HEIST: [4] == DAT_002dd5bc: +0x13d0 != 8 -> only the listener; else FUN_00136530(b, 1)
+        // (queued, run by the class set on its Bentley), vt +0x11c, vt +0x124 = [0xc] local velocity in the world
+        if b13d0 == 8 {
+            h.ee_sub_136530(t as usize - 1, 1);
+            // UNVERIFIED (asm check pending): the decomp passes [0xc] (+0x30) to vt +0x124, but EMU5 241 (carry 7)
+            // has +0x30 = (0,0,25) constant while +0xf0 holds the FUN_0021fb70 launch velocity (887,510,1638) and
+            // Bentley lands on the aimed ledge; the thrown Bentley takes +0xf0 (world) when it is set
+            let f0 = m.v3(off + 0xf0);
+            if f0 != [0.0; 3] {
+                h.so_set_v_124(t, f0);
+            } else {
+                let o = owner as usize - 1;
+                let (a, b) = (h.ee_sub_1a6f00_to_world(o, m.v3(off + 0x30)), h.ee_sub_1a6f00_to_world(o, [0.0; 3]));
+                h.so_set_v_124(t, [a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
+            }
+        }
+    } else if t != 0 {
+        h.ee_sub_1a58d0(t as usize - 1, 0, 3);
+        h.ee_sub_1f5720(t as usize - 1, 0);
+        h.ee_sub_1cb4b8(0, t);
+        let o = owner as usize - 1;
+        let (a, b) = (h.ee_sub_1a6f00_to_world(o, m.v3(off + 0x30)), h.ee_sub_1a6f00_to_world(o, [0.0; 3]));
+        h.so_set_v_124(t, [a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
+        if h.ee_sub_132b10(t, 100) != 0 {
+            h.vcall_arg(t, 0x264, 1);
+        }
+    }
+    let l = m.u(off + 0x12c);
+    if l != 0 {
+        h.vcall(l, 0x4c);
+    }
+}
+
+/// FUN_0021f388(machine): three FUN_00137a30 blends over the machine's ASEG entry tables
+/// (n 2 at +0x40 -> +0x58, n 4 at +0x68 -> +0x98, n 2 at +0xa4 -> +0xbc; entry stride 0xc, ASEG at entry +4).
+/// REPLACED: FUN_00137a30 builds a class-0x6e blend object over the entries; class side the output slot gets
+/// the first non-zero ASEG (FUN_00137a30's own first-entry pick `iStack_b0`), 0 when the table is empty
+/// (as the original's `*param_8 = 0`).
+pub fn ee_sub_21f388_k(m: &mut Mem, off: u32) {
+    for (ents, n, out) in [(0x40u32, 2u32, 0x58u32), (0x68, 4, 0x98), (0xa4, 2, 0xbc)] {
+        let first = (0..n).map(|i| m.u(off + ents + i * 0xc + 4)).find(|&a| a != 0).unwrap_or(0);
+        m.set_u(off + out, first);
+    }
+}
